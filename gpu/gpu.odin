@@ -5,7 +5,7 @@ import "core:slice"
 
 import sdl "vendor:sdl3"
 
-// This API follow ZII (Zero Is Initialization) principles. Initializing to 0
+// This API follows ZII (Zero Is Initialization) principles. Initializing to 0
 // will yield predictable and reasonable behavior in general.
 
 // Handles
@@ -48,11 +48,12 @@ Texture_View_Desc :: struct
 
 // Initialization. This is simpler than it would actually be, for brevity.
 init: proc(window: ^sdl.Window) : _init
+cleanup: proc() : _cleanup
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr : _mem_alloc
-mem_free: proc(ptr: rawptr) : _mem_free
-host_to_device_ptr: proc(ptr: rawptr) : _host_to_device_ptr
+mem_free: proc(ptr: rawptr, loc := #caller_location) : _mem_free
+host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr
 
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
@@ -86,25 +87,78 @@ cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, p
                                  indices: rawptr, index_count: u32, instance_count: u32) : _cmd_draw_indexed_instanced
 
 // Userland Utilities
+
 mem_alloc_typed :: proc($T: typeid, count: u64) -> []T
 {
     ptr := mem_alloc(size_of(T) * count, align_of(T))
     return slice.from_ptr(cast(^T) ptr, int(count))
 }
 
-mem_free_typed :: proc(mem: []$T)
-{
-    mem_free(raw_data(mem))
-}
-
-@(deferred_out = _cmd_buf_scope_end)
-cmd_buf_scope :: proc()
-{
-
-}
-
+// Avoid -vet warnings about unused "slice" package
 @(private="file")
-_cmd_buf_scope_end :: proc()
-{
+_fictitious :: proc() { mem_alloc_typed(u32, 0) }
 
+mem_free_typed :: proc(mem: []$T, loc := #caller_location)
+{
+    mem_free(raw_data(mem), loc = loc)
+}
+
+Arena :: struct
+{
+    cpu: rawptr,
+    gpu: rawptr,
+    offset: u64,
+    size: u64,
+}
+
+Temp_Allocation :: struct($T: typeid)
+{
+    cpu: ^T,
+    gpu: ^T,
+}
+
+arena_create :: proc(using arena: ^Arena, storage: u64) -> Arena
+{
+    res: Arena
+    res.size = storage
+    res.cpu = mem_alloc(storage)
+    res.gpu = host_to_device_ptr(cpu)
+    return res
+}
+
+arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> Temp_Allocation(u8)
+{
+    offset = u64(align_up(offset, align))
+    if offset + bytes > size do offset = 0  // No overflow detection
+
+    alloc := Temp_Allocation(u8) {
+        cpu = auto_cast(uintptr(cpu) + uintptr(offset)),
+        gpu = auto_cast(uintptr(gpu) + uintptr(offset))
+    }
+    offset += bytes
+
+    return alloc
+
+    align_up :: proc(x, align: u64) -> (aligned: u64) {
+        assert(0 == (align & (align - 1)), "must align to a power of two")
+        return (x + (align - 1)) &~ (align - 1)
+    }
+}
+
+arena_alloc :: proc(using arena: ^Arena, $T: typeid, count: u32) -> Temp_Allocation(T)
+{
+    alloc := arena_alloc_untyped(arena, size_of(T) * count, align_of(T))
+    return {
+        cpu = auto_cast alloc.cpu,
+        gpu = auto_cast alloc.gpu
+    }
+}
+
+arena_free_all :: proc(using arena: ^Arena)
+{
+    offset = 0
+    size = 0
+    mem_free(cpu)
+    cpu = nil
+    gpu = nil
 }

@@ -3,7 +3,7 @@ package main
 
 import log "core:log"
 import "core:c"
-import "core:fmt"
+// import "core:fmt"
 
 import "gpu"
 
@@ -37,21 +37,30 @@ main :: proc()
 
     gpu.init(window)
 
+    verts_local := gpu.mem_alloc_typed(u8, 1024)
+    gpu.mem_free_typed(verts_local)
+    gpu.mem_free_typed(verts_local)
+
+    /*
+    for _ in 1..=1024
     {
-        verts_local := gpu.mem_alloc_typed(u32, 1024)
+        verts_local := gpu.mem_alloc_typed(u8, 1024)
         fmt.println(verts_local[0])
         gpu.mem_free_typed(verts_local)
     }
+    for _ in 1..=1024
     {
         verts_local := gpu.mem_alloc(1024, mem_type = .GPU)
         //fmt.println((cast(^u32) verts_local)^)
         gpu.mem_free(verts_local)
     }
+    for _ in 1..=1024
     {
         verts_local := gpu.mem_alloc(1024, mem_type = .Readback)
         fmt.println((cast(^u32) verts_local)^)
         gpu.mem_free(verts_local)
     }
+    */
 
     // gpu.cmd
 }

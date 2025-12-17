@@ -270,6 +270,11 @@ _init :: proc(window: ^sdl.Window)
     vk.GetDeviceQueue(ctx.device, queue_family_idx, 0, &ctx.queue)
 }
 
+_cleanup :: proc()
+{
+
+}
+
 _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr
 {
     to_alloc := bytes + align - 1  // Allocate extra for alignment
@@ -293,7 +298,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
 
     mem_requirements: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(ctx.device, buffer, &mem_requirements)
-    assert(mem_requirements.size == vk.DeviceSize(to_alloc))
+    assert(mem_requirements.size >= vk.DeviceSize(to_alloc))
 
     next: rawptr
     next = &vk.MemoryAllocateFlagsInfo {
@@ -304,7 +309,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
     memory_ai := vk.MemoryAllocateInfo {
         sType = .MEMORY_ALLOCATE_INFO,
         pNext = next,
-        allocationSize = vk.DeviceSize(to_alloc),
+        allocationSize = mem_requirements.size,
         memoryTypeIndex = find_mem_type(ctx.phys_device, mem_requirements.memoryTypeBits, properties)
     }
     mem: vk.DeviceMemory
@@ -336,12 +341,12 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
     }
 }
 
-_mem_free :: proc(ptr: rawptr)
+_mem_free :: proc(ptr: rawptr, loc := #caller_location)
 {
     meta, found := ctx.alloc_meta[ptr]
     if !found
     {
-        log.error("Freeing pointer which hasn't been allocated (or has already been freed).")
+        log.error("Attempting to free a pointer which hasn't been allocated (or has already been freed).", location = loc)
         return
     }
 
@@ -351,7 +356,7 @@ _mem_free :: proc(ptr: rawptr)
     vk.DestroyBuffer(ctx.device, meta.buf_handle, nil)
 }
 
-_host_to_device_ptr :: proc(ptr: rawptr) {}
+_host_to_device_ptr :: proc(ptr: rawptr) -> rawptr { return {} }
 
 // Textures
 _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64) { return {}, {} }
