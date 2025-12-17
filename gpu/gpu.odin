@@ -1,7 +1,9 @@
 
 package gpu
 
-import "impl"
+import "core:slice"
+
+import sdl "vendor:sdl3"
 
 // This API follow ZII (Zero Is Initialization) principles. Initializing to 0
 // will yield predictable and reasonable behavior in general.
@@ -45,40 +47,64 @@ Texture_View_Desc :: struct
 }
 
 // Initialization. This is simpler than it would actually be, for brevity.
-init: proc(window: ^sdl.Window) : impl.init
+init: proc(window: ^sdl.Window) : _init
 
 // Memory
-malloc :: proc(bytes: u64, align: u64 = 1, mem := Memory.Default) -> rawptr { return {} }
-free :: proc(ptr: rawptr) {}
-host_to_device_ptr :: proc(ptr: rawptr) {}
+mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr : _mem_alloc
+mem_free: proc(ptr: rawptr) : _mem_free
+host_to_device_ptr: proc(ptr: rawptr) : _host_to_device_ptr
 
 // Textures
-texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64) { return 0, 0 }
-texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 { return {} }
-texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 { return {} }
+texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
+texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 : _texture_view_descriptor
+texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 : _texture_rw_view_descriptor
 
 // Semaphores
-sem_create :: proc(init_value: u64) -> Semaphore { return {} }
+sem_create: proc(init_value: u64) -> Semaphore : _sem_create
 
 // Commands
-cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr)
-cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
+cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr) : _cmd_mem_copy
+cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-cmd_set_active_texture_heap_ptr :: proc(cmd_buf: Command_Buffer, ptr: rawptr)
+cmd_set_active_texture_heap_ptr: proc(cmd_buf: Command_Buffer, ptr: rawptr) : _cmd_set_active_texture_heap_ptr
 
-cmd_barrier :: proc() {}
-cmd_signal_after :: proc() {}
-cmd_wait_before :: proc() {}
+cmd_barrier: proc() : _cmd_barrier
+cmd_signal_after: proc() : _cmd_signal_after
+cmd_wait_before: proc() : _cmd_wait_before
 
-cmd_set_pipeline :: proc() {}
-cmd_set_depth_stencil_state :: proc() {}
-cmd_set_blend_state :: proc() {}
+cmd_set_pipeline: proc() : _cmd_set_pipeline
+cmd_set_depth_stencil_state: proc() : _cmd_set_depth_stencil_state
+cmd_set_blend_state: proc() : _cmd_set_blend_state
 
-cmd_dispatch :: proc() {}
-cmd_dispatch_indirect :: proc() {}
+cmd_dispatch: proc() : _cmd_dispatch
+cmd_dispatch_indirect: proc() : _cmd_dispatch_indirect
 
-cmd_begin_render_pass :: proc() {}
-cmd_end_render_pass :: proc() {}
+cmd_begin_render_pass: proc() : _cmd_begin_render_pass
+cmd_end_render_pass: proc() : _cmd_end_render_pass
 
-cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, pixel_data: rawptr,
-                                   indices: rawptr, index_count: u32, instance_count: u32) {}
+cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, pixel_data: rawptr,
+                                 indices: rawptr, index_count: u32, instance_count: u32) : _cmd_draw_indexed_instanced
+
+// Userland Utilities
+mem_alloc_typed :: proc($T: typeid, count: u64) -> []T
+{
+    ptr := mem_alloc(size_of(T) * count, align_of(T))
+    return slice.from_ptr(cast(^T) ptr, int(count))
+}
+
+mem_free_typed :: proc(mem: []$T)
+{
+    mem_free(raw_data(mem))
+}
+
+@(deferred_out = _cmd_buf_scope_end)
+cmd_buf_scope :: proc()
+{
+
+}
+
+@(private="file")
+_cmd_buf_scope_end :: proc()
+{
+
+}
