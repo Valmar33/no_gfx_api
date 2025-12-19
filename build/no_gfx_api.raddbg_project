@@ -2,6 +2,7 @@
 
 recent_file: path: "../main.odin"
 recent_file: path: "../../../Users/leona/Desktop/Odin/base/runtime/core.odin"
+recent_file: path: "../../../SDKBuild/build-X64-1.4.328.1/Vulkan-ValidationLayers/layers/state_tracker/state_tracker.cpp"
 recent_file: path: "../../../Users/leona/Desktop/Odin/base/runtime/entry_windows.odin"
 recent_file: path: "../gpu/gpu.odin"
 recent_file: path: "../gpu/gpu_vulkan.odin"
@@ -18,10 +19,15 @@ target:
 debug_info:
 {
   path: "C:/work/no_gfx_api/build/test.pdb"
-  timestamp: 66201546945031
+  timestamp: 66201565536586
 }
 debug_info:
 {
   path: "C:/VulkanSDK/1.4.328.1/Bin/VkLayer_khronos_validation.pdb"
   timestamp: 66195149097198
+}
+breakpoint:
+{
+  source_location: "../main.odin:82:1"
+  hit_count: 0
 }

@@ -7,6 +7,7 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
+import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -349,14 +350,68 @@ _swapchain_acquire_next :: proc() -> vk.ImageView
 
 _swapchain_get :: proc(idx: u32) -> vk.ImageView
 {
-    return {}
+    fence_ci := vk.FenceCreateInfo {
+        sType = .FENCE_CREATE_INFO,
+        flags = { },
+    }
+    fence: vk.Fence
+    vk_check(vk.CreateFence(ctx.device, &fence_ci, nil, &fence))
+    defer vk.DestroyFence(ctx.device, fence, nil)
+
+    vk_check(vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx))
+
+    vk_check(vk.WaitForFences(ctx.device, 1, &fence, true, max(u64)))
+
+    return ctx.swapchain.image_views[ctx.swapchain_image_idx]
 }
 
 _swapchain_present :: proc(sem_wait: Semaphore, wait_value: u64)
 {
+    vk_sem_wait := transmute(vk.Semaphore) sem_wait
+
+    present_semaphore := ctx.swapchain.present_semaphores[ctx.swapchain_image_idx]
+
+    fmt.println(ctx.swapchain_image_idx)
+
+    // NOTE: Workaround for the fact that swapchain presentation
+    // only supports binary semaphores.
+    // wait on sem_wait on wait_value and signal ctx.binary_sem
+    {
+        queue := ctx.queue
+
+        wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+        next: rawptr
+        next = &vk.TimelineSemaphoreSubmitInfo {
+            sType = .TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            pNext = next,
+            waitSemaphoreValueCount = 1,
+            pWaitSemaphoreValues = raw_data([]u64 {
+                wait_value
+            })
+        }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pNext = next,
+            waitSemaphoreCount = 1,
+            pWaitSemaphores = raw_data([]vk.Semaphore {
+                vk_sem_wait,
+            }),
+            pWaitDstStageMask = raw_data([]vk.PipelineStageFlags {
+                wait_stage_flags,
+            }),
+            signalSemaphoreCount = 1,
+            pSignalSemaphores = raw_data([]vk.Semaphore {
+                present_semaphore
+            }),
+        }
+        vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    }
+
     vk_check(vk.QueuePresentKHR(ctx.queue, &{
         sType = .PRESENT_INFO_KHR,
         swapchainCount = 1,
+        waitSemaphoreCount = 1,
+        pWaitSemaphores = &present_semaphore,
         pSwapchains = &ctx.swapchain.handle,
         pImageIndices = &ctx.swapchain_image_idx,
     }))
@@ -593,6 +648,7 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
 {
     vk_queue := cast(vk.Queue) queue
+    vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
     for cmd_buf in cmd_bufs
     {
@@ -600,11 +656,23 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
     }
 
+    next: rawptr
+    next = &vk.TimelineSemaphoreSubmitInfo {
+        sType = .TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        pNext = next,
+        signalSemaphoreValueCount = 1,
+        pSignalSemaphoreValues = raw_data([]u64 {
+            signal_value
+        })
+    }
     to_submit := transmute([]vk.CommandBuffer) cmd_bufs
     submit_info := vk.SubmitInfo {
-        sType              = .SUBMIT_INFO,
+        sType = .SUBMIT_INFO,
+        pNext = next if signal_sem != nil else nil,
         commandBufferCount = u32(len(to_submit)),
-        pCommandBuffers    = raw_data(to_submit),
+        pCommandBuffers = raw_data(to_submit),
+        signalSemaphoreCount = 1 if signal_sem != nil else 0,
+        pSignalSemaphores = &vk_signal_sem if signal_sem != nil else nil
     }
     vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 }
