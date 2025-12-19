@@ -347,17 +347,22 @@ _swapchain_acquire_next :: proc() -> vk.ImageView
     return ctx.swapchain.image_views[ctx.swapchain_image_idx]
 }
 
-_swapchain_present :: proc()
+_swapchain_get :: proc(idx: u32) -> vk.ImageView
+{
+    return {}
+}
+
+_swapchain_present :: proc(sem_wait: Semaphore, wait_value: u64)
 {
     vk_check(vk.QueuePresentKHR(ctx.queue, &{
         sType = .PRESENT_INFO_KHR,
-        //waitSemaphoreCount = 1,
-        //pWaitSemaphores = &present_semaphore,
         swapchainCount = 1,
         pSwapchains = &ctx.swapchain.handle,
         pImageIndices = &ctx.swapchain_image_idx,
     }))
 }
+
+// Memory
 
 _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr
 {
@@ -521,15 +526,51 @@ to_vk_stage :: #force_inline proc(stage: Stage) -> vk.PipelineStageFlags
 }
 
 // Semaphores
-_sem_create :: proc(init_value: u64) -> Semaphore { return {} }
+_semaphore_create :: proc(init_value: u64 = 0) -> Semaphore
+{
+    next: rawptr
+    next = &vk.SemaphoreTypeCreateInfo {
+        sType = .SEMAPHORE_TYPE_CREATE_INFO,
+        pNext = next,
+        semaphoreType = .TIMELINE,
+        initialValue = init_value,
+    }
+    sem_ci := vk.SemaphoreCreateInfo {
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = next
+    }
+    sem: vk.Semaphore
+    vk_check(vk.CreateSemaphore(ctx.device, &sem_ci, nil, &sem))
 
-// Commands
-get_queue :: proc() -> Queue
+    return cast(Semaphore) uintptr(sem)
+}
+
+_semaphore_wait :: proc(sem: Semaphore, wait_value: u64)
+{
+    sems := []vk.Semaphore { auto_cast uintptr(sem) }
+    values := []u64 { wait_value }
+    assert(len(sems) == len(values))
+    vk.WaitSemaphores(ctx.device, &{
+        sType = .SEMAPHORE_WAIT_INFO,
+        semaphoreCount = u32(len(sems)),
+        pSemaphores = raw_data(sems),
+        pValues = raw_data(values),
+    }, timeout = max(u64))
+}
+
+_semaphore_destroy :: proc(sem: ^Semaphore)
+{
+    sem^ = {}
+}
+
+// Command buffer
+
+_get_queue :: proc() -> Queue
 {
     return cast(Queue) ctx.queue
 }
 
-commands_begin :: proc(queue: Queue) -> Command_Buffer
+_commands_begin :: proc(queue: Queue) -> Command_Buffer
 {
     cmd_buf_ai := vk.CommandBufferAllocateInfo {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -549,7 +590,7 @@ commands_begin :: proc(queue: Queue) -> Command_Buffer
     return cast(Command_Buffer) cmd_buf
 }
 
-queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer)
+_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
 {
     vk_queue := cast(vk.Queue) queue
 
@@ -567,6 +608,8 @@ queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer)
     }
     vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 }
+
+// Commands
 
 _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
 {

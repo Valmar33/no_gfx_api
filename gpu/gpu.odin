@@ -112,8 +112,9 @@ Blend_State :: struct
 // Initialization and interaction with the OS. This is simpler than it would actually be, for brevity.
 init: proc(window: ^sdl.Window) : _init
 cleanup: proc() : _cleanup
-swapchain_acquire_next: proc() -> vk.ImageView : _swapchain_acquire_next
-swapchain_present: proc() : _swapchain_present
+//swapchain_acquire_next: proc() -> vk.ImageView : _swapchain_acquire_next
+swapchain_get: proc(idx: u32) -> vk.ImageView : _swapchain_get
+swapchain_present: proc(sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr : _mem_alloc
@@ -129,7 +130,14 @@ host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr  // Only s
 shader_create: proc(code: []u32, type: Shader_Type) -> Shader : _shader_create
 
 // Semaphores
-// sem_create: proc(init_value: u64) -> Semaphore : _sem_create
+semaphore_create: proc(init_value: u64 = 0) -> Semaphore : _semaphore_create
+semaphore_wait: proc(sem: Semaphore, wait_value: u64) : _semaphore_wait
+semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
+
+// Command buffer
+get_queue: proc() -> Queue : _get_queue
+commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
+queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
 // Commands
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64) : _cmd_mem_copy

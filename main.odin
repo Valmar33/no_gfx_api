@@ -12,6 +12,7 @@ import sdl "vendor:sdl3"
 
 WINDOW_SIZE_X: u32
 WINDOW_SIZE_Y: u32
+FRAMES_IN_FLIGHT :: 2
 
 main :: proc()
 {
@@ -71,21 +72,28 @@ main :: proc()
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
-    sdl.Delay(30)
+    now_ts := sdl.GetPerformanceCounter()
 
     frame_arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&frame_arena)
-    now_ts := sdl.GetPerformanceCounter()
+    next_frame := u64(1)
+    frame_sem := gpu.semaphore_create(0)
+    defer gpu.semaphore_destroy(&frame_sem)
     for true
     {
         proceed := handle_window_events(window)
         if !proceed do break
 
+        if next_frame > FRAMES_IN_FLIGHT {
+            gpu.semaphore_wait(frame_sem, next_frame - FRAMES_IN_FLIGHT)
+        }
+
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
         delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
 
-        swapchain := gpu.swapchain_acquire_next()
+        //swapchain := gpu.swapchain_acquire_next()
+        swapchain := gpu.swapchain_get(u32((next_frame - 1) % FRAMES_IN_FLIGHT))
 
         cmd_buf := gpu.commands_begin(queue)
         gpu.cmd_begin_render_pass(cmd_buf, {
@@ -104,9 +112,10 @@ main :: proc()
 
         gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, indices_local, 3, 1)
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf })
+        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present()
+        gpu.swapchain_present(frame_sem, next_frame)
+        next_frame += 1
 
         gpu.arena_free_all(&frame_arena)
     }
