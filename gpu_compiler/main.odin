@@ -12,7 +12,7 @@ main :: proc()
 {
     if len(os.args) != 2
     {
-        fmt.println("Incorrect Usage. Try: gpu_compiler *.mockupsl")
+        fmt.println("Incorrect Usage. Try: gpu_compiler *.musl")
         return
     }
 
@@ -34,7 +34,7 @@ main :: proc()
 
     tokens := lex_file(file_content, allocator = perm_arena)
     ast, ok_p := parse_file(path, tokens, allocator = perm_arena)
-    // if !ok_p do return
+    if !ok_p do return
     codegen(ast)
 }
 

@@ -17,7 +17,7 @@ Any_Node :: union
 
 Ast :: struct
 {
-    used_types: []Ast_Type,
+    used_types: map[Ast_Type]struct{},
     scope: ^Ast_Scope,
 }
 
@@ -116,7 +116,6 @@ Ast_Binary_Op :: enum
 Ast_Binary_Expr :: struct
 {
     using base_expr: Ast_Expr,
-
     lhs: ^Ast_Expr,
     rhs: ^Ast_Expr,
     op: Ast_Binary_Op,
@@ -125,7 +124,6 @@ Ast_Binary_Expr :: struct
 Ast_Member_Access :: struct
 {
     using base_expr: Ast_Expr,
-
     target: ^Ast_Expr,
     member_name: string,
 }
@@ -133,7 +131,6 @@ Ast_Member_Access :: struct
 Ast_Array_Access :: struct
 {
     using base_expr: Ast_Expr,
-
     target: ^Ast_Expr,
     idx_expr: ^Ast_Expr,
 }
@@ -141,7 +138,6 @@ Ast_Array_Access :: struct
 Ast_Call :: struct
 {
     using base_expr: Ast_Expr,
-
     target: ^Ast_Expr,
     args: []^Ast_Expr,
 }
@@ -218,7 +214,7 @@ Ast_Type :: struct
 
 parse_file :: proc(filename: string, tokens: []Token, allocator: runtime.Allocator) -> (Ast, bool)
 {
-    //context.allocator = allocator
+    context.allocator = allocator
 
     parser := Parser {
         tokens = tokens,
@@ -235,6 +231,7 @@ Parser :: struct
     at: u32,
     error: bool,
     cur_scope: ^Ast_Scope,
+    used_types: map[Ast_Type]struct{},
 }
 
 _parse_file :: proc(using p: ^Parser) -> Ast
@@ -281,6 +278,7 @@ _parse_file :: proc(using p: ^Parser) -> Ast
     }
 
     ast.scope.decls = slice.clone(tmp_list[:])
+    ast.used_types = used_types
     return ast
 }
 
@@ -520,8 +518,6 @@ parse_decl_list_elem :: proc(using p: ^Parser) -> ^Ast_Decl_Arg
 
 parse_type :: proc(using p: ^Parser) -> ^Ast_Type
 {
-    // TODO: Add this type to the global type set.
-
     node := new(Ast_Type)
 
     if optional_token(p, .LBracket)
@@ -536,6 +532,9 @@ parse_type :: proc(using p: ^Parser) -> ^Ast_Type
 
     ident := required_token(p, .Ident)
     node.name = ident.text
+
+    // Add to the global type table
+    used_types[node^] = {}
     return node
 }
 

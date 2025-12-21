@@ -18,6 +18,28 @@ codegen :: proc(ast: Ast)
 
     context.allocator = codegen_arena
 
+    for type in ast.used_types
+    {
+        if type.is_ptr {
+            writefln("layout(buffer_reference) readonly buffer _res_ptr_%v;", type.name)
+        } else if type.is_slice {
+            writefln("layout(buffer_reference) readonly buffer _res_slice_%v;", type.name)
+        }
+    }
+
+    writeln("")
+
+    for type in ast.used_types
+    {
+        if type.is_ptr {
+            writefln("layout(buffer_reference) readonly buffer _res_ptr_%v {{ %v _res_; }};", type.name, type.name)
+        } else if type.is_slice {
+            writefln("layout(buffer_reference) readonly buffer _res_slice_%v {{ %v _res_; }};", type.name, type.name)
+        }
+    }
+
+    writeln("")
+
     for declaration in ast.scope.decls
     {
         switch decl in declaration.derived_decl
@@ -146,8 +168,10 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 type_to_glsl :: proc(type: ^Ast_Type) -> string
 {
     to_concat: []string
-    if type.is_ptr || type.is_slice {
+    if type.is_ptr {
         to_concat = { "_res_ptr_", type.name }
+    } else if type.is_slice {
+        to_concat = { "_res_slice_", type.name }
     } else {
         to_concat = { type.name }
     }
