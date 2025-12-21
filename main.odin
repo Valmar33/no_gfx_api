@@ -2,7 +2,6 @@
 package main
 
 import log "core:log"
-import "core:c"
 import "core:math"
 import "core:math/linalg"
 
@@ -10,9 +9,9 @@ import "gpu"
 
 import sdl "vendor:sdl3"
 
-WINDOW_SIZE_X: u32
-WINDOW_SIZE_Y: u32
-FRAMES_IN_FLIGHT :: 2
+Window_Size_X :: 1000
+Window_Size_Y :: 1000
+Frames_In_Flight :: 2
 
 main :: proc()
 {
@@ -30,11 +29,7 @@ main :: proc()
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
     }
-    window := sdl.CreateWindow("Lightmapper RT Example", 1900, 1900, window_flags)
-    win_width, win_height: c.int
-    assert(sdl.GetWindowSize(window, &win_width, &win_height))
-    WINDOW_SIZE_X = auto_cast max(0, win_width)
-    WINDOW_SIZE_Y = auto_cast max(0, win_height)
+    window := sdl.CreateWindow("Lightmapper RT Example", Window_Size_X, Window_Size_Y, window_flags)
     ensure(window != nil)
 
     gpu.init(window)
@@ -84,16 +79,11 @@ main :: proc()
         proceed := handle_window_events(window)
         if !proceed do break
 
-        if next_frame > FRAMES_IN_FLIGHT {
-            gpu.semaphore_wait(frame_sem, next_frame - FRAMES_IN_FLIGHT)
-        }
-
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
         delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
 
-        //swapchain := gpu.swapchain_acquire_next()
-        swapchain := gpu.swapchain_get(u32((next_frame - 1) % FRAMES_IN_FLIGHT))
+        swapchain := gpu.swapchain_acquire_next()
 
         cmd_buf := gpu.commands_begin(queue)
         gpu.cmd_begin_render_pass(cmd_buf, {
@@ -114,7 +104,7 @@ main :: proc()
         gpu.cmd_end_render_pass(cmd_buf)
         gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present(frame_sem, next_frame)
+        gpu.swapchain_present(queue, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(&frame_arena)

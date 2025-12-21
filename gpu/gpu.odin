@@ -112,9 +112,8 @@ Blend_State :: struct
 // Initialization and interaction with the OS. This is simpler than it would actually be, for brevity.
 init: proc(window: ^sdl.Window) : _init
 cleanup: proc() : _cleanup
-//swapchain_acquire_next: proc() -> vk.ImageView : _swapchain_acquire_next
-swapchain_get: proc(idx: u32) -> vk.ImageView : _swapchain_get
-swapchain_present: proc(sem_wait: Semaphore, wait_value: u64) : _swapchain_present
+swapchain_acquire_next: proc() -> vk.ImageView : _swapchain_acquire_next
+swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr : _mem_alloc

@@ -1,19 +1,329 @@
 
+#+feature dynamic-literals
+
 package main
 
+import "core:fmt"
+import "core:strconv"
 import "base:runtime"
 
 Token_Type :: enum
 {
+    Unknown = 0,
 
+    // Parens
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
+
+    // Operator types
+    Plus,
+    Minus,
+    Mul,
+    Div,
+    Greater,
+    Less,
+    Assign,
+    Dot,
+    Comma,
+    Colon,
+    Semi,
+    Caret,
+    LE,
+    GE,
+    EQ,
+    NEQ,
+    Plus_Equals,
+    Minus_Equals,
+    Mul_Equals,
+    Div_Equals,
+
+    Ident,
+    Attribute,  // Identifier with @ in front
+
+    Arrow,  // For function return types
+
+    // Keywords
+    Struct,
+    If,
+    Else,
+    Return,
+
+    // Literals
+    NumLit,
+
+    // Lexer message types
+    EOS,  // End of stream
 }
 
-Token :: struct
-{
-    
+Keywords := map[string]Token_Type {
+    "struct" = .Struct,
+    "if"     = .If,
+    "else"   = .Else,
+    "return" = .Return,
+}
+One_Char_Operators := map[u8]Token_Type {
+    '(' = .LParen,
+    ')' = .RParen,
+    '[' = .LBracket,
+    ']' = .RBracket,
+    '{' = .LBrace,
+    '}' = .RBrace,
+    '+' = .Plus,
+    '-' = .Minus,
+    '*' = .Mul,
+    '/' = .Div,
+    '>' = .Greater,
+    '<' = .Less,
+    '=' = .Assign,
+    '.' = .Dot,
+    ',' = .Comma,
+    ':' = .Colon,
+    ';' = .Semi,
+    '^' = .Caret,
+}
+Two_Char_Operators := map[string]Token_Type {
+    "<=" = .LE,
+    ">=" = .GE,
+    "==" = .EQ,
+    "!=" = .NEQ,
+    "+=" = .Plus_Equals,
+    "-=" = .Minus_Equals,
+    "*=" = .Mul_Equals,
+    "/=" = .Div_Equals,
+    "->" = .Arrow,
 }
 
-tokenize_file :: proc(path: string, allocator: runtime.Allocator) -> []Token
+Literal_Value :: union
 {
-    return {}
+    u64,  // This can represent all integer constants, "-" is treated as an operator
+    f32,
+}
+
+Token :: struct #all_or_none
+{
+    type: Token_Type,
+    text: string,
+
+    value: Literal_Value,
+    line: u32,
+    col_start: u32,
+}
+
+lex_file :: proc(file_content: []u8, allocator: runtime.Allocator) -> []Token
+{
+    tokens := make([dynamic]Token, allocator = allocator)
+
+    lexer := Lexer {
+        buf = file_content
+    }
+    for true
+    {
+        token := next_token(&lexer)
+        append(&tokens, token)
+        if token.type == .EOS do break
+    }
+
+    return tokens[:]
+}
+
+Lexer :: struct
+{
+    buf: []u8,
+    offset: u32,
+    line: u32,
+    line_start: u32,
+    comment_nest_level: bool
+}
+
+next_token :: proc(using lexer: ^Lexer) -> Token
+{
+    eat_all_whitespace(lexer)
+
+    token := Token {
+        type = .EOS,
+        text = "",
+        value = {},
+        line = line,
+        col_start = offset - line_start,
+    }
+
+    if buf[offset] == 0
+    {
+        // Null terminator found
+    }
+    else if is_ident_begin(buf[offset]) || buf[offset] == '@'
+    {
+        if buf[offset] == '@'
+        {
+            token.type = .Attribute
+            offset += 1
+        }
+        else
+        {
+            token.type = .Ident
+        }
+
+        old_offset := offset
+        for ; is_ident_middle(buf[offset]); offset += 1 {}
+        token.text = string(buf[old_offset:offset])
+
+        if token.type == .Ident
+        {
+            token_type, is_keyword := Keywords[token.text]
+            if is_keyword do token.type = token_type
+        }
+    }
+    else if is_num(buf[offset])
+    {
+        token.type = .NumLit
+
+        old_offset := offset
+        is_int := true
+        for ; is_num_middle(buf[offset]); offset += 1 {
+            if buf[offset] == '.' do is_int = false
+        }
+
+        num_str := string(buf[old_offset:offset])
+        token.text = num_str
+
+        if is_int
+        {
+            value, ok := strconv.parse_u64(num_str)
+            if !ok do token.type = .Unknown
+            token.value = value
+        }
+        else
+        {
+            value, ok := strconv.parse_f32(num_str)
+            if !ok do token.type = .Unknown
+            token.value = value
+        }
+    }
+    else  // Operators, parentheses, etc.
+    {
+        two_chars := string(buf[offset:offset+2])
+        twochar_op_type, is_twochar_op := Two_Char_Operators[two_chars]
+        if is_twochar_op
+        {
+            offset += 2
+            token.text = two_chars
+            token.type = twochar_op_type
+        }
+        else
+        {
+            one_char := string(buf[offset:offset+1])
+            onechar_op_type, is_onechar_op := One_Char_Operators[buf[offset]]
+            token.type = onechar_op_type if is_onechar_op else .Unknown
+            token.text = one_char
+            offset += 1
+        }
+    }
+
+    return token
+}
+
+eat_all_whitespace :: proc(using lexer: ^Lexer)
+{
+    for true
+    {
+        if is_newline(buf[offset])
+        {
+            offset += 1
+            line_start = offset
+            line += 1
+        }
+        else if is_whitespace(buf[offset])
+        {
+            offset += 1
+        }
+        else if buf[offset] == '/' && buf[offset+1] == '/'
+        {
+            offset += 2
+            for !is_newline(buf[offset]) && buf[offset] != 0 {
+                offset += 1
+            }
+        }
+        else if buf[offset] == '/' && buf[offset+1] == '*'
+        {
+            offset += 2
+            nest_level := 1
+            for nest_level > 0
+            {
+                if buf[offset] == 0 do break
+
+                if is_newline(buf[offset])
+                {
+                    offset += 1
+                    line_start = offset
+                }
+                else if buf[offset] == '*' && buf[offset+1] == '/'
+                {
+                    offset += 2
+                    nest_level -= 1
+                }
+                else if buf[offset] == '/' && buf[offset+1] == '*'
+                {
+                    offset += 2
+                    nest_level += 1
+                }
+                else
+                {
+                    offset += 1
+                }
+            }
+        }
+        else do break
+    }
+}
+
+error_msg :: proc(filename: string, token: Token, fmt_str: string, args: ..any)
+{
+    fmt.printf("%v(%v:%v): Error: ", filename, token.line+1, token.col_start+1)
+    fmt.printfln(fmt_str, ..args)
+}
+
+// Utils
+
+is_alpha :: #force_inline proc(c: u8) -> bool
+{
+    return ((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z'));
+}
+
+is_num :: #force_inline proc(c: u8) -> bool
+{
+    return c >= '0' && c <= '9';
+}
+
+is_whitespace :: #force_inline proc(c: u8) -> bool
+{
+    return (c == ' ') ||
+        (c == '\t') ||
+        (c == '\v') ||
+        (c == '\f') ||
+        (c == '\r') ||
+        is_newline(c);
+}
+
+is_ident_begin :: #force_inline proc(c: u8) -> bool
+{
+    return is_alpha(c) || c == '_'
+}
+
+is_ident_middle :: #force_inline proc(c: u8) -> bool
+{
+    return is_ident_begin(c) || is_num(c)
+}
+
+is_num_middle :: #force_inline proc(c: u8) -> bool
+{
+    return is_num(c) || c == '.' || c == 'e' || c == '-';
+}
+
+is_newline :: #force_inline proc(c: u8) -> bool
+{
+    return c == '\n'
 }

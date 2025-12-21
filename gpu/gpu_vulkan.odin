@@ -7,7 +7,6 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
-import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -333,10 +332,7 @@ _cleanup :: proc()
 
 _swapchain_acquire_next :: proc() -> vk.ImageView
 {
-    fence_ci := vk.FenceCreateInfo {
-        sType = .FENCE_CREATE_INFO,
-        flags = { },
-    }
+    fence_ci := vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO }
     fence: vk.Fence
     vk_check(vk.CreateFence(ctx.device, &fence_ci, nil, &fence))
     defer vk.DestroyFence(ctx.device, fence, nil)
@@ -345,39 +341,109 @@ _swapchain_acquire_next :: proc() -> vk.ImageView
 
     vk_check(vk.WaitForFences(ctx.device, 1, &fence, true, max(u64)))
 
-    return ctx.swapchain.image_views[ctx.swapchain_image_idx]
-}
+    // Transition layout from swapchain
+    {
+        cmd_buf_ai := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool = ctx.cmd_pool,
+            level = .PRIMARY,
+            commandBufferCount = 1,
+        }
+        cmd_buf: vk.CommandBuffer
+        vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &cmd_buf))
 
-_swapchain_get :: proc(idx: u32) -> vk.ImageView
-{
-    fence_ci := vk.FenceCreateInfo {
-        sType = .FENCE_CREATE_INFO,
-        flags = { },
+        cmd_buf_bi := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+        transition := vk.ImageMemoryBarrier2 {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = ctx.swapchain.images[ctx.swapchain_image_idx],
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = .UNDEFINED,
+            newLayout = .GENERAL,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_WRITE },
+            dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = 1,
+            pImageMemoryBarriers = &transition,
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
+        }
+        vk_check(vk.QueueSubmit(ctx.queue, 1, &submit_info, {}))
     }
-    fence: vk.Fence
-    vk_check(vk.CreateFence(ctx.device, &fence_ci, nil, &fence))
-    defer vk.DestroyFence(ctx.device, fence, nil)
-
-    vk_check(vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx))
-
-    vk_check(vk.WaitForFences(ctx.device, 1, &fence, true, max(u64)))
 
     return ctx.swapchain.image_views[ctx.swapchain_image_idx]
 }
 
-_swapchain_present :: proc(sem_wait: Semaphore, wait_value: u64)
+_swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
 {
     vk_sem_wait := transmute(vk.Semaphore) sem_wait
 
     present_semaphore := ctx.swapchain.present_semaphores[ctx.swapchain_image_idx]
-
-    fmt.println(ctx.swapchain_image_idx)
 
     // NOTE: Workaround for the fact that swapchain presentation
     // only supports binary semaphores.
     // wait on sem_wait on wait_value and signal ctx.binary_sem
     {
         queue := ctx.queue
+
+        // Switch to optimal layout for presentation (this is mandatory)
+        cmd_buf: vk.CommandBuffer
+        {
+            cmd_buf_ai := vk.CommandBufferAllocateInfo {
+                sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+                commandPool = ctx.cmd_pool,
+                level = .PRIMARY,
+                commandBufferCount = 1,
+            }
+            vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &cmd_buf))
+
+            cmd_buf_bi := vk.CommandBufferBeginInfo {
+                sType = .COMMAND_BUFFER_BEGIN_INFO,
+                flags = { .ONE_TIME_SUBMIT },
+            }
+            vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+            transition := vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                image = ctx.swapchain.images[ctx.swapchain_image_idx],
+                subresourceRange = {
+                    aspectMask = { .COLOR },
+                    levelCount = 1,
+                    layerCount = 1,
+                },
+                oldLayout = .GENERAL,
+                newLayout = .PRESENT_SRC_KHR,
+                srcStageMask = { .ALL_COMMANDS },
+                srcAccessMask = { .MEMORY_WRITE },
+                dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+                dstAccessMask = { .MEMORY_READ },
+            }
+            vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+                sType = .DEPENDENCY_INFO,
+                imageMemoryBarrierCount = 1,
+                pImageMemoryBarriers = &transition,
+            })
+
+            vk_check(vk.EndCommandBuffer(cmd_buf))
+        }
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
         next: rawptr
@@ -392,6 +458,8 @@ _swapchain_present :: proc(sem_wait: Semaphore, wait_value: u64)
         submit_info := vk.SubmitInfo {
             sType = .SUBMIT_INFO,
             pNext = next,
+            commandBufferCount = 1,
+            pCommandBuffers = &cmd_buf,
             waitSemaphoreCount = 1,
             pWaitSemaphores = raw_data([]vk.Semaphore {
                 vk_sem_wait,
