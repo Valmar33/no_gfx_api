@@ -61,7 +61,7 @@ for true
     cmd_buf := gpu.commands_begin(queue)
     gpu.cmd_begin_render_pass(cmd_buf, {
         color_attachments = {
-            { view = swapchain, clear_color = changing_color(delta_time) }
+            { view = swapchain, clear_color = { 1.0, 0.0, 0.0, 1.0 } }
             // Other settings...
         }
     })
