@@ -37,7 +37,7 @@ main :: proc()
         return
     }
 
-    output_path := str.concatenate({ fp.stem(path), ".glsl" }, allocator = perm_arena)
+    output_path := str.concatenate({ fp.dir(path), "/", fp.stem(path), ".glsl" }, allocator = perm_arena)
 
     file_content, ok := load_file_and_null_terminate(path, allocator = perm_arena)
     if !ok

@@ -35,14 +35,14 @@ main :: proc()
     gpu.init(window, Frames_In_Flight)
     defer gpu.cleanup()
 
-    vert_shader := gpu.shader_create(#load("../../shaders/test.vert.spv", []u32), .Vertex)
-    frag_shader := gpu.shader_create(#load("../../shaders/test.frag.spv", []u32), .Fragment)
+    vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
+    frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     defer {
         gpu.shader_destroy(&vert_shader)
         gpu.shader_destroy(&frag_shader)
     }
 
-    Vertex :: struct { pos: [4]f32, color: [4]f32 }
+    Vertex :: struct { pos: [4]f32 }
 
     arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&arena)
@@ -51,9 +51,6 @@ main :: proc()
     verts.cpu[0].pos = { -0.5,  0.5, 0.0, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0, 0.0 }
-    verts.cpu[0].color = { 1.0, 0.0, 0.0, 0.0 }
-    verts.cpu[1].color = { 0.0, 1.0, 0.0, 0.0 }
-    verts.cpu[2].color = { 0.0, 0.0, 1.0, 0.0 }
 
     indices := gpu.arena_alloc_array(&arena, u32, 3)
     indices.cpu[0] = 0

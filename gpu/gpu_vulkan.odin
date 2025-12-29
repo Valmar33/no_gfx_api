@@ -649,8 +649,10 @@ _host_to_device_ptr :: proc(ptr: rawptr) -> rawptr
 }
 
 // Textures
-_texture_create :: proc(desc: Texture_Desc, storage: rawptr) -> Texture
+_texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
 {
+    vk_signal_sem := transmute(vk.Semaphore) signal_sem
+    
     alloc_idx, ok_s := search_alloc_from_gpu_ptr(storage)
     if !ok_s
     {
@@ -672,6 +674,41 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr) -> Texture
         usage = to_vk_texture_usage(desc.usage),
         initialLayout = .UNDEFINED,
     }, &image))
+
+    // Transition layout from UNDEFINED to GENERAL
+    {
+        cmd_buf := vk_acquire_cmd_buf(ctx.queue)
+
+        cmd_buf_bi := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            flags = { .ONE_TIME_SUBMIT },
+        }
+        vk_check(vk.BeginCommandBuffer(cmd_buf, &cmd_buf_bi))
+
+        transition := vk.ImageMemoryBarrier2 {
+            sType = .IMAGE_MEMORY_BARRIER_2,
+            image = ctx.swapchain.images[ctx.swapchain_image_idx],
+            subresourceRange = {
+                aspectMask = { .COLOR },
+                levelCount = 1,
+                layerCount = 1,
+            },
+            oldLayout = .UNDEFINED,
+            newLayout = .GENERAL,
+            srcStageMask = { .ALL_COMMANDS },
+            srcAccessMask = { .MEMORY_WRITE },
+            dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+        }
+        vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
+            sType = .DEPENDENCY_INFO,
+            imageMemoryBarrierCount = 1,
+            pImageMemoryBarriers = &transition,
+        })
+
+        vk_check(vk.EndCommandBuffer(cmd_buf))
+        vk_submit_cmd_buf(ctx.queue, cmd_buf, vk_signal_sem, signal_value)
+    }
 
     return {
         dimensions = desc.dimensions,
