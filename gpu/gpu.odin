@@ -37,8 +37,10 @@ Depth_Flags :: bit_set[Depth_Mode; u32]
 Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil }
 Hazard_Flags :: bit_set[Hazard; u32]
 Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, All }
-ColorComponentFlag :: enum { R = 0, G = 1, B = 2, A = 3 }
-ColorComponentFlags :: distinct bit_set[ColorComponentFlag; u8]
+Color_Component_Flag :: enum { R = 0, G = 1, B = 2, A = 3 }
+ColorComponentFlags :: distinct bit_set[Color_Component_Flag; u8]
+Filter :: enum { Linear = 0, Nearest }
+Address_Mode :: enum { Repeat = 0, Mirrored_Repeat, Clamp_To_Edge }
 
 // Constants
 All_Mips: u8 : max(u8)
@@ -58,7 +60,12 @@ Texture_Desc :: struct
 
 Sampler_Desc :: struct
 {
-    
+    min_filter: Filter,
+    mag_filter: Filter,
+    mip_filter: Filter,
+    address_mode_u: Address_Mode,
+    address_mode_v: Address_Mode,
+    address_mode_w: Address_Mode,
 }
 
 Texture_View_Desc :: struct
@@ -144,6 +151,7 @@ texture_create: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semaphore 
 texture_destroy: proc(texture: ^Texture) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
 //texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 : _texture_rw_view_descriptor
+sampler_descriptor: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor : _sampler_descriptor
 
 // Shaders
 shader_create: proc(code: []u32, type: Shader_Type) -> Shader : _shader_create
@@ -161,9 +169,9 @@ queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semapho
 
 // Commands
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64) : _cmd_mem_copy
-//cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
+cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, ptr: rawptr) : _cmd_set_texture_heap
+cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -284,4 +292,18 @@ align_up :: proc(x, align: u64) -> (aligned: u64)
 {
     assert(0 == (align & (align - 1)), "must align to a power of two")
     return (x + (align - 1)) &~ (align - 1)
+}
+
+alloc_and_create_texture :: proc(desc: Texture_Desc, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> (Texture, rawptr)
+{
+    size, align := texture_size_and_align(desc)
+    ptr := mem_alloc(size, align, .GPU)
+    texture := texture_create(desc, ptr, signal_sem, signal_value)
+    return texture, ptr
+}
+
+free_and_destroy_texture :: proc(texture: ^Texture, ptr: rawptr)
+{
+    mem_free(ptr)
+    texture_destroy(texture)
 }

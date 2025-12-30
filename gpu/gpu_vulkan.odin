@@ -54,8 +54,6 @@ Context :: struct
     gpu_ptr_to_alloc: map[rawptr]u32,  // From base GPU allocation pointer to metadata
     alloc_tree: rbt.Tree(Alloc_Range, u32),
 
-    // TODO: freelist of gpu allocs
-
     phys_device: vk.PhysicalDevice,
     device: vk.Device,
     queue: vk.Queue,
@@ -66,7 +64,9 @@ Context :: struct
     cmd_bufs_timelines: [10]Timeline,
 
     // Common resources
-    desc_set_layout: vk.DescriptorSetLayout,
+    textures_desc_layout: vk.DescriptorSetLayout,
+    textures_rw_desc_layout: vk.DescriptorSetLayout,
+    samplers_desc_layout: vk.DescriptorSetLayout,
     common_pipeline_layout: vk.PipelineLayout,
 
     // Swapchain
@@ -329,29 +329,54 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
             }
         }
 
-        bindings := []vk.DescriptorSetLayoutBinding {
-            {
-                binding = 0,
-                descriptorType = .SAMPLED_IMAGE,
-                descriptorCount = Max_Textures,
-                stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
-            },
-            {
-                binding = 1,
-                descriptorType = .STORAGE_IMAGE,
-                descriptorCount = Max_Textures,
-                stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
-            },
+        {
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = { .DESCRIPTOR_BUFFER_EXT },
+                bindingCount = 1,
+                pBindings = &vk.DescriptorSetLayoutBinding {
+                    binding = 0,
+                    descriptorType = .SAMPLED_IMAGE,
+                    descriptorCount = Max_Textures,
+                    stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
+                },
+            }
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_desc_layout))
         }
-        layout_ci := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = { .DESCRIPTOR_BUFFER_EXT },
-            bindingCount = u32(len(bindings)),
-            pBindings = raw_data(bindings),
+        {
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = { .DESCRIPTOR_BUFFER_EXT },
+                bindingCount = 1,
+                pBindings = &vk.DescriptorSetLayoutBinding {
+                    binding = 0,
+                    descriptorType = .STORAGE_IMAGE,
+                    descriptorCount = Max_Textures,
+                    stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
+                },
+            }
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_rw_desc_layout))
         }
-        vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.desc_set_layout))
+        {
+            layout_ci := vk.DescriptorSetLayoutCreateInfo {
+                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                flags = { .DESCRIPTOR_BUFFER_EXT },
+                bindingCount = 1,
+                pBindings = &vk.DescriptorSetLayoutBinding {
+                    binding = 0,
+                    descriptorType = .SAMPLER,
+                    descriptorCount = Max_Textures,
+                    stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
+                },
+            }
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.samplers_desc_layout))
+        }
 
-        desc_layouts := []vk.DescriptorSetLayout { ctx.desc_set_layout }
+        desc_layouts := []vk.DescriptorSetLayout {
+            ctx.textures_desc_layout,
+            ctx.textures_rw_desc_layout,
+            ctx.samplers_desc_layout,
+        }
         pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             pushConstantRangeCount = u32(len(push_constant_ranges)),
@@ -404,7 +429,9 @@ _cleanup :: proc()
         vk.DestroySemaphore(ctx.device, timeline.sem, nil)
     }
 
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.desc_set_layout, nil)
+    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_desc_layout, nil)
+    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_rw_desc_layout, nil)
+    vk.DestroyDescriptorSetLayout(ctx.device, ctx.samplers_desc_layout, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout, nil)
 
     vma.destroy_allocator(ctx.vma_allocator)
@@ -717,7 +744,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
         mipLevels = desc.mip_count,
         arrayLayers = desc.layer_count,
         samples = to_vk_sample_count(desc.sample_count),
-        usage = to_vk_texture_usage(desc.usage),
+        usage = to_vk_texture_usage(desc.usage) + { .TRANSFER_DST },
         initialLayout = .UNDEFINED,
     }, &image))
 
@@ -733,7 +760,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
 
         transition := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
-            image = ctx.swapchain.images[ctx.swapchain_image_idx],
+            image = image,
             subresourceRange = {
                 aspectMask = { .COLOR },
                 levelCount = 1,
@@ -743,7 +770,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
             newLayout = .GENERAL,
             srcStageMask = { .ALL_COMMANDS },
             srcAccessMask = { .MEMORY_WRITE },
-            dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            dstStageMask = { .ALL_COMMANDS },
             dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
         }
         vk.CmdPipelineBarrier2(cmd_buf, &vk.DependencyInfo {
@@ -823,7 +850,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
         type = .SAMPLED_IMAGE,
         data = { pSampledImage = &{ sampler = {}, imageView = view, imageLayout = .GENERAL } }
     }
-    vk.GetDescriptorEXT(ctx.device, &info, size_of(Texture_Descriptor), &desc)
+    vk.GetDescriptorEXT(ctx.device, &info, size_of(desc), &desc)
     return desc
 }
 
@@ -831,7 +858,30 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
 
 _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
 {
-    return {}
+    sampler_ci := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        magFilter = to_vk_filter(sampler_desc.mag_filter),
+        minFilter = to_vk_filter(sampler_desc.min_filter),
+        mipmapMode = to_vk_mipmap_filter(sampler_desc.mip_filter),
+        addressModeU = to_vk_address_mode(sampler_desc.address_mode_u),
+        addressModeV = to_vk_address_mode(sampler_desc.address_mode_v),
+        addressModeW = to_vk_address_mode(sampler_desc.address_mode_w),
+    }
+    sampler: vk.Sampler
+    vk_check(vk.CreateSampler(ctx.device, &sampler_ci, nil, &sampler))
+    defer vk.DestroySampler(ctx.device, sampler, nil)
+
+    // IMPORTANT NOTE: Destroying the sampler immediately might technically be illegal here?
+    // This is probably not standard compliant...
+
+    desc: Sampler_Descriptor
+    info := vk.DescriptorGetInfoEXT {
+        sType = .DESCRIPTOR_GET_INFO_EXT,
+        type = .SAMPLER,
+        data = { pSampledImage = &{ sampler = sampler, imageView = {}, imageLayout = .GENERAL } }
+    }
+    vk.GetDescriptorEXT(ctx.device, &info, size_of(desc), &desc)
+    return desc
 }
 
 // Shaders
@@ -846,6 +896,12 @@ _shader_create :: proc(code: []u32, type: Shader_Type) -> Shader
         }
     }
 
+    desc_layouts := []vk.DescriptorSetLayout {
+        ctx.textures_desc_layout,
+        ctx.textures_rw_desc_layout,
+        ctx.samplers_desc_layout,
+    }
+
     shader_cis := vk.ShaderCreateInfoEXT {
         sType = .SHADER_CREATE_INFO_EXT,
         codeType = .SPIRV,
@@ -856,8 +912,8 @@ _shader_create :: proc(code: []u32, type: Shader_Type) -> Shader
         nextStage = vk.ShaderStageFlags { .FRAGMENT } if type == .Vertex else {},
         pushConstantRangeCount = u32(len(push_constant_ranges)),
         pPushConstantRanges = raw_data(push_constant_ranges),
-        setLayoutCount = 0,
-        pSetLayouts = {}
+        setLayoutCount = u32(len(desc_layouts)),
+        pSetLayouts = raw_data(desc_layouts),
     }
     shader: vk.ShaderEXT
     vk_check(vk.CreateShadersEXT(ctx.device, 1, &shader_cis, nil, &shader))
@@ -957,7 +1013,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
     dst_buf, dst_offset, ok_d := compute_buf_offset_from_gpu_ptr(dst)
     if !ok_s || !ok_d
     {
-        log.error("alloc not found")
+        log.error("Alloc not found.")
         return
     }
 
@@ -971,21 +1027,85 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
     vk.CmdCopyBuffer(vk_cmd_buf, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
 }
 
-_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) {}
+_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    vk_image := transmute(vk.Image) texture.handle
 
-_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, ptr: rawptr)
+    src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
+    if !ok_s {
+        log.error("Alloc not found.")
+        return
+    }
+
+    vk.CmdCopyBufferToImage(vk_cmd_buf, src_buf, vk_image, .GENERAL, 1, &vk.BufferImageCopy {
+        bufferOffset = vk.DeviceSize(src_offset),
+        bufferRowLength = texture.dimensions.x,
+        bufferImageHeight = texture.dimensions.y,
+        imageSubresource = {
+            aspectMask = { .COLOR },
+            mipLevel = 0,
+            baseArrayLayer = 0,
+            layerCount = 1,
+        },
+        imageOffset = {},
+        imageExtent = { texture.dimensions.x, texture.dimensions.y, texture.dimensions.z }
+    })
+}
+
+_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
-    info := vk.DescriptorBufferBindingInfoEXT {
-        sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-        address = transmute(vk.DeviceAddress) ptr,
-        usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+    if textures == nil && textures_rw == nil && samplers == nil do return
+
+    infos: [3]vk.DescriptorBufferBindingInfoEXT
+    // Fill in infos with the subset of valid pointers
+    cursor := u32(0)
+    if textures != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) textures,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+        }
+        cursor += 1
     }
-    vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, 1, &info)
-    textures_slot := u32(0)
-    buffer_offset_textures := vk.DeviceSize(0)
-    vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout, 0, 1, &textures_slot, &buffer_offset_textures);
+    if textures_rw != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) textures_rw,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+        }
+        cursor += 1
+    }
+    if samplers != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) samplers,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+        }
+        cursor += 1
+    }
+
+    vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, cursor, &infos[0])
+
+    buffer_offsets := []vk.DeviceSize { 0, 0, 0 }
+    cursor = 0
+    if textures != nil {
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout, 0, 1, &cursor, &buffer_offsets[0])
+        cursor += 1
+    }
+    if textures_rw != nil {
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout, 1, 1, &cursor, &buffer_offsets[1])
+        cursor += 1
+    }
+    if samplers != nil {
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout, 2, 1, &cursor, &buffer_offsets[2])
+        cursor += 1
+    }
 }
 
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {})
@@ -1290,7 +1410,7 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
     surface_format := surface_formats[0]
     for candidate in surface_formats
     {
-        if candidate == {.B8G8R8A8_SRGB, .SRGB_NONLINEAR}
+        if candidate == { .B8G8R8A8_UNORM, .SRGB_NONLINEAR }
         {
             surface_format = candidate
             break
@@ -1634,6 +1754,37 @@ to_vk_texture_usage :: proc(usage: Usage_Flags) -> vk.ImageUsageFlags
     if .Color_Attachment in usage do         res += { .COLOR_ATTACHMENT }
     if .Depth_Stencil_Attachment in usage do res += { .DEPTH_STENCIL_ATTACHMENT }
     return res
+}
+
+to_vk_filter :: proc(filter: Filter) -> vk.Filter
+{
+    switch filter
+    {
+        case .Linear: return .LINEAR
+        case .Nearest: return .NEAREST
+    }
+    return {}
+}
+
+to_vk_mipmap_filter :: proc(filter: Filter) -> vk.SamplerMipmapMode
+{
+    switch filter
+    {
+        case .Linear: return .LINEAR
+        case .Nearest: return .NEAREST
+    }
+    return {}
+}
+
+to_vk_address_mode :: proc(addr_mode: Address_Mode) -> vk.SamplerAddressMode
+{
+    switch addr_mode
+    {
+        case .Repeat: return .REPEAT
+        case .Mirrored_Repeat: return .MIRRORED_REPEAT
+        case .Clamp_To_Edge: return .CLAMP_TO_EDGE
+    }
+    return {}
 }
 
 @(private="file")

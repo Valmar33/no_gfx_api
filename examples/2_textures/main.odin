@@ -3,6 +3,9 @@ package main
 
 import log "core:log"
 import "core:fmt"
+import "core:image"
+import "core:image/png"
+import "base:runtime"
 
 import "../../gpu"
 
@@ -12,6 +15,9 @@ Window_Size_X :: 1000
 Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "Textures"
+
+Peach_Texture :: #load("textures/peach.png")
+Bowser_Texture :: #load("textures/bowser.png")
 
 main :: proc()
 {
@@ -43,8 +49,10 @@ main :: proc()
 
     texture_heap := gpu.mem_alloc_typed(gpu.Texture_Descriptor, 65536)
     defer gpu.mem_free(raw_data(texture_heap))
+    sampler_heap := gpu.mem_alloc_typed(gpu.Sampler_Descriptor, 10)
+    defer gpu.mem_free(raw_data(sampler_heap))
 
-    Vertex :: struct { pos: [4]f32 }
+    Vertex :: struct { pos: [4]f32, uv: [4]f32 }
 
     arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&arena)
@@ -54,6 +62,10 @@ main :: proc()
     verts.cpu[1].pos = {  0.5, -0.5, 0.0, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0, 0.0 }
     verts.cpu[3].pos = { -0.5, -0.5, 0.0, 0.0 }
+    verts.cpu[0].uv  = {  0.0,  1.0, 0.0, 0.0 }
+    verts.cpu[1].uv  = {  1.0,  0.0, 0.0, 0.0 }
+    verts.cpu[2].uv  = {  1.0,  1.0, 0.0, 0.0 }
+    verts.cpu[3].uv  = {  0.0,  0.0, 0.0, 0.0 }
 
     indices := gpu.arena_alloc_array(&arena, u32, 6)
     indices.cpu[0] = 0
@@ -70,29 +82,28 @@ main :: proc()
         gpu.mem_free(indices_local)
     }
 
-    tex_desc := gpu.Texture_Desc {
-        dimensions = { 100, 100, 1 },
-        mip_count = 1,
-        layer_count = 1,
-        sample_count = 1,
-        format = .RGBA8_Unorm,
-        usage = { .Sampled },
-    }
-    tex_size, tex_align := gpu.texture_size_and_align(tex_desc)
-    tex_ptr := gpu.mem_alloc(tex_size, tex_align, .GPU)
-    defer gpu.mem_free(tex_ptr)
-    texture := gpu.texture_create(tex_desc, tex_ptr)
-    defer gpu.texture_destroy(&texture)
-
     queue := gpu.get_queue()
 
     upload_cmd_buf := gpu.commands_begin(queue)
+
+    upload_arena := gpu.arena_init(10 * 1024 * 1024)
+    defer gpu.arena_destroy(&upload_arena)
+
+    peach_tex, peach_ptr := load_texture(Peach_Texture, &upload_arena, upload_cmd_buf)
+    bowser_tex, bowser_ptr := load_texture(Bowser_Texture, &upload_arena, upload_cmd_buf)
+    defer {
+        gpu.free_and_destroy_texture(&peach_tex, peach_ptr)
+        gpu.free_and_destroy_texture(&bowser_tex, bowser_ptr)
+    }
     gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
+
     gpu.queue_submit(queue, { upload_cmd_buf })
 
-    texture_heap[0] = gpu.texture_view_descriptor(texture, { format = .RGBA8_Unorm })
+    texture_heap[1] = gpu.texture_view_descriptor(peach_tex, { format = .RGBA8_Unorm })
+    texture_heap[0] = gpu.texture_view_descriptor(bowser_tex, { format = .RGBA8_Unorm })
+    sampler_heap[0] = gpu.sampler_descriptor({})
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
@@ -125,7 +136,9 @@ main :: proc()
             }
         })
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-        gpu.cmd_set_texture_heap(cmd_buf, gpu.host_to_device_ptr(raw_data(texture_heap)))
+        textures := gpu.host_to_device_ptr(raw_data(texture_heap))
+        samplers := gpu.host_to_device_ptr(raw_data(sampler_heap))
+        gpu.cmd_set_texture_heap(cmd_buf, textures, nil, samplers)
         Vert_Data :: struct {
             verts: rawptr,
         }
@@ -166,3 +179,33 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool)
 
     return
 }
+
+load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> (gpu.Texture, rawptr)
+{
+    options := image.Options {
+        .alpha_add_if_missing,
+    }
+    img, err := image.load_from_bytes(bytes, options)
+    ensure(err == nil, "Could not load texture.")
+    defer image.destroy(img)
+
+    staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
+    runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
+
+    texture, texture_ptr := gpu.alloc_and_create_texture({
+        type = .D2,
+        dimensions = { u32(img.width), u32(img.height), 1 },
+        mip_count = 1,
+        layer_count = 1,
+        sample_count = 1,
+        format = .RGBA8_Unorm,
+        usage = { .Sampled },
+    })
+    gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture_ptr)
+    return texture, texture_ptr
+}
+
+// To get around the fact that I need to import "core:image/png" to load pngs,
+// but then -vet complains because it's not used.
+@(private="file")
+_fictitious :: proc() -> png.Error { return {} }
