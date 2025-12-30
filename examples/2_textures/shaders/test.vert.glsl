@@ -49,4 +49,3 @@ void main()
     gl_Position = vert_out.pos;// _res_out_loc0_ = vert_out.color; ;
     _res_out_loc0_ = data._res_.verts[vert_id]._res_.uv.xy; ;
 }
-

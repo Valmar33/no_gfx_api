@@ -1027,6 +1027,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
     vk.CmdCopyBuffer(vk_cmd_buf, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
 }
 
+// TODO: dst is ignored atm.
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf

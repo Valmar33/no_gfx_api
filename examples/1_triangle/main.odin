@@ -94,13 +94,13 @@ main :: proc()
             continue
         }
 
-        last_ts := now_ts
-        now_ts = sdl.GetPerformanceCounter()
-        delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
-
         if next_frame > Frames_In_Flight {
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
         }
+
+        last_ts := now_ts
+        now_ts = sdl.GetPerformanceCounter()
+        delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
 
