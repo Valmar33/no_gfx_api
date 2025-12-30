@@ -2,7 +2,6 @@
 package main
 
 import log "core:log"
-import "core:fmt"
 import "core:image"
 import "core:image/png"
 import "base:runtime"
@@ -22,8 +21,6 @@ Bowser_Texture :: #load("textures/bowser.png")
 
 main :: proc()
 {
-    fmt.println("Work in Progress!")
-
     ok_i := sdl.Init({ .VIDEO })
     assert(ok_i)
 
