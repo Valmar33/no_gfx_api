@@ -12,7 +12,8 @@ import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import "vma"
 
-PUSH_CONSTANTS_SIZE :: size_of(rawptr) * 2
+Push_Constant_Size :: size_of(rawptr) * 2
+Max_Textures :: 65535
 
 @(private="file")
 GPU_Alloc_Meta :: struct #all_or_none
@@ -65,6 +66,7 @@ Context :: struct
     cmd_bufs_timelines: [10]Timeline,
 
     // Common resources
+    desc_set_layout: vk.DescriptorSetLayout,
     common_pipeline_layout: vk.PipelineLayout,
 
     // Swapchain
@@ -214,6 +216,7 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
     vk.GetPhysicalDeviceProperties2(ctx.phys_device, &props2)
     ensure(props.storageImageDescriptorSize == 32, "Unexpected storage image descriptor size.")
     ensure(props.sampledImageDescriptorSize == 32, "Unexpected sampled texture descriptor size.")
+    ensure(props.samplerDescriptorSize == 16, "Unexpected sampler descriptor size.")
 
     queue_priorities := []f32 { 0.0, 1.0 }
     queue_create_infos := []vk.DeviceQueueCreateInfo {
@@ -322,17 +325,41 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
         push_constant_ranges := []vk.PushConstantRange {
             {
                 stageFlags = { .VERTEX, .FRAGMENT },
-                size = PUSH_CONSTANTS_SIZE,
+                size = Push_Constant_Size,
             }
         }
-        layout_ci := vk.PipelineLayoutCreateInfo {
+
+        bindings := []vk.DescriptorSetLayoutBinding {
+            {
+                binding = 0,
+                descriptorType = .SAMPLED_IMAGE,
+                descriptorCount = Max_Textures,
+                stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
+            },
+            {
+                binding = 1,
+                descriptorType = .STORAGE_IMAGE,
+                descriptorCount = Max_Textures,
+                stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
+            },
+        }
+        layout_ci := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = { .DESCRIPTOR_BUFFER_EXT },
+            bindingCount = u32(len(bindings)),
+            pBindings = raw_data(bindings),
+        }
+        vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.desc_set_layout))
+
+        desc_layouts := []vk.DescriptorSetLayout { ctx.desc_set_layout }
+        pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             pushConstantRangeCount = u32(len(push_constant_ranges)),
             pPushConstantRanges = raw_data(push_constant_ranges),
-            setLayoutCount = 0,
-            pSetLayouts = nil,
+            setLayoutCount = u32(len(desc_layouts)),
+            pSetLayouts = raw_data(desc_layouts),
         }
-        vk_check(vk.CreatePipelineLayout(ctx.device, &layout_ci, nil, &ctx.common_pipeline_layout))
+        vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout))
 
         win_width, win_height: i32
         assert(sdl.GetWindowSize(window, &win_width, &win_height))
@@ -377,6 +404,7 @@ _cleanup :: proc()
         vk.DestroySemaphore(ctx.device, timeline.sem, nil)
     }
 
+    vk.DestroyDescriptorSetLayout(ctx.device, ctx.desc_set_layout, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout, nil)
 
     vma.destroy_allocator(ctx.vma_allocator)
@@ -801,6 +829,11 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
 
 //_texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor { return {} }
 
+_sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
+{
+    return {}
+}
+
 // Shaders
 _shader_create :: proc(code: []u32, type: Shader_Type) -> Shader
 {
@@ -809,7 +842,7 @@ _shader_create :: proc(code: []u32, type: Shader_Type) -> Shader
     push_constant_ranges := []vk.PushConstantRange {
         {
             stageFlags = { .VERTEX, .FRAGMENT },
-            size = PUSH_CONSTANTS_SIZE,
+            size = Push_Constant_Size,
         }
     }
 
@@ -940,7 +973,20 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
 
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) {}
 
-_cmd_set_active_texture_heap_ptr :: proc(cmd_buf: Command_Buffer, ptr: rawptr) {}
+_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, ptr: rawptr)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+
+    info := vk.DescriptorBufferBindingInfoEXT {
+        sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+        address = transmute(vk.DeviceAddress) ptr,
+        usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+    }
+    vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, 1, &info)
+    textures_slot := u32(0)
+    buffer_offset_textures := vk.DeviceSize(0)
+    vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout, 0, 1, &textures_slot, &buffer_offset_textures);
+}
 
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {})
 {
@@ -1117,8 +1163,8 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     }
 
     ptrs := []rawptr { vertex_data, fragment_data }
-    assert(PUSH_CONSTANTS_SIZE == len(ptrs) * size_of(ptrs[0]))
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout, { .VERTEX, .FRAGMENT }, 0, PUSH_CONSTANTS_SIZE, raw_data(ptrs))
+    assert(Push_Constant_Size == len(ptrs) * size_of(ptrs[0]))
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout, { .VERTEX, .FRAGMENT }, 0, Push_Constant_Size, raw_data(ptrs))
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
     vk.CmdDrawIndexed(vk_cmd_buf, index_count, instance_count, 0, 0, 0)

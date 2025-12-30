@@ -24,7 +24,7 @@ target:
 {
   executable: 2_textures.exe
   working_directory: ""
-  enabled: 1
+  enabled: 0
 }
 debug_info:
 {
@@ -49,10 +49,10 @@ debug_info:
 debug_info:
 {
   path: "C:/work/no_gfx_api/build/2_textures.pdb"
-  timestamp: 66202466012093
+  timestamp: 66202500757062
 }
 breakpoint:
 {
   address_location: "gpu::_cleanup"
-  hit_count: 0
+  hit_count: 1
 }

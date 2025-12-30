@@ -41,8 +41,8 @@ main :: proc()
         gpu.shader_destroy(&frag_shader)
     }
 
-    texture_desc_heap := gpu.mem_alloc_typed(gpu.Texture_Descriptor, 65536)
-    defer gpu.mem_free(raw_data(texture_desc_heap))
+    texture_heap := gpu.mem_alloc_typed(gpu.Texture_Descriptor, 65536)
+    defer gpu.mem_free(raw_data(texture_heap))
 
     Vertex :: struct { pos: [4]f32 }
 
@@ -92,7 +92,7 @@ main :: proc()
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
-    texture_desc_heap[0] = gpu.texture_view_descriptor(texture, { format = .RGBA8_Unorm })
+    texture_heap[0] = gpu.texture_view_descriptor(texture, { format = .RGBA8_Unorm })
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
@@ -125,6 +125,7 @@ main :: proc()
             }
         })
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
+        gpu.cmd_set_texture_heap(cmd_buf, gpu.host_to_device_ptr(raw_data(texture_heap)))
         Vert_Data :: struct {
             verts: rawptr,
         }

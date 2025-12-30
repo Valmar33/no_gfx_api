@@ -18,6 +18,7 @@ Semaphore :: distinct Handle
 Shader :: distinct Handle
 Texture_View_Handle :: vk.ImageView  // @tmp
 Texture_Descriptor :: struct { bytes: [4]u64 }
+Sampler_Descriptor :: struct { bytes: [2]u64 }
 
 // Enums
 Memory :: enum { Default = 0, GPU, Readback }
@@ -53,6 +54,11 @@ Texture_Desc :: struct
     sample_count: u32,  // 0 = 1
     format: Texture_Format,
     usage: Usage_Flags,
+}
+
+Sampler_Desc :: struct
+{
+    
 }
 
 Texture_View_Desc :: struct
@@ -157,7 +163,7 @@ queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semapho
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64) : _cmd_mem_copy
 //cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-//cmd_set_active_texture_heap_ptr: proc(cmd_buf: Command_Buffer, ptr: rawptr) : _cmd_set_active_texture_heap_ptr
+cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, ptr: rawptr) : _cmd_set_texture_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
