@@ -9,6 +9,8 @@ layout(buffer_reference) readonly buffer _res_ptr_void;
 
 layout(buffer_reference, std140) readonly buffer _res_ptr_void { uint _res_void_; };
 
+layout(set = 0, binding = 0) uniform sampler2D _res_textures_[];
+
 layout(push_constant, std140) uniform Push
 {
     _res_ptr_void _res_vert_data_;

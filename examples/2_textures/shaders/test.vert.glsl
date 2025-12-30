@@ -28,6 +28,8 @@ layout(buffer_reference, std140) readonly buffer _res_ptr_void { uint _res_void_
 layout(buffer_reference, std140) readonly buffer _res_slice_Vertex { Vertex _res_; };
 layout(buffer_reference, std140) readonly buffer _res_ptr_Data { Data _res_; };
 
+layout(set = 0, binding = 0) uniform sampler2D _res_textures_[];
+
 layout(push_constant, std140) uniform Push
 {
     _res_ptr_Data _res_data_;

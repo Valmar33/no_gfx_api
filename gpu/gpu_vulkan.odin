@@ -247,6 +247,11 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
         dynamicRendering = true,
         synchronization2 = true,
     }
+    next = &vk.PhysicalDeviceDescriptorBufferFeaturesEXT {
+        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+        pNext = next,
+        descriptorBuffer = true,
+    }
     next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
         sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
         pNext = next,
@@ -762,8 +767,39 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
     return u64(mem_requirements.size), u64(mem_requirements.alignment)
 }
 
-_texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 { return {} }
-_texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 { return {} }
+_texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
+{
+    vk_image := transmute(vk.Image) texture.handle
+
+    image_view_ci := vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = vk_image,
+        viewType = to_vk_texture_view_type(view_desc.type),
+        format = to_vk_texture_format(view_desc.format),
+        subresourceRange = {
+            aspectMask = { .COLOR },
+            levelCount = 1,
+            layerCount = 1,
+        }
+    }
+    view: vk.ImageView
+    vk_check(vk.CreateImageView(ctx.device, &image_view_ci, nil, &view))
+    defer vk.DestroyImageView(ctx.device, view, nil)
+
+    // IMPORTANT NOTE: Destroying the view immediately might technically be illegal here?
+    // This is probably not standard compliant...
+
+    desc: Texture_Descriptor
+    info := vk.DescriptorGetInfoEXT {
+        sType = .DESCRIPTOR_GET_INFO_EXT,
+        type = .SAMPLED_IMAGE,
+        data = { pSampledImage = &{ sampler = {}, imageView = view, imageLayout = .GENERAL } }
+    }
+    vk.GetDescriptorEXT(ctx.device, &info, size_of(Texture_Descriptor), &desc)
+    return desc
+}
+
+//_texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor { return {} }
 
 // Shaders
 _shader_create :: proc(code: []u32, type: Shader_Type) -> Shader
@@ -1498,6 +1534,18 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
 
 @(private="file")
 to_vk_texture_type :: #force_inline proc(type: Texture_Type) -> vk.ImageType
+{
+    switch type
+    {
+        case .D2: return .D2
+        case .D3: return .D3
+        case .D1: return .D1
+    }
+    return {}
+}
+
+@(private="file")
+to_vk_texture_view_type :: #force_inline proc(type: Texture_Type) -> vk.ImageViewType
 {
     switch type
     {

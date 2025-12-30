@@ -57,6 +57,7 @@ Texture_Desc :: struct
 
 Texture_View_Desc :: struct
 {
+    type: Texture_Type,
     format: Texture_Format,
     base_mip: u32,
     mip_count: u8,     // 0 = All_Mips
@@ -135,7 +136,7 @@ host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr  // Only s
 texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
 texture_create: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
 texture_destroy: proc(texture: ^Texture) : _texture_destroy
-//texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_View : _texture_view_descriptor
+texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
 //texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> [4]u64 : _texture_rw_view_descriptor
 
 // Shaders

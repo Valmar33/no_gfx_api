@@ -1,7 +1,7 @@
 // raddbg 0.9.24 project file
 
-recent_file: path: "../../../Users/leona/Desktop/Odin/base/runtime/core.odin"
 recent_file: path: "../gpu/gpu_vulkan.odin"
+recent_file: path: "../../../Users/leona/Desktop/Odin/base/runtime/core.odin"
 recent_file: path: "../../../Users/leona/Desktop/Odin/base/runtime/entry_windows.odin"
 recent_file: path: "../examples/2_textures/main.odin"
 recent_file: path: "../examples/example1/main.odin"
@@ -49,7 +49,7 @@ debug_info:
 debug_info:
 {
   path: "C:/work/no_gfx_api/build/2_textures.pdb"
-  timestamp: 66202455092296
+  timestamp: 66202466012093
 }
 breakpoint:
 {

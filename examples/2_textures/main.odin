@@ -92,6 +92,8 @@ main :: proc()
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
+    texture_desc_heap[0] = gpu.texture_view_descriptor(texture, { format = .RGBA8_Unorm })
+
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)

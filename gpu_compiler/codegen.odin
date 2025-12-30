@@ -86,6 +86,10 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
     writeln("")
 
+    // Generate bindings
+    writeln("layout(set = 0, binding = 0) uniform sampler2D _res_textures_[];")
+    writeln("")
+
     data_type := ast.used_data_type if ast.used_data_type != "" else "void"
 
     writeln("layout(push_constant, std140) uniform Push")
