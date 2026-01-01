@@ -3,26 +3,25 @@
 
 package main
 
-import "core:fmt"
 import "base:runtime"
 import "core:slice"
 import intr "base:intrinsics"
 
 Any_Node :: union
 {
-    ^Ast_Decl_Arg,
     Any_Statement,
     Any_Expr,
-    Any_Decl,
+    ^Ast_Decl,
 }
 
 Ast :: struct
 {
-    used_types: map[Ast_Type]struct{},
+    used_types: [dynamic]Ast_Type,
     used_in_locations: map[u32]Ast_Type,
     used_out_locations: map[u32]Ast_Type,
-    used_data_type: string,
+    used_data_type: ^Ast_Type,
     scope: ^Ast_Scope,
+    procs: [dynamic]^Ast_Proc_Def,
 }
 
 Ast_Node :: struct
@@ -34,45 +33,24 @@ Ast_Node :: struct
 Ast_Scope :: struct
 {
     enclosing_scope: ^Ast_Scope,  // Can be nil
-    decls: []^Ast_Decl,
+    decls: [dynamic]^Ast_Decl,
 }
 
 // Declarations (global)
 
-Any_Decl :: union
-{
-    ^Ast_Struct_Decl,
-    ^Ast_Proc_Decl,
-}
-
 Ast_Decl :: struct
-{
-    using base: Ast_Node,
-    derived_decl: Any_Decl,
-    name: string,
-}
-
-Ast_Decl_Arg :: struct
 {
     using base: Ast_Node,
     name: string,
     type: ^Ast_Type,
-    attr: Maybe(Ast_Attribute)
+    attr: Maybe(Ast_Attribute),
 }
 
-Ast_Struct_Decl :: struct
+Ast_Proc_Def :: struct
 {
-    using base_decl: Ast_Decl,
-    fields: []^Ast_Decl_Arg,
-}
-
-Ast_Proc_Decl :: struct
-{
-    using base_decl: Ast_Decl,
-    args: []^Ast_Decl_Arg,
-    return_type: ^Ast_Type,
-    return_attr: Maybe(Ast_Attribute),
+    decl: ^Ast_Decl,
     statements: []^Ast_Statement,
+    scope: ^Ast_Scope,
 }
 
 // Expressions
@@ -163,7 +141,6 @@ Ast_Lit_Expr :: struct
 Any_Statement :: union
 {
     ^Ast_Assign,
-    ^Ast_Var_Decl,
     ^Ast_Stmt_Expr,
     ^Ast_Return,
 }
@@ -181,13 +158,6 @@ Ast_Assign :: struct
     rhs: ^Ast_Expr
 }
 
-Ast_Var_Decl :: struct
-{
-    using base_statement: Ast_Statement,
-    name: string,
-    type: ^Ast_Type,
-}
-
 Ast_Stmt_Expr :: struct
 {
     using base_statement: Ast_Statement,
@@ -202,13 +172,43 @@ Ast_Return :: struct
 
 // Types
 
+Ast_Type_Kind :: enum
+{
+    Poison = 0,
+    Label,
+    Pointer,
+    Slice,
+    Proc,
+    Primitive,
+    Struct,
+}
+
+Ast_Type_Primitive_Kind :: enum
+{
+    None = 0,
+    Float,
+    Uint,
+    Int,
+    Vec2,
+    Vec3,
+    Vec4
+}
+
 Ast_Type :: struct
 {
-    is_ptr: bool,
-    is_slice: bool,
-    name: string,
-    struct_decl: ^Ast_Struct_Decl,  // Can be nil
-    attr: Maybe(Ast_Attribute)
+    kind: Ast_Type_Kind,
+    primitive_kind: Ast_Type_Primitive_Kind,  // Only populated if kind == .Primitive
+    base: ^Ast_Type,
+
+    name: Token,
+
+    // Proc
+    args: []^Ast_Decl,
+    ret: ^Ast_Type,
+    ret_attr: Maybe(Ast_Attribute),
+
+    // Struct
+    members: []^Ast_Decl,
 }
 
 parse_file :: proc(filename: string, tokens: []Token, allocator: runtime.Allocator) -> (Ast, bool)
@@ -229,11 +229,11 @@ Parser :: struct
     filename: string,
     at: u32,
     error: bool,
-    cur_scope: ^Ast_Scope,
-    used_types: map[Ast_Type]struct{},
+    scope: ^Ast_Scope,
+    used_types: [dynamic]Ast_Type,
     used_out_locations: map[u32]Ast_Type,
     used_in_locations: map[u32]Ast_Type,
-    used_data_type: string,
+    used_data_type: ^Ast_Type,
 }
 
 _parse_file :: proc(using p: ^Parser) -> Ast
@@ -242,9 +242,7 @@ _parse_file :: proc(using p: ^Parser) -> Ast
         scope = new(Ast_Scope)
     }
 
-    cur_scope = ast.scope
-    scratch, _ := acquire_scratch()
-    tmp_list := make([dynamic]^Ast_Decl, allocator = scratch)
+    scope = ast.scope
 
     loop: for true
     {
@@ -256,13 +254,13 @@ _parse_file :: proc(using p: ^Parser) -> Ast
                    tokens[at+2].type == .Colon &&
                    tokens[at+3].type == .Struct
                 {
-                    append(&tmp_list, parse_struct_def(p))
+                    parse_struct_def(p)
                 }
                 else if tokens[at+1].type == .Colon &&
                         tokens[at+2].type == .Colon &&
                         tokens[at+3].type == .LParen
                 {
-                    append(&tmp_list, parse_proc_def(p))
+                    append(&ast.procs, parse_proc_def(p))
                 }
                 else
                 {
@@ -279,7 +277,6 @@ _parse_file :: proc(using p: ^Parser) -> Ast
         }
     }
 
-    ast.scope.decls = slice.clone(tmp_list[:])
     ast.used_types = used_types
     ast.used_out_locations = used_out_locations
     ast.used_in_locations = used_in_locations
@@ -289,7 +286,12 @@ _parse_file :: proc(using p: ^Parser) -> Ast
 
 parse_struct_def :: proc(using p: ^Parser) -> ^Ast_Decl
 {
-    node := make_decl(p, Ast_Struct_Decl)
+    node := make_node(p, Ast_Decl)
+    append(&scope.decls, node)
+
+    struct_type := new(Ast_Type)
+    struct_type.kind = .Struct
+    node.type = struct_type
 
     ident := required_token(p, .Ident)
     node.name = ident.text
@@ -298,44 +300,58 @@ parse_struct_def :: proc(using p: ^Parser) -> ^Ast_Decl
     required_token(p, .Colon)
     required_token(p, .Struct)
     required_token(p, .LBrace)
-    node.fields = parse_decl_list(p)
+    struct_type.members = parse_decl_list(p, false)
     required_token(p, .RBrace)
     return node
 }
 
-parse_proc_def :: proc(using p: ^Parser) -> ^Ast_Decl
+parse_proc_def :: proc(using p: ^Parser) -> ^Ast_Proc_Def
 {
-    node := make_decl(p, Ast_Proc_Decl)
+    decl := make_node(p, Ast_Decl)
+    append(&scope.decls, decl)
+
+    proc_type := new(Ast_Type)
+    proc_type.kind = .Proc
+    decl.type = proc_type
+
+    old_scope := scope
+    scope = new(Ast_Scope)
+    scope.enclosing_scope = old_scope
+    defer scope = old_scope
+
+    proc_def := new(Ast_Proc_Def)
+    proc_def.decl = decl
+    proc_def.scope = scope
 
     ident := required_token(p, .Ident)
-    node.name = ident.text
+    decl.name = ident.text
 
     required_token(p, .Colon)
     required_token(p, .Colon)
     required_token(p, .LParen)
-    node.args = parse_decl_list(p)
+    proc_type.args = parse_decl_list(p, true)
     required_token(p, .RParen)
 
     if optional_token(p, .Arrow)
     {
-        node.return_type = parse_type(p)
+        proc_type.ret = parse_type(p)
         if tokens[at].type == .Attribute {
-            node.return_attr = parse_attribute(p)
-            if node.return_attr != nil
+            proc_type.ret_attr = parse_attribute(p)
+            if proc_type.ret_attr != nil
             {
-                if node.return_attr.?.type == .In_Loc {
-                    used_in_locations[node.return_attr.?.arg] = node.return_type^
-                } else if node.return_attr.?.type == .Out_Loc {
-                    used_out_locations[node.return_attr.?.arg] = node.return_type^
+                if proc_type.ret_attr.?.type == .In_Loc {
+                    used_in_locations[proc_type.ret_attr.?.arg] = proc_type.ret^
+                } else if proc_type.ret_attr.?.type == .Out_Loc {
+                    used_out_locations[proc_type.ret_attr.?.arg] = proc_type.ret^
                 }
             }
         }
     }
 
     required_token(p, .LBrace)
-    node.statements = parse_statement_list(p)
+    proc_def.statements = parse_statement_list(p)
     required_token(p, .RBrace)
-    return node
+    return proc_def
 }
 
 parse_statement_list :: proc(using p: ^Parser) -> []^Ast_Statement
@@ -344,7 +360,8 @@ parse_statement_list :: proc(using p: ^Parser) -> []^Ast_Statement
     tmp_list := make([dynamic]^Ast_Statement, allocator = scratch)
     for true
     {
-        append(&tmp_list, parse_statement(p))
+        stmt := parse_statement(p)
+        if stmt != nil do append(&tmp_list, stmt)
         if tokens[at].type == .RBrace || tokens[at].type == .EOS do break
         if error do break
     }
@@ -372,7 +389,7 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
     }
     else if tokens[at].type == .Ident && tokens[at+1].type == .Colon
     {
-        node = parse_var_decl(p)
+        parse_var_decl(p)
     }
     else
     {
@@ -394,16 +411,16 @@ parse_assign :: proc(using p: ^Parser) -> ^Ast_Statement
     return node
 }
 
-parse_var_decl :: proc(using p: ^Parser) -> ^Ast_Statement
+parse_var_decl :: proc(using p: ^Parser)
 {
-    node := make_statement(p, Ast_Var_Decl)
+    node := make_node(p, Ast_Decl)
+    append(&scope.decls, node)
 
     ident := required_token(p, .Ident)
     node.name = ident.text
 
     required_token(p, .Colon)
     node.type = parse_type(p)
-    return node
 }
 
 parse_expr :: proc(using p: ^Parser, prec: int = max(int)) -> ^Ast_Expr
@@ -445,12 +462,12 @@ parse_primary_expr :: proc(using p: ^Parser) -> ^Ast_Expr
         required_token(p, .RParen)
         expr = internal
     }
-    else if token := tokens[at]; token.type == .Ident
+    else if tokens[at].type == .Ident
     {
         expr = make_expr(p, Ast_Ident_Expr)
         at += 1
     }
-    else if token := tokens[at]; token.type == .NumLit
+    else if tokens[at].type == .NumLit
     {
         expr = make_expr(p, Ast_Lit_Expr)
         at += 1
@@ -520,9 +537,27 @@ parse_postfix_expr :: proc(using p: ^Parser) -> ^Ast_Expr
     return expr
 }
 
-parse_decl_list_elem :: proc(using p: ^Parser) -> ^Ast_Decl_Arg
+parse_decl_list :: proc(using p: ^Parser, add_to_scope: bool) -> []^Ast_Decl
 {
-    node := make_node(p, Ast_Decl_Arg)
+    scratch, _ := acquire_scratch()
+    tmp_list := make([dynamic]^Ast_Decl, allocator = scratch)
+    for true
+    {
+        append(&tmp_list, parse_decl_list_elem(p, add_to_scope))
+        comma_present := optional_token(p, .Comma)
+        if !comma_present do break
+        if comma_present && (tokens[at].type == .RParen || tokens[at].type == .RBrace) do break
+        if error do break
+    }
+    return slice.clone(tmp_list[:])
+}
+
+parse_decl_list_elem :: proc(using p: ^Parser, add_to_scope: bool) -> ^Ast_Decl
+{
+    node := make_node(p, Ast_Decl)
+    if add_to_scope {
+        append(&scope.decls, node)
+    }
 
     ident := required_token(p, .Ident)
     required_token(p, .Colon)
@@ -534,7 +569,7 @@ parse_decl_list_elem :: proc(using p: ^Parser) -> ^Ast_Decl_Arg
     if node.attr != nil
     {
         if node.attr.?.type == .Data {
-            used_data_type = node.type.name
+            used_data_type = node.type
         }
 
         if node.attr.?.type == .In_Loc {
@@ -549,39 +584,60 @@ parse_decl_list_elem :: proc(using p: ^Parser) -> ^Ast_Decl_Arg
 
 parse_type :: proc(using p: ^Parser) -> ^Ast_Type
 {
-    node := new(Ast_Type)
+    base: ^Ast_Type
+    node: ^Ast_Type
 
-    if optional_token(p, .LBracket)
+    for true
     {
-        required_token(p, .RBracket)
-        node.is_slice = true
-    }
-    else if optional_token(p, .Caret)
-    {
-        node.is_ptr = true
+        if optional_token(p, .LBracket)
+        {
+            slice_type := new(Ast_Type)
+            slice_type.kind = .Slice
+            if node != nil do node.base = slice_type
+            node = slice_type
+            if base == nil do base = node
+
+            required_token(p, .RBracket)
+        }
+        else if optional_token(p, .Caret)
+        {
+            ptr_type := new(Ast_Type)
+            ptr_type.kind = .Pointer
+            if node != nil do node.base = ptr_type
+            node = ptr_type
+            if base == nil do base = node
+        }
+        else do break
     }
 
     ident := required_token(p, .Ident)
-    node.name = ident.text
-
-    // Add to the global type table
-    used_types[node^] = {}
-    return node
-}
-
-parse_decl_list :: proc(using p: ^Parser) -> []^Ast_Decl_Arg
-{
-    scratch, _ := acquire_scratch()
-    tmp_list := make([dynamic]^Ast_Decl_Arg, allocator = scratch)
-    for true
+    prim_type: Ast_Type_Primitive_Kind
+    switch ident.text
     {
-        append(&tmp_list, parse_decl_list_elem(p))
-        comma_present := optional_token(p, .Comma)
-        if !comma_present do break
-        if comma_present && (tokens[at].type == .RParen || tokens[at].type == .RBrace) do break
-        if error do break
+        case "float": prim_type = .Float
+        case "uint": prim_type = .Uint
+        case "int": prim_type = .Int
+        case "vec2": prim_type = .Vec2
+        case "vec3": prim_type = .Vec3
+        case "vec4": prim_type = .Vec4
+        case: prim_type = .None
     }
-    return slice.clone(tmp_list[:])
+
+    ident_node := new(Ast_Type)
+    ident_node.name = ident
+    ident_node.primitive_kind = prim_type
+    if node != nil do node.base = ident_node
+    node = ident_node
+    if base == nil do base = node
+
+    if prim_type == .None {
+        node.kind = .Label
+    } else {
+        node.kind = .Primitive
+    }
+
+    add_type_if_not_present(p, base)
+    return base
 }
 
 parse_attribute :: proc(using p: ^Parser) -> Maybe(Ast_Attribute)
@@ -643,14 +699,6 @@ make_expr :: proc(using p: ^Parser, $T: typeid) -> ^T
     return node
 }
 
-make_decl :: proc(using p: ^Parser, $T: typeid) -> ^T
-{
-    node := new(T)
-    node.token = tokens[at]
-    node.derived_decl = node
-    return node
-}
-
 make_statement :: proc(using p: ^Parser, $T: typeid) -> ^T
 {
     node := new(T)
@@ -707,4 +755,15 @@ Op_Precedence := map[Token_Type]Op_Info {
 
     .Plus  = { 4, .Add },
     .Minus = { 4, .Minus },
+}
+
+add_type_if_not_present :: proc(using p: ^Parser, type: ^Ast_Type)
+{
+    if type == nil do return
+
+    for &used in used_types {
+        if same_type(type, &used) do return
+    }
+
+    append(&used_types, type^)
 }

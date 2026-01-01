@@ -7,6 +7,7 @@ layout(location = 0) in vec4 _res_in_loc0_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
 
+void main();
 layout(buffer_reference, std140) readonly buffer _res_ptr_void { uint _res_void_; };
 
 layout(set = 0, binding = 0) uniform texture2D _res_textures_[];

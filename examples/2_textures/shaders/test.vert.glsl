@@ -5,8 +5,8 @@
 layout(location = 0) out vec2 _res_out_loc0_;
 
 layout(buffer_reference) readonly buffer _res_ptr_void;
-layout(buffer_reference) readonly buffer _res_ptr_Data;
 layout(buffer_reference) readonly buffer _res_slice_Vertex;
+layout(buffer_reference) readonly buffer _res_ptr_Data;
 
 struct Vertex
 {
@@ -25,9 +25,10 @@ struct Output
     vec2 uv;
 };
 
+void main();
 layout(buffer_reference, std140) readonly buffer _res_ptr_void { uint _res_void_; };
-layout(buffer_reference, std140) readonly buffer _res_ptr_Data { Data _res_; };
 layout(buffer_reference, std140) readonly buffer _res_slice_Vertex { Vertex _res_; };
+layout(buffer_reference, std140) readonly buffer _res_ptr_Data { Data _res_; };
 
 layout(set = 0, binding = 0) uniform texture2D _res_textures_[];
 layout(set = 1, binding = 0) uniform writeonly image2D _res_textures_rw_[];
@@ -46,6 +47,6 @@ void main()
     Output vert_out;
     vert_out.pos = vec4(data._res_.verts[vert_id]._res_.pos.xyz, 1.0);
     vert_out.uv = vec2(data._res_.verts[vert_id]._res_.uv.xy);
-    gl_Position = vert_out.pos; _res_out_loc0_ = vert_out.uv; ;
+    ;
 }
 

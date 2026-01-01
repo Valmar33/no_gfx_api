@@ -13,6 +13,7 @@ struct Data
     float fade;
 };
 
+void main();
 layout(buffer_reference, std140) readonly buffer _res_ptr_void { uint _res_void_; };
 layout(buffer_reference, std140) readonly buffer _res_ptr_Data { Data _res_; };
 

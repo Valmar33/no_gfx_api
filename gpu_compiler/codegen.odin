@@ -3,7 +3,6 @@ package main
 
 import "core:fmt"
 import vmem "core:mem/virtual"
-import "core:mem"
 import "core:strings"
 import "base:runtime"
 import "core:os/os2"
@@ -36,29 +35,32 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     writeln("")
 
     writefln("layout(buffer_reference) readonly buffer _res_ptr_void;")
-    for type in ast.used_types
+    for &type in ast.used_types
     {
-        if type.is_ptr {
-            writefln("layout(buffer_reference) readonly buffer _res_ptr_%v;", type.name)
-        } else if type.is_slice {
-            writefln("layout(buffer_reference) readonly buffer _res_slice_%v;", type.name)
+        if type.kind == .Pointer || type.kind == .Slice {
+            writefln("layout(buffer_reference) readonly buffer %v;", type_to_glsl(&type))
         }
     }
 
     writeln("")
 
-    // Generate all structs (can't forward declare structs in GLSL)
-    for declaration in ast.scope.decls
+    // Generate all decls (structs are already defined here because you can't forward-declare structs in GLSL)
+    for decl in ast.scope.decls
     {
-        switch decl in declaration.derived_decl
+        switch decl.type.kind
         {
-            case ^Ast_Struct_Decl:
+            case .Poison: {}
+            case .Label: {}
+            case .Pointer: {}
+            case .Slice: {}
+            case .Primitive: {}
+            case .Struct:
             {
                 writefln("struct %v", decl.name)
                 writeln("{")
                 if writer_scope()
                 {
-                    for field in decl.fields
+                    for field in decl.type.members
                     {
                         writefln("%v %v;", type_to_glsl(field.type), field.name)
                     }
@@ -66,21 +68,32 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
                 writeln("};")
                 writeln("")
             }
-            case ^Ast_Proc_Decl: {}
-            case:
+            case .Proc:
             {
-                fmt.println("Error!")
+                is_main := decl.name == "main"
+
+                write_begin("")
+                ret_type_glsl := "void" if is_main else type_to_glsl(decl.type.ret)
+                writef("%v %v(", ret_type_glsl, decl.name)
+                for arg, i in decl.type.args
+                {
+                    if arg.attr != nil do continue
+
+                    writef("%v %v", type_to_glsl(arg.type), arg.name)
+                    if i < len(decl.type.args) - 1 {
+                        write(", ")
+                    }
+                }
+                writeln(");")
             }
         }
     }
 
     writefln("layout(buffer_reference, std140) readonly buffer _res_ptr_void {{ uint _res_void_; }};")
-    for type in ast.used_types
+    for &type in ast.used_types
     {
-        if type.is_ptr {
-            writefln("layout(buffer_reference, std140) readonly buffer _res_ptr_%v {{ %v _res_; }};", type.name, type.name)
-        } else if type.is_slice {
-            writefln("layout(buffer_reference, std140) readonly buffer _res_slice_%v {{ %v _res_; }};", type.name, type.name)
+        if type.kind == .Pointer || type.kind == .Slice {
+            writefln("layout(buffer_reference, std140) readonly buffer %v {{ %v _res_; }};", type_to_glsl(&type), type_to_glsl(type.base))
         }
     }
 
@@ -92,82 +105,76 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     writeln("layout(set = 2, binding = 0) uniform sampler _res_samplers_[];")
     writeln("")
 
-    data_type := ast.used_data_type if ast.used_data_type != "" else "void"
-
     writeln("layout(push_constant, std140) uniform Push")
     writeln("{")
+    data_type_str := type_to_glsl(ast.used_data_type) if ast.used_data_type != nil else "_res_ptr_void"
     if writer_scope()
     {
         if shader_type == .Vertex {
-            writefln("_res_ptr_%v _res_data_;", data_type)
+            writefln("%v _res_data_;", data_type_str)
         } else {
-            writefln("_res_ptr_%v _res_vert_data_;", data_type)
+            writefln("%v _res_vert_data_;", data_type_str)
         }
 
         if shader_type == .Fragment {
-            writefln("_res_ptr_%v _res_data_;", data_type)
+            writefln("%v _res_data_;", data_type_str)
         } else {
-            writefln("_res_ptr_%v _res_frag_data_;", data_type)
+            writefln("%v _res_frag_data_;", data_type_str)
         }
     }
     writeln("};")
     writeln("")
 
-    for declaration in ast.scope.decls
+    for proc_def in ast.procs
     {
-        switch decl in declaration.derived_decl
+        decl := proc_def.decl
+        is_main := decl.name == "main"
+
+        write_begin("")
+        ret_type_glsl := "void" if is_main else type_to_glsl(decl.type.ret)
+        writef("%v %v(", ret_type_glsl, decl.name)
+        for arg, i in decl.type.args
         {
-            case ^Ast_Struct_Decl: {}
-            case ^Ast_Proc_Decl:
-            {
-                is_main := decl.name == "main"
+            if arg.attr != nil do continue
 
-                write_begin("")
-                ret_type_glsl := "void" if is_main else type_to_glsl(decl.return_type)
-                writef("%v %v(", ret_type_glsl, decl.name)
-                for arg, i in decl.args
-                {
-                    if arg.attr != nil do continue
-
-                    writef("%v %v", type_to_glsl(arg.type), arg.name)
-                    if i < len(decl.args) - 1 {
-                        write(", ")
-                    }
-                }
-                writeln(")")
-                writeln("{")
-                if writer_scope()
-                {
-                    for arg, i in decl.args
-                    {
-                        if arg.attr == nil do continue
-                        writefln("%v %v = %v;", type_to_glsl(arg.type), arg.name, attribute_to_glsl(arg.attr.?))
-                    }
-
-                    for statement in decl.statements
-                    {
-                        codegen_statement(statement, ast, decl)
-                    }
-                }
-                writeln("}")
-                writeln("")
-            }
-            case:
-            {
-                fmt.println("Error!")
+            writef("%v %v", type_to_glsl(arg.type), arg.name)
+            if i < len(decl.type.args) - 1 {
+                write(", ")
             }
         }
+        writeln(")")
+        writeln("{")
+        if writer_scope()
+        {
+            // Declare all variables
+            for var_decl in proc_def.scope.decls
+            {
+                if var_decl.attr == nil {
+                    writefln("%v %v;", type_to_glsl(var_decl.type), var_decl.name)
+                } else {
+                    writefln("%v %v = %v;", type_to_glsl(var_decl.type), var_decl.name, attribute_to_glsl(var_decl.attr.?))
+                }
+            }
+
+            for statement in proc_def.statements
+            {
+                codegen_statement(statement, ast, proc_def)
+            }
+        }
+        writeln("}")
+        writeln("")
     }
 
     writer_output_to_file(output_path)
 }
 
-codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Proc_Decl)
+codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Proc_Def)
 {
     write_begin("")
 
-    is_main := proc_def.name == "main"
-    ret_attr := proc_def.return_attr
+    decl := proc_def.decl
+    is_main := decl.name == "main"
+    ret_attr := decl.type.ret_attr
 
     switch stmt in statement.derived_statement
     {
@@ -181,23 +188,21 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
             write(" = ")
             codegen_expr(stmt.rhs)
         }
-        case ^Ast_Var_Decl:
-        {
-            writef("%v %v", type_to_glsl(stmt.type), stmt.name)
-        }
         case ^Ast_Return:
         {
             if is_main
             {
-                if stmt.expr.type.struct_decl != nil
+                type := stmt.expr.type
+                if type.kind == .Label do type = type_get_base(type)
+
+                if type.kind == .Struct
                 {
-                    struct_decl := stmt.expr.type.struct_decl
-                    for field in struct_decl.fields
+                    for member in stmt.expr.type.members
                     {
-                        if field.attr == nil do continue
-                        writef("%v = ", attribute_to_glsl(field.attr.?))
+                        if member.attr == nil do continue
+                        writef("%v = ", attribute_to_glsl(member.attr.?))
                         codegen_expr(stmt.expr)
-                        writef(".%v; ", field.name)
+                        writef(".%v; ", member.name)
                     }
                 }
                 else
@@ -246,7 +251,7 @@ codegen_expr :: proc(expression: ^Ast_Expr)
         case ^Ast_Member_Access:
         {
             codegen_expr(expr.target)
-            if expr.target.type.is_ptr || expr.target.type.is_slice {
+            if expr.target.type.kind == .Pointer || expr.target.type.kind == .Slice {
                 writef("._res_.%v", expr.member_name)
             } else {
                 writef(".%v", expr.member_name)
@@ -301,21 +306,35 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
 type_to_glsl :: proc(type: ^Ast_Type) -> string
 {
-    to_concat: []string
-    if type.is_ptr {
-        to_concat = { "_res_ptr_", type.name }
-    } else if type.is_slice {
-        to_concat = { "_res_slice_", type.name }
-    } else {
-        to_concat = { type.name }
+    if type == nil do return "void"
+
+    switch type.kind
+    {
+        case .Poison: return "<POISON>"
+        case .Label: return type.name.text
+        case .Pointer: return strings.concatenate({ "_res_ptr_", type_to_glsl(type.base) })
+        case .Slice: return strings.concatenate({ "_res_slice_", type_to_glsl(type.base) })
+        case .Proc: assert(false, "Not implemented.")
+        case .Struct: assert(false, "Not implemented.")
+        case .Primitive:
+        {
+            switch type.primitive_kind
+            {
+                case .None: return "NONE"
+                case .Float: return "float"
+                case .Uint: return "uint"
+                case .Int: return "int"
+                case .Vec2: return "vec2"
+                case .Vec3: return "vec3"
+                case .Vec4: return "vec4"
+            }
+        }
     }
-    concatenated := strings.concatenate(to_concat)
-    return concatenated
+    return ""
 }
 
 attribute_to_glsl :: proc(attribute: Ast_Attribute) -> string
 {
-    to_concat: []string
     val_str := runtime.cstring_to_string(fmt.caprint(attribute.arg, allocator = context.allocator))
 
     switch attribute.type
@@ -403,7 +422,7 @@ write :: proc(strings: ..any)
 @(private="file")
 write_indentation :: proc()
 {
-    for i in 0..<4*writer.indentation {
+    for _ in 0..<4*writer.indentation {
         fmt.sbprint(&writer.builder, " ")
     }
 }

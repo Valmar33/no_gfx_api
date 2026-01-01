@@ -1,7 +1,6 @@
 
 package main
 
-import "core:fmt"
 import "base:runtime"
 
 typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator) -> bool
@@ -10,32 +9,71 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
 
     c := Checker {
         ast = ast,
-        input_path = input_path
+        input_path = input_path,
+        scope = ast.scope,
+        error = false,
     }
 
-    for declaration in ast.scope.decls
+    add_intrinsics()
+
+    for decl in ast.scope.decls
     {
-        switch decl in declaration.derived_decl
+        switch decl.type.kind
         {
-            case ^Ast_Struct_Decl: {}
-            case ^Ast_Proc_Decl:
+            case .Poison: {}
+            case .Proc:
             {
-                c.proc_def = decl
-                for statement in decl.statements
+                for arg in decl.type.args
                 {
-                    typecheck_statement(&c, statement)
+                    resolve_type(&c, arg.type)
+                }
+
+                resolve_type(&c, decl.type.ret)
+            }
+            case .Struct:
+            {
+                for member in decl.type.members
+                {
+                    resolve_type(&c, member.type)
                 }
             }
+            case .Label: {}
+            case .Primitive: {}
+            case .Pointer: {}
+            case .Slice: {}
+        }
+    }
+
+    for proc_def in ast.procs
+    {
+        for decl in proc_def.scope.decls
+        {
+            resolve_type(&c, decl.type)
+
+            if decl.attr != nil && decl.attr.?.type == .Data
+            {
+                if decl.type.kind != .Pointer && decl.type.kind != .Slice {
+                    typecheck_error(&c, decl.token, "Variable declared with '@data' attribute must be of pointer or slice type.")
+                }
+            }
+        }
+
+        old_scope := c.scope
+        c.scope = proc_def.scope
+        defer c.scope = old_scope
+
+        for stmt in proc_def.statements {
+            typecheck_statement(&c, stmt)
         }
     }
 
     return !c.error
 }
 
-Checker :: struct
+Checker :: struct #all_or_none
 {
     ast: Ast,
-    proc_def: ^Ast_Proc_Decl,
+    scope: ^Ast_Scope,
     input_path: string,
     error: bool,
 }
@@ -56,10 +94,6 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
             /*if !same_type(stmt.lhs.type, stmt.rhs.type) {
                 typecheck_error(c, expr.token, "Mismatching types.")
             }*/
-        }
-        case ^Ast_Var_Decl:
-        {
-
         }
         case ^Ast_Return:
         {
@@ -85,21 +119,27 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
         }
         case ^Ast_Ident_Expr:
         {
-            info, ok := var_name_resolve(c, expr.token.text, expr.token)
-            if !ok {
-                typecheck_error(c, expr.token, "Couldn't find declaration of this identifier.")
-            }
-            expr.type = new(Ast_Type)
-            expr.type^ = {
-                is_ptr = info.is_ptr,
-                is_slice = info.is_slice,
-                name = info.name,
-                struct_decl = info.struct_decl
+            decl := decl_lookup(c, expr.token)
+            if decl == nil {
+                typecheck_error(c, expr.token, "Undeclared identifier '%v'.", expr.token.text)
+                expr.type = &POISON_TYPE
+            } else {
+                expr.type = decl.type
             }
         }
         case ^Ast_Lit_Expr:
         {
-            //new(Ast_Type)
+            switch v in expr.token.value
+            {
+                case u64:
+                {
+                    expr.type = &UINT_TYPE
+                }
+                case f32:
+                {
+                    expr.type = &FLOAT_TYPE
+                }
+            }
         }
         case ^Ast_Member_Access:
         {
@@ -107,177 +147,198 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 
             if expr.member_name == "xyz"
             {
-                type := new(Ast_Type)
-                type.name = "vec3"
-                expr.type = type
+                expr.type = &VEC3_TYPE
                 break
             }
             else if expr.member_name == "xy"
             {
-                type := new(Ast_Type)
-                type.name = "vec2"
-                expr.type = type
+                expr.type = &VEC2_TYPE
                 break
             }
 
-            if expr.target.type.struct_decl == nil {
+            base := type_get_base(expr.target.type)
+            if base.kind != .Struct {
                 typecheck_error(c, expr.token, "Can't access members on this type.")
             }
 
-            struct_decl := expr.target.type.struct_decl
-            found_field := false
-            type := new(Ast_Type)
-            for field in struct_decl.fields
+            field_type := &POISON_TYPE
+            for field in base.members
             {
                 if field.name == expr.member_name
                 {
-                    found_field = true
-                    type^ = field.type^
+                    field_type = field.type
                     break
                 }
             }
 
-            if !found_field {
+            if field_type == &POISON_TYPE {
                 typecheck_error(c, expr.token, "Member not found.")
             }
 
-            type_resolved, ok := search_type(c, type.name)
-            if !ok {
-                typecheck_error(c, expr.token, "Type not found.")
-            }
-            expr.type = type
-            expr.type.struct_decl = type_resolved.struct_decl
+            expr.type = field_type
         }
         case ^Ast_Array_Access:
         {
             typecheck_expr(c, expr.target)
             typecheck_expr(c, expr.idx_expr)
-            expr.type = new(Ast_Type)
-            expr.type^ = expr.target.type^
-            expr.type.is_slice = false
-            expr.type.is_ptr = false
+
+            if expr.target.type.kind != .Slice {
+                typecheck_error(c, expr.token, "Can't access array element of this type, it must be a slice.")
+                expr.target.type = &POISON_TYPE
+            }
+
+            expr.type = expr.target.type.base
         }
         case ^Ast_Call:
         {
-            // TODO: Only constructors work at the moment
-            target, is_ident := expr.target.derived_expr.(^Ast_Ident_Expr)
-            if !is_ident do panic("Not implemented!")
-            // if !is_primitive_type(target.token.text) do panic("Not implemented!")
-
-            if target.token.text == "sample" && len(expr.args) != 3 {
-                typecheck_error(c, expr.token, "Incorrect number of arguments for 'sample' call, expecting 3.")
-            }
-
             for arg in expr.args {
                 typecheck_expr(c, arg)
             }
 
-            expr.type = new(Ast_Type)
-            expr.type^ = {
-                name = target.token.text,
+            // Handle intrinsics
+            target, is_ident := expr.target.derived_expr.(^Ast_Ident_Expr)
+            if is_ident
+            {
+                num_floats: u32
+                for arg in expr.args
+                {
+                    if arg.type.kind != .Primitive
+                    {
+                        num_floats = 0
+                        break
+                    }
+
+                    if arg.type.primitive_kind == .Float {
+                        num_floats += 1
+                    } else if arg.type.primitive_kind == .Vec2 {
+                        num_floats += 2
+                    } else if arg.type.primitive_kind == .Vec3 {
+                        num_floats += 3
+                    } else if arg.type.primitive_kind == .Vec4 {
+                        num_floats += 4
+                    } else {
+                        num_floats = 0
+                        break
+                    }
+                }
+
+                name := target.token.text
+                if name == "vec2"
+                {
+                    if num_floats != 2 do typecheck_error(c, expr.token, "Incorrect constructor arguments.")
+                    expr.type = &VEC2_TYPE
+                    break
+                }
+                else if name == "vec3"
+                {
+                    if num_floats != 3 do typecheck_error(c, expr.token, "Incorrect constructor arguments.")
+                    expr.type = &VEC3_TYPE
+                    break
+                }
+                else if name == "vec4"
+                {
+                    if num_floats != 4 do typecheck_error(c, expr.token, "Incorrect constructor arguments.")
+                    expr.type = &VEC4_TYPE
+                    break
+                }
             }
+
+            // Regular procedure calls
+
+            typecheck_expr(c, expr.target)
+            if expr.target.type.kind != .Proc {
+                typecheck_error(c, expr.token, "Can't call this type, must be a procedure.")
+            }
+
+            if len(expr.target.type.args) != len(expr.args) {
+                typecheck_error(c, expr.token, "Incorrect number of arguments, expecting '%v', got '%v'.", len(expr.target.type.args), len(expr.args))
+                break
+            }
+
+            for arg, i in expr.args
+            {
+                proc_decl_arg_type := expr.target.type.args[i].type
+
+                typecheck_expr(c, arg)
+
+                if !same_type(arg.type, proc_decl_arg_type) {
+                    typecheck_error(c, expr.token, "Mismatching types.")
+                }
+            }
+
+            expr.type = expr.target.type.ret
         }
     }
 }
+
+POISON_TYPE := Ast_Type { kind = .Poison }
+FLOAT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Float, name = { text = "float", line = {}, value = {}, type = {}, col_start = {} } }
+UINT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Uint, name = { text = "uint", line = {}, value = {}, type = {}, col_start = {} } }
+VEC2_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec2, name = { text = "vec2", line = 0, value = {}, type = {}, col_start = {} } }
+VEC3_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec3, name = { text = "vec3", line = 0, value = {}, type = {}, col_start = {} } }
+VEC4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec4, name = { text = "vec4", line = 0, value = {}, type = {}, col_start = {} } }
 
 same_type :: proc(type1: ^Ast_Type, type2: ^Ast_Type) -> bool
 {
-    return (type1^) == (type2^)
+    if type1.kind == .Poison || type2.kind == .Poison do return false
+    if type1 == nil || type2 == nil do return false
+    if type1.kind != type2.kind do return false
+    if type1.primitive_kind != type2.primitive_kind do return false
+    if type1.name.text != type2.name.text do return false
+
+    has_base := type1.kind != .Primitive && type1.kind != .Label
+    if has_base && !same_type(type1.base, type2.base) do return false
+    return true
 }
 
-// Only goes back to the declaration
-search_type_of_name :: proc(proc_def: ^Ast_Proc_Decl, name: string, pos: Token) -> (^Ast_Type, bool)
+type_get_base :: proc(type: ^Ast_Type) -> ^Ast_Type
 {
-    for arg in proc_def.args
-    {
-        if arg.name == name {
-            return arg.type, true
-        }
-    }
-
-    for statement in proc_def.statements
-    {
-        if raw_data(statement.token.text) > raw_data(pos.text) {
-            break
-        }
-
-        decl, ok := statement.derived_statement.(^Ast_Var_Decl)
-        if ok && decl.name == name {
-            return decl.type, true
-        }
-    }
-
-    return {}, false
+    if type.kind == .Poison do return &POISON_TYPE
+    if type.base == nil do return type
+    return type_get_base(type.base)
 }
 
-var_name_resolve :: proc(using c: ^Checker, name: string, pos: Token) -> (res: ^Ast_Type, ok: bool)
+decl_lookup :: proc(using c: ^Checker, token: Token) -> ^Ast_Decl
 {
-    type, ok_s := search_type_of_name(proc_def, name, pos)
-    if !ok_s
+    cur_scope := scope
+    for cur_scope != nil
     {
-        fmt.printfln("Error: Could not find variable '%v'.", name)
-        return {}, false
-    }
-
-    if is_primitive_type(type.name) do return type, true
-
-    for decl in ast.scope.decls
-    {
-        #partial switch d in decl.derived_decl
+        for decl in cur_scope.decls
         {
-            case ^Ast_Struct_Decl:
-            {
-                if decl.name == type.name
-                {
-                    type.struct_decl = d
-                    return type, true
-                }
+            ignore_order := decl.type.kind == .Struct || decl.type.kind == .Proc
+            if !ignore_order && raw_data(decl.token.text) > raw_data(token.text) {
+                continue
             }
+            if decl.name == token.text do return decl
         }
+
+        cur_scope = cur_scope.enclosing_scope
     }
 
-    return {}, false
+    for intr in INTRINSICS
+    {
+        ignore_order := intr.type.kind == .Struct || intr.type.kind == .Proc
+        if !ignore_order && raw_data(intr.token.text) > raw_data(token.text) {
+            continue
+        }
+        if intr.name == token.text do return intr
+    }
+
+    return nil
 }
 
-// type name -> struct declaration
-search_type :: proc(using c: ^Checker, type_name: string) -> (res: ^Ast_Type, ok: bool)
+resolve_type :: proc(using c: ^Checker, type: ^Ast_Type)
 {
-    if is_primitive_type(type_name)
+    base := type_get_base(type)
+    if base.kind == .Label
     {
-        new_type := new(Ast_Type)
-        new_type.name = type_name
-        return new_type, true
-    }
-
-    type := new(Ast_Type)
-    type.name = type_name
-    for decl in ast.scope.decls
-    {
-        #partial switch d in decl.derived_decl
-        {
-            case ^Ast_Struct_Decl:
-            {
-                type.struct_decl = d
-                return type, true
-            }
+        type_decl := decl_lookup(c, base.name)
+        if type_decl == nil {
+            typecheck_error(c, base.name, "Undeclared identifier '%v'.", base.name.text)
+        } else {
+            base.base = type_decl.type
         }
     }
-
-    return {}, false
-}
-
-is_primitive_type :: proc(str: string) -> bool
-{
-    switch str
-    {
-        case "float": return true
-        case "uint":  return true
-        case "vec2":  return true
-        case "vec3":  return true
-        case "vec4":  return true
-    }
-
-    return false
 }
 
 typecheck_error :: proc(using c: ^Checker, token: Token, fmt_str: string, args: ..any)
@@ -286,4 +347,33 @@ typecheck_error :: proc(using c: ^Checker, token: Token, fmt_str: string, args: 
 
     error_msg(input_path, token, fmt_str, ..args)
     error = true
+}
+
+INTRINSICS: [dynamic]^Ast_Decl
+
+add_intrinsics :: proc()
+{
+    add_intrinsic("sample", { &UINT_TYPE, &UINT_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
+    add_intrinsic("mix", { &VEC4_TYPE, &VEC4_TYPE, &FLOAT_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
+}
+
+add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil)
+{
+    assert(len(args) == len(names))
+
+    arg_decls := make([]^Ast_Decl, len(args))
+    for &arg, i in arg_decls
+    {
+        arg = new(Ast_Decl)
+        arg.type = args[i]
+        arg.name = names[i]
+    }
+
+    decl := new(Ast_Decl)
+    decl.name = name
+    decl.type = new(Ast_Type)
+    decl.type.kind = .Proc
+    decl.type.args = arg_decls
+    decl.type.ret = ret
+    append(&INTRINSICS, decl)
 }

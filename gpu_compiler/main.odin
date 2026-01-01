@@ -14,7 +14,7 @@ main :: proc()
     if len(os.args) != 2
     {
         fmt.println("Incorrect Usage. Try: gpu_compiler *.musl")
-        return
+        os.exit(1)
     }
 
     init_scratch_arenas()
@@ -34,23 +34,24 @@ main :: proc()
         shader_type = .Fragment
     } else {
         fmt.println("Could not infer shader type. Try '*.vert.musl' or '*.frag.musl'.")
-        return
+        os.exit(1)
     }
 
     output_path := str.concatenate({ fp.dir(path), "/", fp.stem(path), ".glsl" }, allocator = perm_arena)
+    output_path = output_path
 
     file_content, ok := load_file_and_null_terminate(path, allocator = perm_arena)
     if !ok
     {
         fmt.println("Error: Failed to read file.")
-        return
+        os.exit(1)
     }
 
     tokens := lex_file(file_content, allocator = perm_arena)
     ast, ok_p := parse_file(path, tokens, allocator = perm_arena)
-    if !ok_p do return
+    if !ok_p do os.exit(1)
     ok_t := typecheck_ast(ast, path, allocator = perm_arena)
-    if !ok_t do return
+    if !ok_t do os.exit(1)
     codegen(ast, shader_type, path, output_path)
 
     fmt.println(path)
