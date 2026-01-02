@@ -300,16 +300,23 @@ align_up :: proc(x, align: u64) -> (aligned: u64)
     return (x + (align - 1)) &~ (align - 1)
 }
 
-alloc_and_create_texture :: proc(desc: Texture_Desc, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> (Texture, rawptr)
+Owned_Texture :: struct
+{
+    using tex: Texture,
+    mem: rawptr,
+}
+
+alloc_and_create_texture :: proc(desc: Texture_Desc, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
 {
     size, align := texture_size_and_align(desc)
     ptr := mem_alloc(size, align, .GPU)
     texture := texture_create(desc, ptr, signal_sem, signal_value)
-    return texture, ptr
+    return Owned_Texture { texture, ptr }
 }
 
-free_and_destroy_texture :: proc(texture: ^Texture, ptr: rawptr)
+free_and_destroy_texture :: proc(texture: ^Owned_Texture)
 {
-    mem_free(ptr)
+    mem_free(texture.mem)
     texture_destroy(texture)
+    texture^ = {}
 }

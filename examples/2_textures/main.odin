@@ -90,11 +90,11 @@ main :: proc()
     upload_arena := gpu.arena_init(10 * 1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
 
-    peach_tex, peach_ptr := load_texture(Peach_Texture, &upload_arena, upload_cmd_buf)
-    bowser_tex, bowser_ptr := load_texture(Bowser_Texture, &upload_arena, upload_cmd_buf)
+    peach_tex := load_texture(Peach_Texture, &upload_arena, upload_cmd_buf)
+    bowser_tex := load_texture(Bowser_Texture, &upload_arena, upload_cmd_buf)
     defer {
-        gpu.free_and_destroy_texture(&peach_tex, peach_ptr)
-        gpu.free_and_destroy_texture(&bowser_tex, bowser_ptr)
+        gpu.free_and_destroy_texture(&peach_tex)
+        gpu.free_and_destroy_texture(&bowser_tex)
     }
     gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
@@ -198,7 +198,7 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool)
     return
 }
 
-load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> (gpu.Texture, rawptr)
+load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> gpu.Owned_Texture
 {
     options := image.Options {
         .alpha_add_if_missing,
@@ -210,7 +210,7 @@ load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Comma
     staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
     runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
 
-    texture, texture_ptr := gpu.alloc_and_create_texture({
+    texture := gpu.alloc_and_create_texture({
         type = .D2,
         dimensions = { u32(img.width), u32(img.height), 1 },
         mip_count = 1,
@@ -219,8 +219,8 @@ load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Comma
         format = .RGBA8_Unorm,
         usage = { .Sampled },
     })
-    gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture_ptr)
-    return texture, texture_ptr
+    gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
+    return texture
 }
 
 // To get around the fact that I need to import "core:image/png" to load pngs,

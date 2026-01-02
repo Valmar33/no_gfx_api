@@ -798,9 +798,6 @@ _texture_destroy :: proc(texture: ^Texture)
 
 _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 {
-    // IMPORTANT NOTE: Vulkan here is a huge PITA as always. Images created with the same create info
-    // can have different size and alignment according to the standard so this is technically not standard compliant.
-
     image_ci := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
         imageType = to_vk_texture_type(desc.type),
@@ -812,12 +809,17 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
         usage = to_vk_texture_usage(desc.usage),
         initialLayout = .UNDEFINED,
     }
-    tmp_image: vk.Image
-    vk_check(vk.CreateImage(ctx.device, &image_ci, nil, &tmp_image))
-    defer vk.DestroyImage(ctx.device, tmp_image, nil)
 
-    mem_requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(ctx.device, tmp_image, &mem_requirements)
+    info := vk.DeviceImageMemoryRequirements {
+        sType = .DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+        pCreateInfo = &image_ci,
+        planeAspect = { .COLOR },
+    }
+
+    mem_requirements_2 := vk.MemoryRequirements2 { sType = .MEMORY_REQUIREMENTS_2 }
+    vk.GetDeviceImageMemoryRequirements(ctx.device, &info, &mem_requirements_2)
+
+    mem_requirements := mem_requirements_2.memoryRequirements
     return u64(mem_requirements.size), u64(mem_requirements.alignment)
 }
 
