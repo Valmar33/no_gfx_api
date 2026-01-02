@@ -17,14 +17,10 @@ Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "3D"
 
+Sponza_Scene :: #load("assets/sponza.glb")
+
 main :: proc()
 {
-    if len(os.args) != 2
-    {
-        log.error("Incorrect args. Usage: 3_3D.exe <GLTF/GLB scene path>.")
-        return
-    }
-
     fmt.println("Work in progress! (Needs depth buffer)")
 
     scene_path := os.args[1]
@@ -64,7 +60,7 @@ main :: proc()
     queue := gpu.get_queue()
 
     upload_cmd_buf := gpu.commands_begin(queue)
-    scene := load_scene_gltf(scene_path, &upload_arena, upload_cmd_buf)
+    scene := load_scene_gltf(Sponza_Scene, &upload_arena, upload_cmd_buf)
     defer destroy_scene(&scene)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
@@ -380,9 +376,11 @@ world_to_view_mat :: proc(cam_pos: [3]f32, cam_rot: quaternion128) -> matrix[4, 
 
 // I/O
 
-load_scene_gltf :: proc(path: string, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene
+load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene
 {
-    data, err_l := gltf2.load_from_file(path)
+    options := gltf2.Options {}
+    options.is_glb = true
+    data, err_l := gltf2.parse(contents, options)
     switch err in err_l
     {
         case gltf2.JSON_Error: log.error(err)
