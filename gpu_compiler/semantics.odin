@@ -104,6 +104,8 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
 
 typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 {
+    expression.type = &POISON_TYPE
+
     switch expr in expression.derived_expr
     {
         case ^Ast_Binary_Expr:
@@ -111,8 +113,9 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
             typecheck_expr(c, expr.lhs)
             typecheck_expr(c, expr.rhs)
 
-            if !same_type(expr.lhs.type, expr.rhs.type) {
-                typecheck_error(c, expr.token, "Mismatching types.")
+            expr.type = bin_op_result_type(expr.op, expr.lhs.type, expr.rhs.type)
+            if expr.type == &POISON_TYPE {
+                typecheck_error(c, expr.token, "Incompatible types.")
             }
 
             expr.type = expr.lhs.type
@@ -147,6 +150,16 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
             else if expr.member_name == "xy"
             {
                 expr.type = &VEC2_TYPE
+                break
+            }
+            else if expr.member_name == "y"
+            {
+                expr.type = &FLOAT_TYPE
+                break
+            }
+            else if expr.member_name == "w"
+            {
+                expr.type = &FLOAT_TYPE
                 break
             }
 
@@ -273,6 +286,7 @@ VEC3_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec3, name = { text
 VEC4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec4, name = { text = "vec4", line = 0, value = {}, type = {}, col_start = {} } }
 TEXTUREID_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Texture_ID, name = { text = "textureid", line = {}, value = {}, type = {}, col_start = {} } }
 SAMPLERID_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Sampler_ID, name = { text = "samplerid", line = {}, value = {}, type = {}, col_start = {} } }
+MAT4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Mat4, name = { text = "mat4", line = 0, value = {}, type = {}, col_start = {} } }
 
 same_type :: proc(type1: ^Ast_Type, type2: ^Ast_Type) -> bool
 {
@@ -351,6 +365,7 @@ add_intrinsics :: proc()
 {
     add_intrinsic("sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
     add_intrinsic("mix", { &VEC4_TYPE, &VEC4_TYPE, &FLOAT_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
+    add_intrinsic("normalize", { &VEC3_TYPE }, { "v" }, &VEC3_TYPE)
 }
 
 add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil)
@@ -372,4 +387,30 @@ add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^As
     decl.type.args = arg_decls
     decl.type.ret = ret
     append(&INTRINSICS, decl)
+}
+
+// Returns &POISON_TYPE if the two types are not allowed
+bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type) -> ^Ast_Type
+{
+    if op == .Mul && type1.primitive_kind == .Mat4
+    {
+        if type2.primitive_kind == .Vec4 do return &VEC4_TYPE
+    }
+    else if op == .Mul && type1.primitive_kind == .Vec4
+    {
+        if type2.primitive_kind == .Mat4 do return &VEC4_TYPE
+    }
+
+    type_less := type1
+    type_greater := type2
+    if type_less.primitive_kind > type_greater.primitive_kind {
+        type_less, type_greater = type_greater, type_less
+    }
+
+    if type_less.primitive_kind == .Float && type_greater.primitive_kind == .Vec3 {
+        return type2
+    }
+
+    if same_type(type1, type2) do return type1
+    return &POISON_TYPE
 }

@@ -328,6 +328,7 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
                 case .Vec4: return "vec4"
                 case .Texture_ID: return "uint"
                 case .Sampler_ID: return "uint"
+                case .Mat4: return "mat4"
             }
         }
     }

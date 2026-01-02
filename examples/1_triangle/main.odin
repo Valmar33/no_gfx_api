@@ -58,8 +58,8 @@ main :: proc()
 
     indices := gpu.arena_alloc_array(&arena, u32, 3)
     indices.cpu[0] = 0
-    indices.cpu[1] = 1
-    indices.cpu[2] = 2
+    indices.cpu[1] = 2
+    indices.cpu[2] = 1
 
     verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
     indices_local := gpu.mem_alloc_typed_gpu(u32, 3)

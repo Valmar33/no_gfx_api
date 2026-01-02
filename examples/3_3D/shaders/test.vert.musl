@@ -1,0 +1,34 @@
+
+Data :: struct
+{
+    model_to_world: mat4,
+    model_to_world_normal: mat4,
+    world_to_view: mat4,
+    view_to_proj: mat4,
+    positions: []vec3,
+    normals: []vec4,
+}
+
+Output :: struct
+{
+    pos: vec4 @position,
+    color: vec4 @out_loc(0),
+}
+
+main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
+{
+    clip_pos: vec4;
+    clip_pos = vec4(data.positions[vert_id].xyz, 1.0);
+    clip_pos = data.model_to_world * clip_pos;
+    clip_pos = data.world_to_view * clip_pos;
+    clip_pos = data.view_to_proj * clip_pos;
+    clip_pos.y = 0.0 - clip_pos.y;
+
+    world_normal: vec4;
+    world_normal = data.model_to_world_normal * data.normals[vert_id];
+
+    vert_out: Output;
+    vert_out.pos = clip_pos;
+    vert_out.color = world_normal;
+    return vert_out;
+}

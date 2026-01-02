@@ -650,7 +650,6 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
     }
     alloc: vma.Allocation
     alloc_info: vma.Allocation_Info
-    //vk_check(vma.create_buffer(ctx.vma_allocator, buf_ci, alloc_ci, &buf, &alloc, &alloc_info))
     vk_check(vma.allocate_memory(ctx.vma_allocator, mem_requirements, alloc_ci, &alloc, &alloc_info))
 
     vk_check(vma.bind_buffer_memory(ctx.vma_allocator, alloc, buf))
@@ -1005,7 +1004,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 // Commands
 
-_cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64)
+_cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
@@ -1261,7 +1260,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
     vk.CmdSetSampleMaskEXT(vk_cmd_buf, { ._1 }, &sample_mask)
     vk.CmdSetAlphaToCoverageEnableEXT(vk_cmd_buf, false)
     vk.CmdSetPolygonModeEXT(vk_cmd_buf, .FILL)
-    vk.CmdSetCullMode(vk_cmd_buf, {})
+    vk.CmdSetCullMode(vk_cmd_buf, { .BACK })
     vk.CmdSetFrontFace(vk_cmd_buf, .COUNTER_CLOCKWISE)
 }
 

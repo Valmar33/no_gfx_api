@@ -194,6 +194,7 @@ Ast_Type_Primitive_Kind :: enum
     Vec2,
     Vec3,
     Vec4,
+    Mat4,
 }
 
 Ast_Type :: struct
@@ -624,6 +625,7 @@ parse_type :: proc(using p: ^Parser) -> ^Ast_Type
         case "vec4": prim_type = .Vec4
         case "textureid": prim_type = .Texture_ID
         case "samplerid": prim_type = .Sampler_ID
+        case "mat4": prim_type = .Mat4
         case: prim_type = .None
     }
 

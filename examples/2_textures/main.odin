@@ -70,8 +70,8 @@ main :: proc()
 
     indices := gpu.arena_alloc_array(&arena, u32, 6)
     indices.cpu[0] = 0
-    indices.cpu[1] = 1
-    indices.cpu[2] = 2
+    indices.cpu[1] = 2
+    indices.cpu[2] = 1
     indices.cpu[3] = 0
     indices.cpu[4] = 1
     indices.cpu[5] = 3

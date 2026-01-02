@@ -1,0 +1,7 @@
+
+main :: (normal_vert: vec4 @in_loc(0)) -> vec4 @out_loc(0)
+{
+    normal: vec3;
+    normal = normalize(normal_vert.xyz);
+    return vec4(normal * 0.5 + 0.5, 1.0);
+}

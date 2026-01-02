@@ -168,7 +168,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
 // Commands
-cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, bytes: u64) : _cmd_mem_copy
+cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
 cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
@@ -194,15 +194,19 @@ cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, f
 /////////////////////////
 // Userland Utilities
 
-mem_alloc_typed :: proc($T: typeid, count: u64) -> []T
+mem_alloc_typed :: proc($T: typeid, #any_int count: i64) -> []T
 {
-    ptr := mem_alloc(size_of(T) * count, align_of(T))
+    assert(count > 0)
+
+    ptr := mem_alloc(size_of(T) * u64(count), align_of(T))
     return slice.from_ptr(cast(^T) ptr, int(count))
 }
 
-mem_alloc_typed_gpu :: proc($T: typeid, count: u64) -> rawptr
+mem_alloc_typed_gpu :: proc($T: typeid, #any_int count: i64) -> rawptr
 {
-    ptr := mem_alloc(size_of(T) * count, align_of(T), mem_type = .GPU)
+    assert(count > 0)
+
+    ptr := mem_alloc(size_of(T) * u64(count), align_of(T), mem_type = .GPU)
     return ptr
 }
 
@@ -247,7 +251,7 @@ arena_init :: proc(storage: u64) -> Arena
 arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
 {
     offset = u64(align_up(offset, align))
-    if offset + bytes > size do offset = 0  // No overflow detection
+    if offset + bytes > size do panic("GPU Arena ran out of space!")
 
     alloc_cpu = auto_cast(uintptr(cpu) + uintptr(offset))
     alloc_gpu = auto_cast(uintptr(gpu) + uintptr(offset))
@@ -264,9 +268,11 @@ arena_alloc :: proc(using arena: ^Arena, $T: typeid) -> Allocation(T)
     }
 }
 
-arena_alloc_array :: proc(using arena: ^Arena, $T: typeid, count: u64) -> Allocation_Slice(T)
+arena_alloc_array :: proc(using arena: ^Arena, $T: typeid, #any_int count: i64) -> Allocation_Slice(T)
 {
-    alloc_cpu, alloc_gpu := arena_alloc_untyped(arena, size_of(T) * count, align_of(T))
+    assert(count > 0)
+
+    alloc_cpu, alloc_gpu := arena_alloc_untyped(arena, size_of(T) * u64(count), align_of(T))
     return {
         cpu = slice.from_ptr(cast(^T) alloc_cpu, int(count)),
         gpu = alloc_gpu
