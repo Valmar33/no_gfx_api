@@ -910,7 +910,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
         type = .SAMPLED_IMAGE,
         data = { pSampledImage = &{ sampler = {}, imageView = view, imageLayout = .GENERAL } }
     }
-    vk.GetDescriptorEXT(ctx.device, &info, size_of(desc), &desc)
+    vk.GetDescriptorEXT(ctx.device, &info, int(ctx.texture_desc_size), &desc)
     return desc
 }
 
@@ -935,7 +935,7 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
         type = .SAMPLER,
         data = { pSampledImage = &{ sampler = sampler, imageView = {}, imageLayout = .GENERAL } }
     }
-    vk.GetDescriptorEXT(ctx.device, &info, size_of(desc), &desc)
+    vk.GetDescriptorEXT(ctx.device, &info, int(ctx.sampler_desc_size), &desc)
     return desc
 
     get_or_add_sampler :: proc(info: vk.SamplerCreateInfo) -> vk.Sampler
