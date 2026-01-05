@@ -652,9 +652,9 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
 
     buf_usage: vk.BufferUsageFlags
     if mem_type == .GPU {
-        buf_usage = { .SHADER_DEVICE_ADDRESS, .INDEX_BUFFER, .STORAGE_BUFFER, .TRANSFER_DST }
+        buf_usage = { .SHADER_DEVICE_ADDRESS, .INDEX_BUFFER, .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER }
     } else {
-        buf_usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC }
+        buf_usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .INDIRECT_BUFFER }
     }
     buf_ci := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -1375,6 +1375,33 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
     vk.CmdDrawIndexed(vk_cmd_buf, index_count, instance_count, 0, 0, 0)
+}
+
+_cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
+                                            indices: rawptr, arguments: rawptr)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+
+    indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
+    if !ok_i
+    {
+        log.error("Indices alloc not found")
+        return
+    }
+
+    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
+    if !ok_a
+    {
+        log.error("Arguments alloc not found")
+        return
+    }
+
+    ptrs := []rawptr { vertex_data, fragment_data }
+    assert(Push_Constant_Size == len(ptrs) * size_of(ptrs[0]))
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout, { .VERTEX, .FRAGMENT }, 0, Push_Constant_Size, raw_data(ptrs))
+
+    vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
+    vk.CmdDrawIndexedIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), 1, 0)
 }
 
 @(private="file")
