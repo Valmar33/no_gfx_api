@@ -23,8 +23,6 @@ main :: proc()
 {
     fmt.println("Work in progress! (Needs depth buffer)")
 
-    scene_path := os.args[1]
-
     ok_i := sdl.Init({ .VIDEO })
     assert(ok_i)
 
