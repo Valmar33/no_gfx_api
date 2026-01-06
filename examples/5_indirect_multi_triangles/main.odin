@@ -7,7 +7,6 @@ import "core:math/linalg"
 
 import "../../gpu"
 
-import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
 
 Window_Size_X :: 1000
@@ -63,7 +62,7 @@ main :: proc()
     verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
     indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
     
-    indirect_command_cpu_mem := gpu.mem_alloc_typed(vk.DrawIndexedIndirectCommand, Num_Triangles)
+    indirect_command_cpu_mem := gpu.mem_alloc_typed(gpu.Draw_Indexed_Indirect_Command, Num_Triangles)
     defer gpu.mem_free_typed(indirect_command_cpu_mem)
 
     count := gpu.arena_alloc_array(&arena, u32, 1)
@@ -103,12 +102,12 @@ main :: proc()
         indirect_vert_data.cpu[i].pos = { x, y, 0.0, 0.0 }
         indirect_vert_data.cpu[i].size = 0.1
 
-        indirect_command_cpu_mem[i] = vk.DrawIndexedIndirectCommand {
-            indexCount = 3,
-            instanceCount = 1,
-            firstIndex = 0,
-            vertexOffset = 0,
-            firstInstance = 0,
+        indirect_command_cpu_mem[i] = gpu.Draw_Indexed_Indirect_Command {
+            index_count = 3,
+            instance_count = 1,
+            first_index = 0,
+            vertex_offset = 0,
+            first_instance = 0,
         }
     }
 

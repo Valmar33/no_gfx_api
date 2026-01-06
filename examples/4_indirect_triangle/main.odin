@@ -7,13 +7,12 @@ import "core:math/linalg"
 
 import "../../gpu"
 
-import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
 
 Window_Size_X :: 1000
 Window_Size_Y :: 1000
 Frames_In_Flight :: 3
-Example_Name :: "Triangle"
+Example_Name :: "Indirect Triangle"
 
 main :: proc()
 {
@@ -65,16 +64,16 @@ main :: proc()
     verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
     indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
     
-    indirect_command_cpu_mem := gpu.mem_alloc_typed(vk.DrawIndexedIndirectCommand, 1)
+    indirect_command_cpu_mem := gpu.mem_alloc_typed(gpu.Draw_Indexed_Indirect_Command, 1)
     defer gpu.mem_free_typed(indirect_command_cpu_mem)
     
     // Initialize indirect command
-    indirect_command_cpu_mem[0] = vk.DrawIndexedIndirectCommand {
-        indexCount = 3,
-        instanceCount = 1,
-        firstIndex = 0,
-        vertexOffset = 0,
-        firstInstance = 0,
+    indirect_command_cpu_mem[0] = gpu.Draw_Indexed_Indirect_Command {
+        index_count = 3,
+        instance_count = 1,
+        first_index = 0,
+        vertex_offset = 0,
+        first_instance = 0,
     }
     
     // Get GPU pointer for indirect command (CPU-visible memory is GPU-accessible)

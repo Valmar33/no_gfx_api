@@ -132,6 +132,14 @@ Blend_State :: struct
     color_write_mask: u8,
 }
 
+Draw_Indexed_Indirect_Command :: struct {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+}
+
 // Procedures
 
 // Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
