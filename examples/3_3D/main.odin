@@ -21,7 +21,7 @@ Sponza_Scene :: #load("assets/sponza.glb")
 
 main :: proc()
 {
-    fmt.println("Work in progress! (Needs depth buffer)")
+    fmt.println("Right-click + WASD for first-person controls.")
 
     ok_i := sdl.Init({ .VIDEO })
     assert(ok_i)
