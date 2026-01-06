@@ -67,7 +67,7 @@ for true
     cmd_buf := gpu.commands_begin(queue)
     gpu.cmd_begin_render_pass(cmd_buf, {
         color_attachments = {
-            { view = swapchain, clear_color = { 1.0, 0.0, 0.0, 1.0 } }
+            { texture = swapchain, clear_color = { 1.0, 0.0, 0.0, 1.0 } }
             // Other settings...
         }
     })
@@ -132,3 +132,7 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
 ```
 
 The compiler itself just transpiles to GLSL.
+
+## Build
+Simply use `build.bat` or `build.sh` to build all the examples.
+Feel free to [contact me on discord](https://discord.com/users/leon2058) for any questions.
