@@ -151,6 +151,17 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
                 }
             }
         }
+        case ^Ast_For:
+        {
+            old_scope := scope
+            scope = stmt.scope
+            defer scope = old_scope
+
+            if stmt.define != nil do typecheck_statement(c, stmt.define)
+            if stmt.cond != nil   do typecheck_expr(c, stmt.cond)
+            if stmt.iter != nil   do typecheck_statement(c, stmt.iter)
+            typecheck_statement_list(c, stmt.statements)
+        }
         case ^Ast_Return:
         {
             typecheck_expr(c, stmt.expr)
@@ -197,7 +208,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
         {
             switch v in expr.token.value
             {
-                case u64: expr.type = &UINT_TYPE
+                case u64: expr.type = &INT_TYPE
                 case f32: expr.type = &FLOAT_TYPE
             }
         }
@@ -344,6 +355,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 POISON_TYPE := Ast_Type { kind = .Poison }
 FLOAT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Float, name = { text = "float", line = {}, value = {}, type = {}, col_start = {} } }
 UINT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Uint, name = { text = "uint", line = {}, value = {}, type = {}, col_start = {} } }
+INT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Int, name = { text = "int", line = {}, value = {}, type = {}, col_start = {} } }
 VEC2_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec2, name = { text = "vec2", line = 0, value = {}, type = {}, col_start = {} } }
 VEC3_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec3, name = { text = "vec3", line = 0, value = {}, type = {}, col_start = {} } }
 VEC4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec4, name = { text = "vec4", line = 0, value = {}, type = {}, col_start = {} } }

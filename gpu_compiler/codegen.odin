@@ -15,6 +15,9 @@ Shader_Type :: enum
 
 codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_path: string)
 {
+    writer.ast = ast
+    writer.shader_type = shader_type
+
     write_preamble()
 
     arena_backing: vmem.Arena
@@ -111,7 +114,7 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
     // Generate bindings
     writeln("layout(set = 0, binding = 0) uniform texture2D _res_textures_[];")
-    writeln("layout(set = 1, binding = 0) uniform writeonly image2D _res_textures_rw_[];")
+    writeln("layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];")
     writeln("layout(set = 2, binding = 0) uniform sampler _res_samplers_[];")
 
     writeln("")
@@ -155,6 +158,8 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
         writeln("{")
         if writer_scope()
         {
+            writer.proc_def = proc_def
+
             // Declare all variables
             for var_decl in proc_def.scope.decls
             {
@@ -177,7 +182,9 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
             for statement in proc_def.statements
             {
-                codegen_statement(statement, ast, proc_def, shader_type)
+                write_begin()
+                codegen_statement(statement)
+                write("\n")
             }
         }
         writeln("}")
@@ -187,11 +194,9 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     writer_output_to_file(output_path)
 }
 
-codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Proc_Def, shader_type: Shader_Type)
+codegen_statement :: proc(statement: ^Ast_Statement, insert_semi := true)
 {
-    write_begin("")
-
-    decl := proc_def.decl
+    decl := writer.proc_def.decl
     is_main := decl.name == "main"
     ret_attr := decl.type.ret_attr
 
@@ -200,21 +205,21 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
         case ^Ast_Stmt_Expr:
         {
             codegen_expr(stmt.expr)
-            write(";\n")
+            if insert_semi do write(";")
         }
         case ^Ast_Assign:
         {
             codegen_expr(stmt.lhs)
             write(" = ")
             codegen_expr(stmt.rhs)
-            write(";\n")
+            if insert_semi do write(";")
         }
         case ^Ast_Define_Var:
         {
             write(stmt.decl.name)
             write(" = ")
             codegen_expr(stmt.expr)
-            write(";\n")
+            if insert_semi do write(";")
         }
         case ^Ast_If:
         {
@@ -225,10 +230,7 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
             if writer_scope()
             {
                 codegen_scope_decls(stmt.scope)
-
-                for then_stmt in stmt.statements {
-                    codegen_statement(then_stmt, ast, proc_def, shader_type)
-                }
+                codegen_statement_list(stmt.statements)
             }
             writeln("}")
             if stmt.else_is_present
@@ -241,17 +243,48 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
 
                     if stmt.else_is_single
                     {
-                        codegen_statement(stmt.else_single, ast, proc_def, shader_type)
+                        codegen_statement(stmt.else_single)
                     }
                     else
                     {
+                        codegen_statement_list(stmt.else_multi_statements)
                         for else_stmt in stmt.else_multi_statements {
-                            codegen_statement(else_stmt, ast, proc_def, shader_type)
+                            codegen_statement(else_stmt)
                         }
                     }
                 }
                 writeln("}")
             }
+        }
+        case ^Ast_For:
+        {
+            write("// for construct\n")
+            writeln("{")
+            if writer_scope()
+            {
+                codegen_scope_decls(stmt.scope)
+
+                write_begin()
+                writef("for(")
+                if stmt.define != nil
+                {
+                    write(stmt.define.decl.name)
+                    write(" = ")
+                    codegen_expr(stmt.define.expr)
+                }
+                write("; ")
+                if stmt.cond != nil do codegen_expr(stmt.cond)
+                write("; ")
+                if stmt.iter != nil do codegen_statement(stmt.iter, false)
+                write(")\n")
+                writeln("{")
+                if writer_scope()
+                {
+                    codegen_statement_list(stmt.statements)
+                }
+                writeln("}")
+            }
+            writeln("}")
         }
         case ^Ast_Return:
         {
@@ -265,19 +298,18 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
                     for member in type.members
                     {
                         if member.attr == nil do continue
-                        writef("%v = ", attribute_to_glsl(member.attr.?, ast, shader_type))
+                        writef("%v = ", attribute_to_glsl(member.attr.?, writer.ast, writer.shader_type))
                         codegen_expr(stmt.expr)
                         writef(".%v; ", member.name)
                     }
-                    write("\n")
                 }
                 else
                 {
                     if ret_attr != nil && ret_attr.?.type == .Out_Loc
                     {
-                        writef("%v = ", attribute_to_glsl(ret_attr.?, ast, shader_type))
+                        writef("%v = ", attribute_to_glsl(ret_attr.?, writer.ast, writer.shader_type))
                         codegen_expr(stmt.expr)
-                        write(";\n")
+                        write(";")
                     }
                     else
                     {
@@ -289,10 +321,19 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
             {
                 write("return ")
                 codegen_expr(stmt.expr)
-                write(";\n")
+                write(";")
             }
-
         }
+    }
+}
+
+codegen_statement_list :: proc(list: []^Ast_Statement)
+{
+    for block_stmt in list
+    {
+        write_begin()
+        codegen_statement(block_stmt)
+        write("\n")
     }
 }
 
@@ -448,6 +489,9 @@ Writer :: struct
 {
     indentation: u32,
     builder: strings.Builder,
+    ast: Ast,
+    proc_def: ^Ast_Proc_Def,
+    shader_type: Shader_Type,
 }
 
 @(private="file")
@@ -480,6 +524,7 @@ write_preamble :: proc()
     writeln("#extension GL_EXT_buffer_reference2 : require")
     writeln("#extension GL_EXT_nonuniform_qualifier : require")
     writeln("#extension GL_EXT_scalar_block_layout : require")
+    writeln("#extension GL_EXT_shader_image_load_formatted : require")
     writeln("")
 }
 

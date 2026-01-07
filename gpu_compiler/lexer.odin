@@ -50,6 +50,7 @@ Token_Type :: enum
     Struct,
     If,
     Else,
+    For,
     Return,
 
     // Literals
@@ -63,6 +64,7 @@ Keywords := map[string]Token_Type {
     "struct" = .Struct,
     "if"     = .If,
     "else"   = .Else,
+    "for"    = .For,
     "return" = .Return,
 }
 One_Char_Operators := map[u8]Token_Type {
@@ -365,6 +367,7 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .Struct:       return "struct"
         case .If:           return "if"
         case .Else:         return "else"
+        case .For:          return "for"
         case .Return:       return "return"
         case .NumLit:       return "number"
         case .EOS:          return "end of file"

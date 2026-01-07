@@ -156,6 +156,7 @@ Any_Statement :: union
     ^Ast_Define_Var,
     ^Ast_Return,
     ^Ast_If,
+    ^Ast_For,
 }
 
 Ast_Statement :: struct
@@ -205,6 +206,17 @@ Ast_If :: struct
     else_single: ^Ast_Statement,
     else_scope: ^Ast_Scope,
     else_multi_statements: []^Ast_Statement,
+}
+
+Ast_For :: struct
+{
+    using base_statement: Ast_Statement,
+    define: ^Ast_Define_Var,
+    cond: ^Ast_Expr,
+    iter: ^Ast_Assign,
+
+    statements: []^Ast_Statement,
+    scope: ^Ast_Scope,
 }
 
 // Types
@@ -393,7 +405,9 @@ parse_proc_def :: proc(using p: ^Parser) -> ^Ast_Proc_Def
     }
 
     required_token(p, .LBrace)
-    proc_def.statements = parse_statement_list(p)
+    if tokens[at].type != .RBrace {
+        proc_def.statements = parse_statement_list(p)
+    }
     required_token(p, .RBrace)
     return proc_def
 }
@@ -430,7 +444,9 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
 
             if_stmt.scope = scope
             required_token(p, .LBrace)
-            if_stmt.statements = parse_statement_list(p)
+            if tokens[at].type != .RBrace {
+                if_stmt.statements = parse_statement_list(p)
+            }
             required_token(p, .RBrace)
         }
 
@@ -450,12 +466,48 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
             else
             {
                 required_token(p, .LBrace)
-                if_stmt.else_multi_statements = parse_statement_list(p)
+                if tokens[at].type != .RBrace {
+                    if_stmt.else_multi_statements = parse_statement_list(p)
+                }
                 required_token(p, .RBrace)
             }
         }
 
         node = if_stmt
+    }
+    else if optional_token(p, .For)
+    {
+        old_scope := scope
+        scope = new(Ast_Scope)
+        scope.enclosing_scope = old_scope
+        defer scope = old_scope
+
+        for_stmt := make_statement(p, Ast_For)
+        for_stmt.scope = scope
+
+        if tokens[at].type != .LBrace
+        {
+            if tokens[at].type != .Semi {
+                for_stmt.define = parse_var_def(p)
+            }
+            required_token(p, .Semi)
+            if tokens[at].type != .Semi {
+                for_stmt.cond = parse_expr(p)
+            }
+            required_token(p, .Semi)
+            if tokens[at].type != .LBrace {
+                for_stmt.iter = parse_assign(p)
+            }
+        }
+
+        required_token(p, .LBrace)
+        
+        if tokens[at].type != .RBrace {
+            for_stmt.statements = parse_statement_list(p)
+        }
+        required_token(p, .RBrace)
+
+        node = for_stmt
     }
     else if tokens[at].type == .Ident && tokens[at+1].type == .Colon
     {
@@ -477,7 +529,6 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
             type = parse_type(p)
         }
         decl.type = type
-
 
         if optional_token(p, .Assign)
         {
@@ -518,7 +569,7 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
     return node
 }
 
-parse_assign :: proc(using p: ^Parser) -> ^Ast_Statement
+parse_assign :: proc(using p: ^Parser) -> ^Ast_Assign
 {
     node := make_statement(p, Ast_Assign)
     node.lhs = parse_expr(p)
@@ -527,7 +578,36 @@ parse_assign :: proc(using p: ^Parser) -> ^Ast_Statement
     return node
 }
 
-parse_var_decl :: proc(using p: ^Parser)
+parse_var_def :: proc(using p: ^Parser) -> ^Ast_Define_Var
+{
+    ident := required_token(p, .Ident).text
+    required_token(p, .Colon)
+
+    decl := make_node(p, Ast_Decl)
+    decl.name = ident
+    append(&scope.decls, decl)
+
+    type: ^Ast_Type
+    if tokens[at].type == .Assign
+    {
+        type = new(Ast_Type)
+        type.kind = .Unknown
+    }
+    else
+    {
+        type = parse_type(p)
+    }
+    decl.type = type
+
+    required_token(p, .Assign)
+
+    def_var := make_statement(p, Ast_Define_Var)
+    def_var.decl = decl
+    def_var.expr = parse_expr(p)
+    return def_var
+}
+
+parse_var_decl :: proc(using p: ^Parser) -> ^Ast_Decl
 {
     node := make_node(p, Ast_Decl)
     append(&scope.decls, node)
@@ -537,6 +617,7 @@ parse_var_decl :: proc(using p: ^Parser)
 
     required_token(p, .Colon)
     node.type = parse_type(p)
+    return node
 }
 
 parse_expr :: proc(using p: ^Parser, prec: int = max(int)) -> ^Ast_Expr
