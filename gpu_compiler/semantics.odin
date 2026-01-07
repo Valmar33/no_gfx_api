@@ -12,6 +12,7 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
         input_path = input_path,
         scope = ast.scope,
         error = false,
+        cur_proc = nil,
     }
 
     add_intrinsics()
@@ -47,6 +48,8 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
 
     for proc_def in ast.procs
     {
+        c.cur_proc = proc_def
+
         for decl in proc_def.scope.decls
         {
             resolve_type(&c, decl.type)
@@ -80,6 +83,7 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
 Checker :: struct #all_or_none
 {
     ast: Ast,
+    cur_proc: ^Ast_Proc_Def,
     scope: ^Ast_Scope,
     input_path: string,
     error: bool,
@@ -119,6 +123,9 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
         case ^Ast_Return:
         {
             typecheck_expr(c, stmt.expr)
+            if !same_type(stmt.expr.type, cur_proc.decl.type.ret) {
+                typecheck_error_mismatching_types(c, stmt.token, stmt.expr.type, cur_proc.decl.type.ret)
+            }
         }
     }
 }
@@ -384,7 +391,7 @@ typecheck_error_mismatching_types :: proc(using c: ^Checker, token: Token, type1
     scratch, _ := acquire_scratch()
     type1_str := type_to_string(type1, arena = scratch)
     type2_str := type_to_string(type2, arena = scratch)
-    error_msg(input_path, token, "Mismatching types: '%v' and '%v'", type1_str, type2_str)
+    error_msg(input_path, token, "Incompatible types: '%v' and '%v'", type1_str, type2_str)
     error = true
 }
 
