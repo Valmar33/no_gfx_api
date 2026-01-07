@@ -200,18 +200,58 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
         case ^Ast_Stmt_Expr:
         {
             codegen_expr(stmt.expr)
+            write(";\n")
         }
         case ^Ast_Assign:
         {
             codegen_expr(stmt.lhs)
             write(" = ")
             codegen_expr(stmt.rhs)
+            write(";\n")
         }
         case ^Ast_Define_Var:
         {
             write(stmt.decl.name)
             write(" = ")
             codegen_expr(stmt.expr)
+            write(";\n")
+        }
+        case ^Ast_If:
+        {
+            write("if(")
+            codegen_expr(stmt.cond)
+            write(")\n")
+            writeln("{")
+            if writer_scope()
+            {
+                codegen_scope_decls(stmt.scope)
+
+                for then_stmt in stmt.statements {
+                    codegen_statement(then_stmt, ast, proc_def, shader_type)
+                }
+            }
+            writeln("}")
+            if stmt.else_is_present
+            {
+                writeln("else")
+                writeln("{")
+                if writer_scope()
+                {
+                    codegen_scope_decls(stmt.else_scope)
+
+                    if stmt.else_is_single
+                    {
+                        codegen_statement(stmt.else_single, ast, proc_def, shader_type)
+                    }
+                    else
+                    {
+                        for else_stmt in stmt.else_multi_statements {
+                            codegen_statement(else_stmt, ast, proc_def, shader_type)
+                        }
+                    }
+                }
+                writeln("}")
+            }
         }
         case ^Ast_Return:
         {
@@ -229,6 +269,7 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
                         codegen_expr(stmt.expr)
                         writef(".%v; ", member.name)
                     }
+                    write("\n")
                 }
                 else
                 {
@@ -236,6 +277,7 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
                     {
                         writef("%v = ", attribute_to_glsl(ret_attr.?, ast, shader_type))
                         codegen_expr(stmt.expr)
+                        write(";\n")
                     }
                     else
                     {
@@ -247,11 +289,11 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
             {
                 write("return ")
                 codegen_expr(stmt.expr)
+                write(";\n")
             }
+
         }
     }
-
-    write(";\n")
 }
 
 codegen_expr :: proc(expression: ^Ast_Expr)
@@ -261,7 +303,7 @@ codegen_expr :: proc(expression: ^Ast_Expr)
         case ^Ast_Binary_Expr:
         {
             codegen_expr(expr.lhs)
-            write(expr.token.text)
+            writef(" %v ", expr.token.text)
             codegen_expr(expr.rhs)
         }
         case ^Ast_Ident_Expr:
@@ -346,6 +388,7 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
             switch type.primitive_kind
             {
                 case .None: return "NONE"
+                case .Bool: return "bool"
                 case .Float: return "float"
                 case .Uint: return "uint"
                 case .Int: return "int"
@@ -392,6 +435,13 @@ attribute_to_glsl :: proc(attribute: Ast_Attribute, ast: Ast, shader_type: Shade
     }
 
     return {}
+}
+
+codegen_scope_decls :: proc(scope: ^Ast_Scope)
+{
+    for decl in scope.decls {
+        writefln("%v %v;", type_to_glsl(decl.type), decl.name)
+    }
 }
 
 Writer :: struct

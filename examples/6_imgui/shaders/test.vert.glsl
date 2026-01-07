@@ -51,6 +51,6 @@ void main()
     Output vert_out;
     vert_out.pos = vec4(data._res_.verts._res_[vert_id].pos.xyz, 1.0);
     vert_out.color = data._res_.verts._res_[vert_id].color;
-    gl_Position = vert_out.pos; _res_out_loc0_ = vert_out.color; ;
+    gl_Position = vert_out.pos; _res_out_loc0_ = vert_out.color; 
 }
 

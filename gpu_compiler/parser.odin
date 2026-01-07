@@ -100,6 +100,12 @@ Ast_Binary_Op :: enum
     Minus,
     Mul,
     Div,
+    Greater,
+    Less,
+    LE,
+    GE,
+    EQ,
+    NEQ,
 }
 
 Ast_Binary_Expr :: struct
@@ -149,6 +155,7 @@ Any_Statement :: union
     ^Ast_Stmt_Expr,
     ^Ast_Define_Var,
     ^Ast_Return,
+    ^Ast_If,
 }
 
 Ast_Statement :: struct
@@ -183,6 +190,23 @@ Ast_Return :: struct
     expr: ^Ast_Expr,
 }
 
+Ast_If :: struct
+{
+    using base_statement: Ast_Statement,
+    cond: ^Ast_Expr,
+
+    // Then
+    statements: []^Ast_Statement,
+    scope: ^Ast_Scope,
+
+    // Else
+    else_is_present: bool,
+    else_is_single: bool,
+    else_single: ^Ast_Statement,
+    else_scope: ^Ast_Scope,
+    else_multi_statements: []^Ast_Statement,
+}
+
 // Types
 
 Ast_Type_Kind :: enum
@@ -200,6 +224,7 @@ Ast_Type_Kind :: enum
 Ast_Type_Primitive_Kind :: enum
 {
     None = 0,
+    Bool,
     Float,
     Uint,
     Int,
@@ -392,7 +417,47 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
     for optional_token(p, .Semi) {}
 
     node: ^Ast_Statement
-    if tokens[at].type == .Ident && tokens[at+1].type == .Colon
+    if optional_token(p, .If)
+    {
+        if_stmt := make_statement(p, Ast_If)
+        if_stmt.cond = parse_expr(p)
+
+        {
+            old_scope := scope
+            scope = new(Ast_Scope)
+            scope.enclosing_scope = old_scope
+            defer scope = old_scope
+
+            if_stmt.scope = scope
+            required_token(p, .LBrace)
+            if_stmt.statements = parse_statement_list(p)
+            required_token(p, .RBrace)
+        }
+
+        if optional_token(p, .Else)
+        {
+            if_stmt.else_is_present = true
+            old_scope := scope
+            if_stmt.else_scope = new(Ast_Scope)
+            if_stmt.else_scope.enclosing_scope = old_scope
+            defer scope = old_scope
+
+            if tokens[at].type == .If
+            {
+                if_stmt.else_is_single = true
+                if_stmt.else_single = parse_statement(p)
+            }
+            else
+            {
+                required_token(p, .LBrace)
+                if_stmt.else_multi_statements = parse_statement_list(p)
+                required_token(p, .RBrace)
+            }
+        }
+
+        node = if_stmt
+    }
+    else if tokens[at].type == .Ident && tokens[at+1].type == .Colon
     {
         ident := tokens[at].text
         at += 2
@@ -421,6 +486,8 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
             def_var.expr = parse_expr(p)
             node = def_var
         }
+
+        required_token(p, .Semi)
     }
     else
     {
@@ -444,9 +511,10 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
             stmt_expr.expr = parse_expr(p)
             node = stmt_expr
         }
+
+        required_token(p, .Semi)
     }
 
-    required_token(p, .Semi)
     return node
 }
 
@@ -780,7 +848,7 @@ required_token :: proc(using p: ^Parser, type: Token_Type) -> Token
 {
     if tokens[at].type != type
     {
-        parse_error(p, "Unexpected token '%v': expecting '%v'", tokens[at].text, type)
+        parse_error(p, "Unexpected token '%v': expecting '%v'", tokens[at].text, token_type_to_string(type))
         return {}
     }
 
@@ -811,6 +879,13 @@ Op_Precedence := map[Token_Type]Op_Info {
 
     .Plus  = { 4, .Add },
     .Minus = { 4, .Minus },
+
+    .Greater = { 5, .Greater },
+    .Less    = { 5, .Less },
+    .EQ      = { 5, .EQ },
+    .GE      = { 5, .GE },
+    .LE      = { 5, .LE },
+    .NEQ     = { 5, .NEQ },
 }
 
 add_type_if_not_present :: proc(using p: ^Parser, type: ^Ast_Type)

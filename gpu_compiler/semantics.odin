@@ -120,6 +120,37 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
                 }
             }
         }
+        case ^Ast_If:
+        {
+            typecheck_expr(c, stmt.cond)
+            if stmt.cond.type.primitive_kind != .Bool {
+                typecheck_error_mismatching_types(c, stmt.token, stmt.cond.type, &BOOL_TYPE)
+            }
+
+            // Then
+            {
+                old_scope := scope
+                scope = stmt.scope
+                defer scope = old_scope
+
+                resolve_scope_decls(c)
+                typecheck_statement_list(c, stmt.statements)
+            }
+            // Else
+            if stmt.else_is_present
+            {
+                old_scope := scope
+                scope = stmt.scope
+                defer scope = old_scope
+                resolve_scope_decls(c)
+
+                if stmt.else_is_single {
+                    typecheck_statement(c, stmt.else_single)
+                } else {
+                    typecheck_statement_list(c, stmt.else_multi_statements)
+                }
+            }
+        }
         case ^Ast_Return:
         {
             typecheck_expr(c, stmt.expr)
@@ -127,6 +158,13 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
                 typecheck_error_mismatching_types(c, stmt.token, stmt.expr.type, cur_proc.decl.type.ret)
             }
         }
+    }
+}
+
+typecheck_statement_list :: proc(using c: ^Checker, stmts: []^Ast_Statement)
+{
+    for stmt in stmts {
+        typecheck_statement(c, stmt)
     }
 }
 
@@ -309,6 +347,7 @@ UINT_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Uint, name = { text
 VEC2_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec2, name = { text = "vec2", line = 0, value = {}, type = {}, col_start = {} } }
 VEC3_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec3, name = { text = "vec3", line = 0, value = {}, type = {}, col_start = {} } }
 VEC4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Vec4, name = { text = "vec4", line = 0, value = {}, type = {}, col_start = {} } }
+BOOL_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Bool, name = { text = "bool", line = 0, value = {}, type = {}, col_start = {} } }
 TEXTUREID_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Texture_ID, name = { text = "textureid", line = {}, value = {}, type = {}, col_start = {} } }
 SAMPLERID_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Sampler_ID, name = { text = "samplerid", line = {}, value = {}, type = {}, col_start = {} } }
 MAT4_TYPE := Ast_Type { kind = .Primitive, primitive_kind = .Mat4, name = { text = "mat4", line = 0, value = {}, type = {}, col_start = {} } }
@@ -437,6 +476,18 @@ bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type
         if type2.primitive_kind == .Mat4 do return &VEC4_TYPE
     }
 
+    is_compare := op == .Greater ||
+                  op == .Less ||
+                  op == .LE ||
+                  op == .GE ||
+                  op == .EQ ||
+                  op == .NEQ
+    if is_compare
+    {
+        if same_type(type1, type2) && is_compare do return &BOOL_TYPE
+        else do return &POISON_TYPE
+    }
+
     type_less := type1
     type_greater := type2
     if type_less.primitive_kind > type_greater.primitive_kind {
@@ -455,4 +506,11 @@ bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type
 
     if same_type(type1, type2) do return type1
     return &POISON_TYPE
+}
+
+resolve_scope_decls :: proc(using c: ^Checker)
+{
+    for decl in scope.decls {
+        resolve_type(c, decl.type)
+    }
 }

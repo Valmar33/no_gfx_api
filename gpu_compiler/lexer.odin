@@ -327,3 +327,47 @@ is_newline :: #force_inline proc(c: u8) -> bool
 {
     return c == '\n'
 }
+
+token_type_to_string :: proc(type: Token_Type) -> string
+{
+    switch type
+    {
+        case .Unknown:      return "UNKNOWN"
+        case .LParen:       return "("
+        case .RParen:       return ")"
+        case .LBracket:     return "["
+        case .RBracket:     return "]"
+        case .LBrace:       return "{"
+        case .RBrace:       return "}"
+        case .Plus:         return "+"
+        case .Minus:        return "-"
+        case .Mul:          return "*"
+        case .Div:          return "/"
+        case .Greater:      return ">"
+        case .Less:         return "<"
+        case .Assign:       return "="
+        case .Dot:          return "."
+        case .Comma:        return ","
+        case .Colon:        return ":"
+        case .Semi:         return ";"
+        case .Caret:        return "^"
+        case .LE:           return "<="
+        case .GE:           return ">="
+        case .EQ:           return "=="
+        case .NEQ:          return "!="
+        case .Plus_Equals:  return "+="
+        case .Minus_Equals: return "-="
+        case .Mul_Equals:   return "*="
+        case .Div_Equals:   return "/="
+        case .Ident:        return "identifier"
+        case .Attribute:    return "attribute"
+        case .Arrow:        return "->"
+        case .Struct:       return "struct"
+        case .If:           return "if"
+        case .Else:         return "else"
+        case .Return:       return "return"
+        case .NumLit:       return "number"
+        case .EOS:          return "end of file"
+    }
+    return "UNKNOWN"
+}
