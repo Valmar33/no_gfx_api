@@ -162,6 +162,12 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
             if stmt.iter != nil   do typecheck_statement(c, stmt.iter)
             typecheck_statement_list(c, stmt.statements)
         }
+        case ^Ast_Break:
+        {
+        }
+        case ^Ast_Continue:
+        {
+        }
         case ^Ast_Return:
         {
             typecheck_expr(c, stmt.expr)

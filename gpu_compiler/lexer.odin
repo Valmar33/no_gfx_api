@@ -51,6 +51,8 @@ Token_Type :: enum
     If,
     Else,
     For,
+    Break,
+    Continue,
     Return,
 
     // Literals
@@ -65,6 +67,8 @@ Keywords := map[string]Token_Type {
     "if"     = .If,
     "else"   = .Else,
     "for"    = .For,
+    "break"  = .Break,
+    "continue" = .Continue,
     "return" = .Return,
 }
 One_Char_Operators := map[u8]Token_Type {
@@ -368,6 +372,8 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .If:           return "if"
         case .Else:         return "else"
         case .For:          return "for"
+        case .Break:        return "break"
+        case .Continue:     return "continue"
         case .Return:       return "return"
         case .NumLit:       return "number"
         case .EOS:          return "end of file"

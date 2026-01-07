@@ -157,6 +157,8 @@ Any_Statement :: union
     ^Ast_Return,
     ^Ast_If,
     ^Ast_For,
+    ^Ast_Break,
+    ^Ast_Continue,
 }
 
 Ast_Statement :: struct
@@ -218,6 +220,9 @@ Ast_For :: struct
     statements: []^Ast_Statement,
     scope: ^Ast_Scope,
 }
+
+Ast_Break :: struct { using base_statement: Ast_Statement }
+Ast_Continue :: struct { using base_statement: Ast_Statement }
 
 // Types
 
@@ -501,13 +506,25 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
         }
 
         required_token(p, .LBrace)
-        
+
         if tokens[at].type != .RBrace {
             for_stmt.statements = parse_statement_list(p)
         }
         required_token(p, .RBrace)
 
         node = for_stmt
+    }
+    else if tokens[at].type == .Continue
+    {
+        stmt := make_statement(p, Ast_Continue)
+        node = stmt
+        at += 1
+    }
+    else if tokens[at].type == .Break
+    {
+        stmt := make_statement(p, Ast_Break)
+        node = stmt
+        at += 1
     }
     else if tokens[at].type == .Ident && tokens[at+1].type == .Colon
     {
