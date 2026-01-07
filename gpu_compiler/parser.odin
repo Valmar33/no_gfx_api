@@ -6,6 +6,7 @@ package main
 import "base:runtime"
 import "core:slice"
 import intr "base:intrinsics"
+import str "core:strings"
 
 Any_Node :: union
 {
@@ -146,6 +147,7 @@ Any_Statement :: union
 {
     ^Ast_Assign,
     ^Ast_Stmt_Expr,
+    ^Ast_Define_Var,
     ^Ast_Return,
 }
 
@@ -160,6 +162,13 @@ Ast_Assign :: struct
     using base_statement: Ast_Statement,
     lhs: ^Ast_Expr,
     rhs: ^Ast_Expr
+}
+
+Ast_Define_Var :: struct
+{
+    using base_statement: Ast_Statement,
+    decl: ^Ast_Decl,
+    expr: ^Ast_Expr,
 }
 
 Ast_Stmt_Expr :: struct
@@ -179,6 +188,7 @@ Ast_Return :: struct
 Ast_Type_Kind :: enum
 {
     Poison = 0,
+    Unknown,  // For typeless initialization
     Label,
     Pointer,
     Slice,
@@ -381,30 +391,59 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
 {
     for optional_token(p, .Semi) {}
 
-    cursor := at
-    for ; tokens[cursor].type != .Semi && tokens[cursor].type != .Assign && tokens[cursor].type != .EOS; cursor += 1 { }
-
-    found_assign := tokens[cursor].type == .Assign
     node: ^Ast_Statement
-    if found_assign
+    if tokens[at].type == .Ident && tokens[at+1].type == .Colon
     {
-        node = parse_assign(p)
-    }
-    else if optional_token(p, .Return)
-    {
-        ret_stmt := make_statement(p, Ast_Return)
-        ret_stmt.expr = parse_expr(p)
-        node = ret_stmt
-    }
-    else if tokens[at].type == .Ident && tokens[at+1].type == .Colon
-    {
-        parse_var_decl(p)
+        ident := tokens[at].text
+        at += 2
+
+        decl := make_node(p, Ast_Decl)
+        decl.name = ident
+        append(&scope.decls, decl)
+
+        type: ^Ast_Type
+        if tokens[at].type == .Assign
+        {
+            type = new(Ast_Type)
+            type.kind = .Unknown
+        }
+        else
+        {
+            type = parse_type(p)
+        }
+        decl.type = type
+
+
+        if optional_token(p, .Assign)
+        {
+            def_var := make_statement(p, Ast_Define_Var)
+            def_var.decl = decl
+            def_var.expr = parse_expr(p)
+            node = def_var
+        }
     }
     else
     {
-        stmt_expr := make_statement(p, Ast_Stmt_Expr)
-        stmt_expr.expr = parse_expr(p)
-        node = stmt_expr
+        cursor := at
+        for ; tokens[cursor].type != .Semi && tokens[cursor].type != .Assign && tokens[cursor].type != .EOS; cursor += 1 { }
+
+        found_assign := tokens[cursor].type == .Assign
+        if found_assign
+        {
+            node = parse_assign(p)
+        }
+        else if optional_token(p, .Return)
+        {
+            ret_stmt := make_statement(p, Ast_Return)
+            ret_stmt.expr = parse_expr(p)
+            node = ret_stmt
+        }
+        else
+        {
+            stmt_expr := make_statement(p, Ast_Stmt_Expr)
+            stmt_expr.expr = parse_expr(p)
+            node = stmt_expr
+        }
     }
 
     required_token(p, .Semi)
@@ -783,4 +822,61 @@ add_type_if_not_present :: proc(using p: ^Parser, type: ^Ast_Type)
     }
 
     append(&used_types, type^)
+}
+
+type_to_string :: proc(type: ^Ast_Type, arena: runtime.Allocator) -> string
+{
+    scratch, _ := acquire_scratch(arena)
+    if type == nil do return "NIL"
+
+    res: string
+    switch type.kind
+    {
+        case .Poison:    res = "POISON"
+        case .Unknown:   res = "UNKNOWN"
+        case .Label:     res = type.name.text
+        case .Pointer:   res = str.concatenate({ "^", type_to_string(type.base, scratch) }, allocator = scratch)
+        case .Slice:     res = str.concatenate({ "[]", type_to_string(type.base, scratch) }, allocator = scratch)
+        case .Proc:
+        {
+            scratch2, _ := acquire_scratch(scratch, arena)
+            sb := str.builder_make_none(allocator = scratch2)
+            str.write_string(&sb, "(")
+            for arg, i in type.args
+            {
+                str.write_string(&sb, type_to_string(arg.type, arena = scratch))
+                if i < len(type.args) - 1 do str.write_string(&sb, ", ")
+            }
+            str.write_string(&sb, ")")
+            if type.ret == nil
+            {
+                str.write_string(&sb, " -> ")
+                str.write_string(&sb, type_to_string(type.ret, arena = scratch))
+            }
+
+            res = str.clone(str.to_string(sb), allocator = scratch)
+        }
+        case .Primitive:  res = type.name.text
+        case .Struct:
+        {
+            scratch2, _ := acquire_scratch(scratch, arena)
+            sb := str.builder_make_none(allocator = scratch2)
+            str.write_string(&sb, "(")
+            for member, i in type.members
+            {
+                str.write_string(&sb, type_to_string(member.type, arena = scratch))
+                if i < len(type.members) - 1 do str.write_string(&sb, ", ")
+            }
+            str.write_string(&sb, ")")
+            if type.ret == nil
+            {
+                str.write_string(&sb, " -> ")
+                str.write_string(&sb, type_to_string(type.ret, arena = scratch))
+            }
+
+            res = str.clone(str.to_string(sb), allocator = scratch)
+        }
+    }
+
+    return str.clone(res, allocator = arena)
 }

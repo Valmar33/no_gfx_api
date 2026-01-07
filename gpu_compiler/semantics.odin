@@ -21,6 +21,7 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
         switch decl.type.kind
         {
             case .Poison: {}
+            case .Unknown: {}
             case .Proc:
             {
                 for arg in decl.type.args
@@ -97,9 +98,23 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
             typecheck_expr(c, stmt.lhs)
             typecheck_expr(c, stmt.rhs)
 
-            /*if !same_type(stmt.lhs.type, stmt.rhs.type) {
-                typecheck_error(c, expr.token, "Mismatching types.")
-            }*/
+            if !same_type(stmt.lhs.type, stmt.rhs.type) {
+                typecheck_error_mismatching_types(c, stmt.token, stmt.lhs.type, stmt.rhs.type)
+            }
+        }
+        case ^Ast_Define_Var:
+        {
+            typecheck_expr(c, stmt.expr)
+            if stmt.decl.type.kind == .Unknown
+            {
+                stmt.decl.type = stmt.expr.type
+            }
+            else
+            {
+                if !same_type(stmt.decl.type, stmt.expr.type) {
+                    typecheck_error_mismatching_types(c, stmt.token, stmt.decl.type, stmt.expr.type)
+                }
+            }
         }
         case ^Ast_Return:
         {
@@ -121,17 +136,14 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 
             expr.type = bin_op_result_type(expr.op, expr.lhs.type, expr.rhs.type)
             if expr.type == &POISON_TYPE {
-                typecheck_error(c, expr.token, "Incompatible types.")
+                typecheck_error_mismatching_types(c, expr.token, expr.lhs.type, expr.rhs.type)
             }
-
-            expr.type = expr.lhs.type
         }
         case ^Ast_Ident_Expr:
         {
             decl := decl_lookup(c, expr.token)
             if decl == nil {
                 typecheck_error(c, expr.token, "Undeclared identifier '%v'.", expr.token.text)
-                expr.type = &POISON_TYPE
             } else {
                 expr.type = decl.type
             }
@@ -275,7 +287,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                 typecheck_expr(c, arg)
 
                 if !same_type(arg.type, proc_decl_arg_type) {
-                    typecheck_error(c, expr.token, "Mismatching types.")
+                    typecheck_error_mismatching_types(c, expr.token, arg.type, proc_decl_arg_type)
                 }
             }
 
@@ -365,6 +377,17 @@ typecheck_error :: proc(using c: ^Checker, token: Token, fmt_str: string, args: 
     error = true
 }
 
+typecheck_error_mismatching_types :: proc(using c: ^Checker, token: Token, type1: ^Ast_Type, type2: ^Ast_Type)
+{
+    if error do return
+
+    scratch, _ := acquire_scratch()
+    type1_str := type_to_string(type1, arena = scratch)
+    type2_str := type_to_string(type2, arena = scratch)
+    error_msg(input_path, token, "Mismatching types: '%v' and '%v'", type1_str, type2_str)
+    error = true
+}
+
 INTRINSICS: [dynamic]^Ast_Decl
 
 add_intrinsics :: proc()
@@ -413,8 +436,14 @@ bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type
         type_less, type_greater = type_greater, type_less
     }
 
+    if type_less.primitive_kind == .Float && type_greater.primitive_kind == .Vec2 {
+        return type_greater
+    }
     if type_less.primitive_kind == .Float && type_greater.primitive_kind == .Vec3 {
-        return type2
+        return type_greater
+    }
+    if type_less.primitive_kind == .Float && type_greater.primitive_kind == .Vec4 {
+        return type_greater
     }
 
     if same_type(type1, type2) do return type1

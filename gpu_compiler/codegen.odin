@@ -50,6 +50,7 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
         switch decl.type.kind
         {
             case .Poison: {}
+            case .Unknown: {}
             case .Label: {}
             case .Pointer: {}
             case .Slice: {}
@@ -206,6 +207,12 @@ codegen_statement :: proc(statement: ^Ast_Statement, ast: Ast, proc_def: ^Ast_Pr
             write(" = ")
             codegen_expr(stmt.rhs)
         }
+        case ^Ast_Define_Var:
+        {
+            write(stmt.decl.name)
+            write(" = ")
+            codegen_expr(stmt.expr)
+        }
         case ^Ast_Return:
         {
             if is_main
@@ -328,6 +335,7 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
     switch type.kind
     {
         case .Poison: return "<POISON>"
+        case .Unknown: return "<UNKNOWN>"
         case .Label: return type.name.text
         case .Pointer: return strings.concatenate({ "_res_ptr_", type_to_glsl(type.base) })
         case .Slice: return strings.concatenate({ "_res_slice_", type_to_glsl(type.base) })
