@@ -1,0 +1,13 @@
+
+Data :: struct
+{
+    output_texture_id: textureid,
+}
+
+main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
+{
+    color: vec4;
+    color = vec4(1.0, 0.0, 1.0, 1.0); // TODO do fancy fractals here
+    
+    imageStore(data.output_texture_id, global_invocation_id.xy, color);
+}

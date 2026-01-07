@@ -30,7 +30,9 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
                     resolve_type(&c, arg.type)
                 }
 
-                resolve_type(&c, decl.type.ret)
+                if decl.type.ret != nil {
+                    resolve_type(&c, decl.type.ret)
+                }
             }
             case .Struct:
             {
@@ -241,7 +243,17 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                 expr.type = &VEC2_TYPE
                 break
             }
+            else if expr.member_name == "x"
+            {
+                expr.type = &FLOAT_TYPE
+                break
+            }
             else if expr.member_name == "y"
+            {
+                expr.type = &FLOAT_TYPE
+                break
+            }
+            else if expr.member_name == "z"
             {
                 expr.type = &FLOAT_TYPE
                 break
@@ -474,6 +486,7 @@ INTRINSICS: [dynamic]^Ast_Decl
 add_intrinsics :: proc()
 {
     add_intrinsic("sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
+    add_intrinsic("imageStore", { &TEXTUREID_TYPE, &VEC2_TYPE, &VEC4_TYPE }, { "tex_idx", "coord", "value" }, nil)
     add_intrinsic("mix", { &VEC4_TYPE, &VEC4_TYPE, &FLOAT_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
     add_intrinsic("normalize", { &VEC3_TYPE }, { "v" }, &VEC3_TYPE)
 }

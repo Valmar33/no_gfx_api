@@ -32,8 +32,10 @@ main :: proc()
         shader_type = .Vertex
     } else if shader_type_str == ".frag" {
         shader_type = .Fragment
+    } else if shader_type_str == ".comp" {
+        shader_type = .Compute
     } else {
-        fmt.println("Could not infer shader type. Try '*.vert.musl' or '*.frag.musl'.")
+        fmt.println("Could not infer shader type. Try '*.vert.musl', '*.frag.musl', or '*.comp.musl'.")
         os.exit(1)
     }
 

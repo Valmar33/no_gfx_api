@@ -10,7 +10,8 @@ import "core:os/os2"
 Shader_Type :: enum
 {
     Vertex,
-    Fragment
+    Fragment,
+    Compute
 }
 
 codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_path: string)
@@ -119,7 +120,7 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
     writeln("")
 
-    // Push constants always contain 4 pointers: vert_data, frag_data, vert_indirect_data, frag_indirect_data
+    // Push constants contain pointers: vert_data, frag_data, compute_data, vert_indirect_data, frag_indirect_data, compute_indirect_data
     indirect_data_type_glsl := "_res_ptr_void"
     if ast.used_indirect_data_type != nil {
         indirect_data_type_glsl = strings.concatenate({"_res_indirect_array_", type_to_glsl(ast.used_indirect_data_type.base)})
@@ -129,10 +130,15 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     writeln("layout(push_constant, scalar) uniform Push")
     writeln("{")
     if writer_scope() {
-        writefln("%v _res_vert_data_;", data_type_str)
-        writefln("%v _res_frag_data_;", data_type_str)
-        writefln("%v _res_vert_indirect_data_;", indirect_data_type_glsl)
-        writefln("%v _res_frag_indirect_data_;", indirect_data_type_glsl)
+        if shader_type == .Compute {
+            writefln("%v _res_compute_data_;", data_type_str)
+            writefln("%v _res_compute_indirect_data_;", indirect_data_type_glsl)
+        } else {
+            writefln("%v _res_vert_data_;", data_type_str)
+            writefln("%v _res_frag_data_;", data_type_str)
+            writefln("%v _res_vert_indirect_data_;", indirect_data_type_glsl)
+            writefln("%v _res_frag_indirect_data_;", indirect_data_type_glsl)
+        }
     }
     writeln("};")
     writeln("")
@@ -403,6 +409,22 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
                     is_intrinsic = true
                 }
+                else if text == "imageStore"
+                {
+                    assert(len(expr.args) == 3)
+
+                    // For compute shaders, we can use direct indexing without nonuniformEXT
+                    // since we're accessing by index from the data struct
+                    write("imageStore(_res_textures_rw_[")
+                    codegen_expr(expr.args[0])
+                    write("], ivec2(")
+                    codegen_expr(expr.args[1])
+                    write("), ")
+                    codegen_expr(expr.args[2])
+                    write(")")
+
+                    is_intrinsic = true
+                }
             }
 
             if is_intrinsic do break
@@ -464,11 +486,13 @@ attribute_to_glsl :: proc(attribute: Ast_Attribute, ast: Ast, shader_type: Shade
         case .Vert_ID:       return "gl_VertexIndex"
         case .Position:     return "gl_Position"
         case .Data:
-            // Data comes from push constants: _res_vert_data_ for vertex shader, _res_frag_data_ for fragment shader
+            // Data comes from push constants: _res_vert_data_ for vertex shader, _res_frag_data_ for fragment shader, _res_compute_data_ for compute shader
             if shader_type == .Vertex {
                 return "_res_vert_data_"
-            } else {
+            } else if shader_type == .Fragment {
                 return "_res_frag_data_"
+            } else {
+                return "_res_compute_data_"
             }
         case .Instance_ID:  return "gl_InstanceID"
         case .Draw_ID:       return "gl_DrawID"
@@ -476,11 +500,15 @@ attribute_to_glsl :: proc(attribute: Ast_Attribute, ast: Ast, shader_type: Shade
         {
             // Indirect data comes from push constants: pointer to start of array, indexed by gl_DrawID
             if ast.used_indirect_data_type != nil {
-                indirect_data_name := "_res_vert_indirect_data_" if shader_type == .Vertex else "_res_frag_indirect_data_"
+                indirect_data_name := "_res_vert_indirect_data_" if shader_type == .Vertex else "_res_frag_indirect_data_" if shader_type == .Fragment else "_res_compute_indirect_data_"
                 return strings.concatenate({indirect_data_name, "._res_[gl_DrawID]"})
             }
             return "_res_indirect_data_._res_[gl_DrawID]"
         }
+        case .Workgroup_ID: return "gl_WorkGroupID"
+        case .Local_Invocation_ID: return "gl_LocalInvocationID"
+        case .Group_Size: return "gl_WorkGroupSize"
+        case .Global_Invocation_ID: return "gl_GlobalInvocationID"
         case .Out_Loc:  return strings.concatenate({"_res_out_loc", val_str, "_"})
         case .In_Loc:   return strings.concatenate({"_res_in_loc", val_str, "_"})
     }
@@ -535,6 +563,11 @@ write_preamble :: proc()
     writeln("#extension GL_EXT_nonuniform_qualifier : require")
     writeln("#extension GL_EXT_scalar_block_layout : require")
     writeln("#extension GL_EXT_shader_image_load_formatted : require")
+
+    if writer.shader_type == .Compute {
+        writeln("layout(local_size_x_id = 13370, local_size_y_id = 13371, local_size_z_id = 13372) in;")
+    }
+    
     writeln("")
 }
 
