@@ -12,9 +12,22 @@ import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import "vma"
 
-Push_Constant_Size_Graphics :: size_of(rawptr) * 4  // vert_data, frag_data, vert_indirect_data, frag_indirect_data
-Push_Constant_Size_Compute :: size_of(rawptr) * 2   // compute_data, compute_indirect_data
 Max_Textures :: 65535
+
+@(private="file")
+Graphics_Shader_Push_Constants :: struct #packed {
+    vert_data: rawptr,
+    frag_data: rawptr,
+    vert_indirect_data: rawptr,
+    frag_indirect_data: rawptr,
+}
+
+@(private="file")
+Compute_Shader_Push_Constants :: struct #packed {
+    compute_data: rawptr,
+    compute_indirect_data: rawptr,
+    max_thread_id: [3]u32,
+}
 
 @(private="file")
 GPU_Alloc_Meta :: struct #all_or_none
@@ -98,6 +111,11 @@ Context :: struct
     texture_desc_size: u32,
     texture_rw_desc_size: u32,
     sampler_desc_size: u32,
+
+    // Shader metadata
+    shader_workgroup_sizes: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
+    cmd_buf_compute_shader: map[Command_Buffer]Shader,  // Tracks current compute shader per command buffer
+    cmd_buf_compute_data: map[Command_Buffer]rawptr,  // Tracks compute data pointer per command buffer
 }
 
 // Initialization
@@ -444,7 +462,7 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
             push_constant_ranges := []vk.PushConstantRange {
                 {
                     stageFlags = { .VERTEX, .FRAGMENT },
-                    size = Push_Constant_Size_Graphics,
+                    size = size_of(Graphics_Shader_Push_Constants),
                 }
             }
             pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
@@ -462,7 +480,7 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
             push_constant_ranges := []vk.PushConstantRange {
                 {
                     stageFlags = { .COMPUTE },
-                    size = Push_Constant_Size_Compute,
+                    size = size_of(Compute_Shader_Push_Constants),
                 }
             }
             pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
@@ -1092,14 +1110,14 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Maybe(Shader_Create
         push_constant_ranges = []vk.PushConstantRange {
             {
                 stageFlags = { .COMPUTE },
-                size = Push_Constant_Size_Compute,
+                size = size_of(Compute_Shader_Push_Constants),
             }
         }
     } else {
         push_constant_ranges = []vk.PushConstantRange {
             {
                 stageFlags = { .VERTEX, .FRAGMENT },
-                size = Push_Constant_Size_Graphics,
+                size = size_of(Graphics_Shader_Push_Constants),
             }
         }
     }
@@ -1118,16 +1136,27 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Maybe(Shader_Create
     spec_info: vk.SpecializationInfo
     spec_info_ptr: ^vk.SpecializationInfo = nil
     spec_count: u32 = 0
+
+    group_size_x: u32 = 1
+    group_size_y: u32 = 1
+    group_size_z: u32 = 1
     
     if type == .Compute
     {
+        if info != nil
+        {
+            group_size_x = info.?.group_size_x.? or_else 1
+            group_size_y = info.?.group_size_y.? or_else 1
+            group_size_z = info.?.group_size_z.? or_else 1
+        }
+
         {
             spec_map_entries[spec_count] = vk.SpecializationMapEntry {
                 constantID = 13370, // Random big ids to avoid conflicts with user defined constants
                 offset = u32(spec_count * size_of(u32)),
                 size = size_of(u32),
             }
-            spec_data[spec_count] = info.?.group_size_x.? or_else 1
+            spec_data[spec_count] = group_size_x
             spec_count += 1
         }
         
@@ -1137,7 +1166,7 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Maybe(Shader_Create
                 offset = u32(spec_count * size_of(u32)),
                 size = size_of(u32),
             }
-            spec_data[spec_count] = info.?.group_size_y.? or_else 1
+            spec_data[spec_count] = group_size_y
             spec_count += 1
         }
         
@@ -1147,7 +1176,7 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Maybe(Shader_Create
                 offset = u32(spec_count * size_of(u32)),
                 size = size_of(u32),
             }
-            spec_data[spec_count] = info.?.group_size_z.? or_else 1
+            spec_data[spec_count] = group_size_z
             spec_count += 1
         }
     }
@@ -1180,13 +1209,35 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Maybe(Shader_Create
 
     shader: vk.ShaderEXT
     vk_check(vk.CreateShadersEXT(ctx.device, 1, &shader_cis, nil, &shader))
-    return transmute(Shader) shader
+    shader_handle := transmute(Shader) shader
+    
+    // Store work group size for compute shaders
+    if type == .Compute
+    {
+        ctx.shader_workgroup_sizes[shader_handle] = { group_size_x, group_size_y, group_size_z }
+    }
+    
+    return shader_handle
 }
 
 _shader_destroy :: proc(shader: ^Shader)
 {
     vk_shader := transmute(vk.ShaderEXT) (shader^)
     vk.DestroyShaderEXT(ctx.device, vk_shader, nil)
+    
+    // Remove from workgroup size map
+    delete_key(&ctx.shader_workgroup_sizes, shader^)
+    
+    // Remove from any command buffer tracking
+    for cmd_buf, compute_shader in ctx.cmd_buf_compute_shader
+    {
+        if compute_shader == shader^
+        {
+            delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
+            delete_key(&ctx.cmd_buf_compute_data, cmd_buf)
+        }
+    }
+    
     shader^ = {}
 }
 
@@ -1299,6 +1350,10 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
 
         vk_submit_cmd_buf(vk_queue, vk_cmd_buf, vk_signal_sem, signal_value)
+        
+        // Clear compute shader tracking for this command buffer
+        delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
+        delete_key(&ctx.cmd_buf_compute_data, cmd_buf)
     }
 }
 
@@ -1485,15 +1540,42 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader,
     assert(len(shader_stages) == len(to_bind))
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
     
-    // Set push constants for compute shader (compute_data, compute_indirect_data)
-    ptrs := []rawptr { compute_data, nil }  // compute_data, compute_indirect_data
-    assert(Push_Constant_Size_Compute == len(ptrs) * size_of(ptrs[0]))
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, Push_Constant_Size_Compute, raw_data(ptrs))
+    ctx.cmd_buf_compute_shader[cmd_buf] = compute_shader
+    ctx.cmd_buf_compute_data[cmd_buf] = compute_data
 }
 
-_cmd_dispatch :: proc(cmd_buf: Command_Buffer, group_count_x: u32, group_count_y: u32 = 1, group_count_z: u32 = 1)
+_cmd_dispatch :: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    
+    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
+    if !has_shader
+    {
+        log.error("cmd_dispatch called without a compute shader set. Call cmd_set_compute_shader first.")
+        return
+    }
+    
+    compute_data := ctx.cmd_buf_compute_data[cmd_buf]
+    
+    workgroup_size, has_size := ctx.shader_workgroup_sizes[compute_shader]
+    if !has_size
+    {
+        log.error("Work group size not found for compute shader.")
+        return
+    }
+    
+    group_count_x := (threads_x + workgroup_size.x - 1) / workgroup_size.x
+    group_count_y := (threads_y + workgroup_size.y - 1) / workgroup_size.y
+    group_count_z := (threads_z + workgroup_size.z - 1) / workgroup_size.z
+    
+    push_constants := Compute_Shader_Push_Constants {
+        compute_data = compute_data,
+        compute_indirect_data = nil,
+        max_thread_id = { threads_x, threads_y, threads_z },
+    }
+    
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
+    
     vk.CmdDispatch(vk_cmd_buf, group_count_x, group_count_y, group_count_z)
 }
 
@@ -1608,10 +1690,13 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
         return
     }
 
-    // Push constants: vert_data, frag_data, vert_indirect_data, frag_indirect_data
-    ptrs := []rawptr { vertex_data, fragment_data, vertex_data, fragment_data }
-    assert(Push_Constant_Size_Graphics == len(ptrs) * size_of(ptrs[0]))
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, Push_Constant_Size_Graphics, raw_data(ptrs))
+    push_constants := Graphics_Shader_Push_Constants {
+        vert_data = vertex_data,
+        frag_data = fragment_data,
+        vert_indirect_data = vertex_data,
+        frag_indirect_data = fragment_data,
+    }
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
     vk.CmdDrawIndexed(vk_cmd_buf, index_count, instance_count, 0, 0, 0)
@@ -1636,10 +1721,13 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
         return
     }
 
-    // Push constants: vert_data, frag_data, vert_indirect_data, frag_indirect_data
-    ptrs := []rawptr { vertex_data, fragment_data, vertex_data, fragment_data }
-    assert(Push_Constant_Size_Graphics == len(ptrs) * size_of(ptrs[0]))
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, Push_Constant_Size_Graphics, raw_data(ptrs))
+    push_constants := Graphics_Shader_Push_Constants {
+        vert_data = vertex_data,
+        frag_data = fragment_data,
+        vert_indirect_data = vertex_data,
+        frag_indirect_data = fragment_data,
+    }
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
     vk.CmdDrawIndexedIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), 1, 0)
@@ -1673,10 +1761,13 @@ _cmd_draw_indexed_instanced_indirect_multi_impl :: proc(cmd_buf: Command_Buffer,
         return
     }
 
-    // Push constants contain: vert_data, frag_data, vert_indirect_data, frag_indirect_data
-    ptrs := []rawptr { data_vertex_shared, data_pixel_shared, data_vertex, data_pixel }
-    assert(Push_Constant_Size_Graphics == len(ptrs) * size_of(ptrs[0]))
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, Push_Constant_Size_Graphics, raw_data(ptrs))
+    push_constants := Graphics_Shader_Push_Constants {
+        vert_data = data_vertex_shared,
+        frag_data = data_pixel_shared,
+        vert_indirect_data = data_vertex,
+        frag_indirect_data = data_pixel,
+    }
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
     stride := u32(size_of(vk.DrawIndexedIndirectCommand))

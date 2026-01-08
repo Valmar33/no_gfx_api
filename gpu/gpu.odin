@@ -201,7 +201,7 @@ cmd_set_compute_shader: proc(cmd_buf: Command_Buffer, compute_shader: Shader, co
 cmd_set_depth_state: proc(cmd_buf: Command_Buffer, state: Depth_State) : _cmd_set_depth_state
 cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State) : _cmd_set_blend_state
 
-cmd_dispatch: proc(cmd_buf: Command_Buffer, group_count_x: u32, group_count_y: u32 = 1, group_count_z: u32 = 1) : _cmd_dispatch
+cmd_dispatch: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1) : _cmd_dispatch
 //cmd_dispatch_indirect: proc() : _cmd_dispatch_indirect
 
 cmd_begin_render_pass: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc) : _cmd_begin_render_pass

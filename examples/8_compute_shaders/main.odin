@@ -171,10 +171,8 @@ main :: proc()
         gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader, compute_data.gpu)
         
-        // Dispatch with work groups: (width/8, height/8, 1) groups of 8x8 threads
-        group_count_x := u32((Window_Size_X + group_size_x - 1) / group_size_x)
-        group_count_y := u32((Window_Size_Y + group_size_y - 1) / group_size_y)
-        gpu.cmd_dispatch(cmd_buf, group_count_x, group_count_y, 1)
+        // Work groups will be calculated automatically based on shader work group size
+        gpu.cmd_dispatch(cmd_buf, Window_Size_X, Window_Size_Y, 1)
         
         // Barrier to ensure compute shader finishes before rendering
         gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
