@@ -26,7 +26,7 @@ Texture_Type :: enum { D2 = 0, D3, D1 }
 Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float }
 Usage :: enum { Sampled = 0, Storage, Color_Attachment, Depth_Stencil_Attachment }
 Usage_Flags :: bit_set[Usage; u32]
-Shader_Type :: enum { Vertex = 0, Fragment, Compute }
+Shader_Type_Graphics :: enum { Vertex = 0, Fragment }
 Load_Op :: enum { Clear = 0, Load, Dont_Care }
 Store_Op :: enum { Store = 0, Dont_Care }
 Compare_Op :: enum { Never = 0, Less, Equal, Less_Equal, Greater, Not_Equal, Greater_Equal, Always }
@@ -131,11 +131,10 @@ Draw_Indexed_Indirect_Command :: struct {
     first_instance: u32,
 }
 
-Shader_Create_Info :: struct
-{
-    group_size_x: u32,
-    group_size_y: u32,
-    group_size_z: u32,
+Dispatch_Indirect_Command :: struct {
+    num_groups_x: u32,
+    num_groups_y: u32,
+    num_groups_z: u32,
 }
 
 // Procedures
@@ -173,7 +172,8 @@ get_texture_rw_view_descriptor_size: proc() -> u32 : _get_texture_rw_view_descri
 get_sampler_descriptor_size: proc() -> u32 : _get_sampler_descriptor_size
 
 // Shaders
-shader_create: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info = {}) -> Shader : _shader_create
+shader_create: proc(code: []u32, type: Shader_Type_Graphics) -> Shader : _shader_create
+shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader : _shader_create_compute
 shader_destroy: proc(shader: ^Shader) : _shader_destroy
 
 // Semaphores
@@ -197,12 +197,18 @@ cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards:
 //cmd_wait_before: proc() : _cmd_wait_before
 
 cmd_set_shaders: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader) : _cmd_set_shaders
-cmd_set_compute_shader: proc(cmd_buf: Command_Buffer, compute_shader: Shader, compute_data: rawptr = nil) : _cmd_set_compute_shader
+cmd_set_compute_shader: proc(cmd_buf: Command_Buffer, compute_shader: Shader) : _cmd_set_compute_shader
 cmd_set_depth_state: proc(cmd_buf: Command_Buffer, state: Depth_State) : _cmd_set_depth_state
 cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State) : _cmd_set_blend_state
 
-cmd_dispatch: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1) : _cmd_dispatch
-//cmd_dispatch_indirect: proc() : _cmd_dispatch_indirect
+// Run compute shader based on number of groups
+cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1) : _cmd_dispatch
+
+// Run compute shader based on number of threads, threads are converted to groups automatically
+cmd_dispatch_threads: proc(cmd_buf: Command_Buffer, compute_data: rawptr, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1) : _cmd_dispatch_threads
+
+// Schedule indirect compute shader based on number of groups, arguments is a pointer to a Dispatch_Indirect_Command struct
+cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr) : _cmd_dispatch_indirect
 
 cmd_begin_render_pass: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc) : _cmd_begin_render_pass
 cmd_end_render_pass: proc(cmd_buf: Command_Buffer) : _cmd_end_render_pass

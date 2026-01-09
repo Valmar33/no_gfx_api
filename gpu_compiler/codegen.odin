@@ -120,7 +120,6 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
     writeln("")
 
-    // Push constants contain pointers: vert_data, frag_data, compute_data, vert_indirect_data, frag_indirect_data, compute_indirect_data
     indirect_data_type_glsl := "_res_ptr_void"
     if ast.used_indirect_data_type != nil {
         indirect_data_type_glsl = strings.concatenate({"_res_indirect_array_", type_to_glsl(ast.used_indirect_data_type.base)})
@@ -132,7 +131,6 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     if writer_scope() {
         if shader_type == .Compute {
             writefln("%v _res_compute_data_;", data_type_str)
-            writefln("%v _res_compute_indirect_data_;", indirect_data_type_glsl)
             writefln("uvec3 _res_max_thread_id_;")
         } else {
             writefln("%v _res_vert_data_;", data_type_str)
@@ -525,7 +523,7 @@ attribute_to_glsl :: proc(attribute: Ast_Attribute, ast: Ast, shader_type: Shade
         {
             // Indirect data comes from push constants: pointer to start of array, indexed by gl_DrawID
             if ast.used_indirect_data_type != nil {
-                indirect_data_name := "_res_vert_indirect_data_" if shader_type == .Vertex else "_res_frag_indirect_data_" if shader_type == .Fragment else "_res_compute_indirect_data_"
+                indirect_data_name := "_res_vert_indirect_data_" if shader_type == .Vertex else "_res_frag_indirect_data_"
                 return strings.concatenate({indirect_data_name, "._res_[gl_DrawID]"})
             }
             return "_res_indirect_data_._res_[gl_DrawID]"

@@ -25,7 +25,6 @@ Graphics_Shader_Push_Constants :: struct #packed {
 @(private="file")
 Compute_Shader_Push_Constants :: struct #packed {
     compute_data: rawptr,
-    compute_indirect_data: rawptr,
     max_thread_id: [3]u32,
 }
 
@@ -113,9 +112,8 @@ Context :: struct
     sampler_desc_size: u32,
 
     // Shader metadata
-    shader_workgroup_sizes: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
+    current_workgroup_size: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
     cmd_buf_compute_shader: map[Command_Buffer]Shader,  // Tracks current compute shader per command buffer
-    cmd_buf_compute_data: map[Command_Buffer]rawptr,  // Tracks compute data pointer per command buffer
 }
 
 // Initialization
@@ -1101,12 +1099,11 @@ _get_sampler_descriptor_size :: proc() -> u32
 }
 
 // Shaders
-_shader_create :: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info = {}) -> Shader
+@(private="file")
+_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
 {
-    vk_stage := to_vk_shader_stage(type)
-
     push_constant_ranges: []vk.PushConstantRange
-    if type == .Compute {
+    if is_compute {
         push_constant_ranges = []vk.PushConstantRange {
             {
                 stageFlags = { .COMPUTE },
@@ -1136,26 +1133,8 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info 
     spec_info: vk.SpecializationInfo
     spec_info_ptr: ^vk.SpecializationInfo = nil
     spec_count: u32 = 0
-
-    group_size_x: u32 = info.group_size_x
-    if group_size_x == 0
-    {
-        group_size_x = 1
-    }
     
-    group_size_y: u32 = info.group_size_y
-    if group_size_y == 0
-    {
-        group_size_y = 1
-    }
-    
-    group_size_z: u32 = info.group_size_z
-    if group_size_z == 0
-    {
-        group_size_z = 1
-    }
-    
-    if type == .Compute
+    if is_compute
     {
         {
             spec_map_entries[spec_count] = vk.SpecializationMapEntry {
@@ -1199,6 +1178,15 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info 
         spec_info_ptr = &spec_info
     }
 
+    next_stage: vk.ShaderStageFlags
+    if is_compute {
+        next_stage = {}
+    } else if vk_stage == { .VERTEX } {
+        next_stage = { .FRAGMENT }
+    } else {
+        next_stage = {}
+    }
+    
     shader_cis := vk.ShaderCreateInfoEXT {
         sType = .SHADER_CREATE_INFO_EXT,
         codeType = .SPIRV,
@@ -1206,7 +1194,7 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info 
         pCode = raw_data(code),
         pName = "main",
         stage = vk_stage,
-        nextStage = vk.ShaderStageFlags { .FRAGMENT } if type == .Vertex else {} if type == .Fragment else {},
+        nextStage = next_stage,
         pushConstantRangeCount = u32(len(push_constant_ranges)),
         pPushConstantRanges = raw_data(push_constant_ranges),
         setLayoutCount = u32(len(desc_layouts)),
@@ -1219,12 +1207,23 @@ _shader_create :: proc(code: []u32, type: Shader_Type, info: Shader_Create_Info 
     shader_handle := transmute(Shader) shader
     
     // Store work group size for compute shaders
-    if type == .Compute
+    if is_compute
     {
-        ctx.shader_workgroup_sizes[shader_handle] = { group_size_x, group_size_y, group_size_z }
+        ctx.current_workgroup_size[shader_handle] = { group_size_x, group_size_y, group_size_z }
     }
     
     return shader_handle
+}
+
+_shader_create :: proc(code: []u32, type: Shader_Type_Graphics) -> Shader
+{
+    vk_stage := to_vk_shader_stage(type)
+    return _shader_create_internal(code, false, vk_stage)
+}
+
+_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+{
+    return _shader_create_internal(code, true, { .COMPUTE }, group_size_x, group_size_y, group_size_z)
 }
 
 _shader_destroy :: proc(shader: ^Shader)
@@ -1233,7 +1232,7 @@ _shader_destroy :: proc(shader: ^Shader)
     vk.DestroyShaderEXT(ctx.device, vk_shader, nil)
     
     // Remove from workgroup size map
-    delete_key(&ctx.shader_workgroup_sizes, shader^)
+    delete_key(&ctx.current_workgroup_size, shader^)
     
     // Remove from any command buffer tracking
     for cmd_buf, compute_shader in ctx.cmd_buf_compute_shader
@@ -1241,7 +1240,6 @@ _shader_destroy :: proc(shader: ^Shader)
         if compute_shader == shader^
         {
             delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
-            delete_key(&ctx.cmd_buf_compute_data, cmd_buf)
         }
     }
     
@@ -1360,7 +1358,6 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         
         // Clear compute shader tracking for this command buffer
         delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
-        delete_key(&ctx.cmd_buf_compute_data, cmd_buf)
     }
 }
 
@@ -1571,7 +1568,7 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
     vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, 1, &color_write_mask)
 }
 
-_cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader, compute_data: rawptr = nil)
+_cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
     vk_compute_shader := transmute(vk.ShaderEXT) compute_shader
@@ -1582,10 +1579,9 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader,
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
     
     ctx.cmd_buf_compute_shader[cmd_buf] = compute_shader
-    ctx.cmd_buf_compute_data[cmd_buf] = compute_data
 }
 
-_cmd_dispatch :: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1)
+_cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
     
@@ -1596,9 +1592,37 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 
         return
     }
     
-    compute_data := ctx.cmd_buf_compute_data[cmd_buf]
+    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
+    if !has_size
+    {
+        log.error("Work group size not found for compute shader.")
+        return
+    }
     
-    workgroup_size, has_size := ctx.shader_workgroup_sizes[compute_shader]
+    max_thread_id := [3]u32 { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
+    
+    push_constants := Compute_Shader_Push_Constants {
+        compute_data = compute_data,
+        max_thread_id = max_thread_id,
+    }
+    
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
+    
+    vk.CmdDispatch(vk_cmd_buf, num_groups_x, num_groups_y, num_groups_z)
+}
+
+_cmd_dispatch_threads :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    
+    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
+    if !has_shader
+    {
+        log.error("cmd_dispatch_threads called without a compute shader set. Call cmd_set_compute_shader first.")
+        return
+    }
+    
+    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
     if !has_size
     {
         log.error("Work group size not found for compute shader.")
@@ -1611,7 +1635,6 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 
     
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data,
-        compute_indirect_data = nil,
         max_thread_id = { threads_x, threads_y, threads_z },
     }
     
@@ -1620,7 +1643,42 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, threads_x: u32, threads_y: u32 = 
     vk.CmdDispatch(vk_cmd_buf, group_count_x, group_count_y, group_count_z)
 }
 
-// _cmd_dispatch_indirect :: proc() {}
+_cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    
+    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
+    if !has_shader
+    {
+        log.error("cmd_dispatch_indirect called without a compute shader set. Call cmd_set_compute_shader first.")
+        return
+    }
+    
+    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
+    if !ok_a
+    {
+        log.error("Arguments alloc not found for indirect dispatch")
+        return
+    }
+    
+    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
+    if !has_size
+    {
+        log.error("Work group size not found for compute shader.")
+        return
+    }
+    
+    max_thread_id := [3]u32 { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
+    
+    push_constants := Compute_Shader_Push_Constants {
+        compute_data = compute_data,
+        max_thread_id = max_thread_id,
+    }
+    
+    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
+    
+    vk.CmdDispatchIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset))
+}
 
 _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
 {
@@ -2186,13 +2244,12 @@ vk_get_cmd_buf_timeline :: proc(queue: vk.Queue, cmd_buf: vk.CommandBuffer) -> ^
 // Enum conversion
 
 @(private="file")
-to_vk_shader_stage :: #force_inline proc(type: Shader_Type) -> vk.ShaderStageFlags
+to_vk_shader_stage :: #force_inline proc(type: Shader_Type_Graphics) -> vk.ShaderStageFlags
 {
     switch type
     {
         case .Vertex: return { .VERTEX }
         case .Fragment: return { .FRAGMENT }
-        case .Compute: return { .COMPUTE }
     }
     return {}
 }

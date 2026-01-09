@@ -200,7 +200,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 {
     expression.type = &POISON_TYPE
 
-    switch expr in expression.derived_expr
+    expr_switch: switch expr in expression.derived_expr
     {
         case ^Ast_Binary_Expr:
         {
@@ -351,7 +351,6 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                 }
                 
                 // Try to resolve intrinsic overloads
-                found_overload := false
                 for intr in INTRINSICS
                 {
                     if intr.name == target.token.text && intr.type.kind == .Proc
@@ -367,17 +366,16 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                                     break
                                 }
                             }
+                            
                             if match
                             {
                                 expr.target.type = intr.type
                                 expr.type = intr.type.ret
-                                found_overload = true
-                                break
+                                break expr_switch
                             }
                         }
                     }
                 }
-                if found_overload do break
             }
 
             // Regular procedure calls

@@ -14,6 +14,9 @@ Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "Compute Shader"
 
+// Whether to use indirect dispatch (group counts) or direct dispatch (thread counts)
+Use_Indirect :: true
+
 main :: proc()
 {
     ok_i := sdl.Init({ .VIDEO })
@@ -38,11 +41,7 @@ main :: proc()
 
     group_size_x := u32(8)
     group_size_y := u32(8)
-    compute_shader := gpu.shader_create(#load("shaders/test.comp.spv", []u32), .Compute, gpu.Shader_Create_Info {
-        group_size_x = group_size_x,
-        group_size_y = group_size_y,
-        group_size_z = 1,
-    })
+    compute_shader := gpu.shader_create_compute(#load("shaders/test.comp.spv", []u32), group_size_x, group_size_y, 1)
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     defer {
@@ -88,6 +87,13 @@ main :: proc()
     sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10)
     defer gpu.mem_free(sampler_heap)
     gpu.set_sampler_desc(sampler_heap, sampler_id, gpu.sampler_descriptor({}))
+
+    // Indirect dispatch command (group counts)
+    indirect_dispatch_command_ptr: rawptr
+    indirect_dispatch_command_cpu_mem: []gpu.Dispatch_Indirect_Command
+    indirect_dispatch_command_cpu_mem = gpu.mem_alloc_typed(gpu.Dispatch_Indirect_Command, 1)
+    indirect_dispatch_command_ptr = gpu.host_to_device_ptr(raw_data(indirect_dispatch_command_cpu_mem))
+    defer gpu.mem_free_typed(indirect_dispatch_command_cpu_mem)
 
     Compute_Data :: struct {
         output_texture_id: u32,
@@ -176,10 +182,22 @@ main :: proc()
         
         // Dispatch compute shader to write to texture
         gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
-        gpu.cmd_set_compute_shader(cmd_buf, compute_shader, compute_data.gpu)
+        gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
         
-        // Work groups will be calculated automatically based on shader work group size
-        gpu.cmd_dispatch(cmd_buf, Window_Size_X, Window_Size_Y, 1)
+        if Use_Indirect {
+            // Calculate group counts from thread counts
+            // Indirect compute shaders do not support dispatching by number of threads
+            indirect_dispatch_command_cpu_mem[0] = gpu.Dispatch_Indirect_Command {
+                num_groups_x = (Window_Size_X + group_size_x - 1) / group_size_x,
+                num_groups_y = (Window_Size_Y + group_size_y - 1) / group_size_y,
+                num_groups_z = u32(1),
+            }
+
+            gpu.cmd_dispatch_indirect(cmd_buf, compute_data.gpu, indirect_dispatch_command_ptr)
+        } else {
+            // Use cmd_dispatch_threads to specify thread counts (converts to groups automatically)
+            gpu.cmd_dispatch_threads(cmd_buf, compute_data.gpu, Window_Size_X, Window_Size_Y, 1)
+        }
         
         // Barrier to ensure compute shader finishes before rendering
         gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
