@@ -131,7 +131,6 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     if writer_scope() {
         if shader_type == .Compute {
             writefln("%v _res_compute_data_;", data_type_str)
-            writefln("uvec3 _res_max_thread_id_;")
         } else {
             writefln("%v _res_vert_data_;", data_type_str)
             writefln("%v _res_frag_data_;", data_type_str)
@@ -198,15 +197,6 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
                     writefln("%v %v = %v;", type_to_glsl(var_decl.type), var_decl.name, attr_glsl)
                 }
-            }
-
-            if is_main && shader_type == .Compute
-            {
-                writeln("if (gl_GlobalInvocationID.x >= _res_max_thread_id_.x ||")
-                writeln("    gl_GlobalInvocationID.y >= _res_max_thread_id_.y ||")
-                writeln("    gl_GlobalInvocationID.z >= _res_max_thread_id_.z) {")
-                writeln("    return;")
-                writeln("}")
             }
 
             for statement in proc_def.statements

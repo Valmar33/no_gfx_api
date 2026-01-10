@@ -204,9 +204,6 @@ cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State) : _cmd_se
 // Run compute shader based on number of groups
 cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1) : _cmd_dispatch
 
-// Run compute shader based on number of threads, threads are converted to groups automatically
-cmd_dispatch_threads: proc(cmd_buf: Command_Buffer, compute_data: rawptr, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1) : _cmd_dispatch_threads
-
 // Schedule indirect compute shader based on number of groups, arguments is a pointer to a Dispatch_Indirect_Command struct
 cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr) : _cmd_dispatch_indirect
 

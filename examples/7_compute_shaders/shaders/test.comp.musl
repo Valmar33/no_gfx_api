@@ -95,6 +95,13 @@ raymarch :: (data: ^Data, global_invocation_id: vec3) -> vec4
 
 main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 {
-    color: vec4 = raymarch(data, global_invocation_id);
-    imageStore(data.output_texture_id, global_invocation_id.xy, color);
+    // Out of bounds check: only execute if thread is within resolution
+    if global_invocation_id.x < data.resolution.x
+    {
+        if global_invocation_id.y < data.resolution.y
+        {
+            color: vec4 = raymarch(data, global_invocation_id);
+            imageStore(data.output_texture_id, global_invocation_id.xy, color);
+        }
+    }
 }

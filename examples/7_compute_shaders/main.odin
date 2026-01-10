@@ -184,19 +184,20 @@ main :: proc()
         gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
         
+        num_groups_x := (Window_Size_X + group_size_x - 1) / group_size_x
+        num_groups_y := (Window_Size_Y + group_size_y - 1) / group_size_y
+        num_groups_z := u32(1)
+
         if Use_Indirect {
-            // Calculate group counts from thread counts
-            // Indirect compute shaders do not support dispatching by number of threads
             indirect_dispatch_command_cpu_mem[0] = gpu.Dispatch_Indirect_Command {
-                num_groups_x = (Window_Size_X + group_size_x - 1) / group_size_x,
-                num_groups_y = (Window_Size_Y + group_size_y - 1) / group_size_y,
-                num_groups_z = u32(1),
+                num_groups_x,
+                num_groups_y,
+                num_groups_z,
             }
 
             gpu.cmd_dispatch_indirect(cmd_buf, compute_data.gpu, indirect_dispatch_command_ptr)
         } else {
-            // Use cmd_dispatch_threads to specify thread counts (converts to groups automatically)
-            gpu.cmd_dispatch_threads(cmd_buf, compute_data.gpu, Window_Size_X, Window_Size_Y, 1)
+            gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
         }
         
         // Barrier to ensure compute shader finishes before rendering

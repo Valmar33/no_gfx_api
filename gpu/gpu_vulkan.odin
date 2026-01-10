@@ -25,7 +25,6 @@ Graphics_Shader_Push_Constants :: struct #packed {
 @(private="file")
 Compute_Shader_Push_Constants :: struct #packed {
     compute_data: rawptr,
-    max_thread_id: [3]u32,
 }
 
 @(private="file")
@@ -1592,55 +1591,13 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
         return
     }
     
-    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
-    if !has_size
-    {
-        log.error("Work group size not found for compute shader.")
-        return
-    }
-    
-    max_thread_id := [3]u32 { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
-    
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data,
-        max_thread_id = max_thread_id,
     }
     
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
     
     vk.CmdDispatch(vk_cmd_buf, num_groups_x, num_groups_y, num_groups_z)
-}
-
-_cmd_dispatch_threads :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, threads_x: u32, threads_y: u32 = 1, threads_z: u32 = 1)
-{
-    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
-    
-    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
-    if !has_shader
-    {
-        log.error("cmd_dispatch_threads called without a compute shader set. Call cmd_set_compute_shader first.")
-        return
-    }
-    
-    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
-    if !has_size
-    {
-        log.error("Work group size not found for compute shader.")
-        return
-    }
-    
-    group_count_x := (threads_x + workgroup_size.x - 1) / workgroup_size.x
-    group_count_y := (threads_y + workgroup_size.y - 1) / workgroup_size.y
-    group_count_z := (threads_z + workgroup_size.z - 1) / workgroup_size.z
-    
-    push_constants := Compute_Shader_Push_Constants {
-        compute_data = compute_data,
-        max_thread_id = { threads_x, threads_y, threads_z },
-    }
-    
-    vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
-    
-    vk.CmdDispatch(vk_cmd_buf, group_count_x, group_count_y, group_count_z)
 }
 
 _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr)
@@ -1661,18 +1618,8 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
         return
     }
     
-    workgroup_size, has_size := ctx.current_workgroup_size[compute_shader]
-    if !has_size
-    {
-        log.error("Work group size not found for compute shader.")
-        return
-    }
-    
-    max_thread_id := [3]u32 { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
-    
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data,
-        max_thread_id = max_thread_id,
     }
     
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
