@@ -82,6 +82,10 @@ Ast_Attribute_Type :: enum
     Instance_ID,
     Draw_ID,
     Indirect_Data,
+    Workgroup_ID,
+    Local_Invocation_ID,
+    Global_Invocation_ID,
+    Group_Size,
 
     // With args:
     Out_Loc,
@@ -875,6 +879,10 @@ parse_attribute :: proc(using p: ^Parser) -> Maybe(Ast_Attribute)
         case "instance_id": attr.type = .Instance_ID
         case "draw_id": attr.type = .Draw_ID
         case "indirect_data": attr.type = .Indirect_Data
+        case "workgroup_id": attr.type = .Workgroup_ID
+        case "local_invocation_id": attr.type = .Local_Invocation_ID
+        case "group_size": attr.type = .Group_Size
+        case "global_invocation_id": attr.type = .Global_Invocation_ID
         case "in_loc":
         {
             // ??? Why is the compiler making me do this?

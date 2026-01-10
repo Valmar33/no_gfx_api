@@ -30,7 +30,9 @@ typecheck_ast :: proc(ast: Ast, input_path: string, allocator: runtime.Allocator
                     resolve_type(&c, arg.type)
                 }
 
-                resolve_type(&c, decl.type.ret)
+                if decl.type.ret != nil {
+                    resolve_type(&c, decl.type.ret)
+                }
             }
             case .Struct:
             {
@@ -198,7 +200,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
 {
     expression.type = &POISON_TYPE
 
-    switch expr in expression.derived_expr
+    expr_switch: switch expr in expression.derived_expr
     {
         case ^Ast_Binary_Expr:
         {
@@ -241,7 +243,17 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                 expr.type = &VEC2_TYPE
                 break
             }
+            else if expr.member_name == "x"
+            {
+                expr.type = &FLOAT_TYPE
+                break
+            }
             else if expr.member_name == "y"
+            {
+                expr.type = &FLOAT_TYPE
+                break
+            }
+            else if expr.member_name == "z"
             {
                 expr.type = &FLOAT_TYPE
                 break
@@ -336,6 +348,33 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                     if num_floats != 4 do typecheck_error(c, expr.token, "Incorrect constructor arguments.")
                     expr.type = &VEC4_TYPE
                     break
+                }
+                
+                // Try to resolve intrinsic overloads
+                for intr in INTRINSICS
+                {
+                    if intr.name == target.token.text && intr.type.kind == .Proc
+                    {
+                        if len(intr.type.args) == len(expr.args)
+                        {
+                            match := true
+                            for arg, i in expr.args
+                            {
+                                if !same_type(arg.type, intr.type.args[i].type)
+                                {
+                                    match = false
+                                    break
+                                }
+                            }
+                            
+                            if match
+                            {
+                                expr.target.type = intr.type
+                                expr.type = intr.type.ret
+                                break expr_switch
+                            }
+                        }
+                    }
                 }
             }
 
@@ -474,8 +513,41 @@ INTRINSICS: [dynamic]^Ast_Decl
 add_intrinsics :: proc()
 {
     add_intrinsic("sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
+    add_intrinsic("imageStore", { &TEXTUREID_TYPE, &VEC2_TYPE, &VEC4_TYPE }, { "tex_idx", "coord", "value" }, nil)
     add_intrinsic("mix", { &VEC4_TYPE, &VEC4_TYPE, &FLOAT_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
     add_intrinsic("normalize", { &VEC3_TYPE }, { "v" }, &VEC3_TYPE)
+    
+    // Math functions - these work on float, vec2, vec3, vec4 (component-wise)
+    add_intrinsic("sin", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("sin", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("sin", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("sin", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
+    add_intrinsic("cos", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("cos", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("cos", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("cos", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
+    add_intrinsic("tanh", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("tanh", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("tanh", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("tanh", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
+    add_intrinsic("fract", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("fract", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("fract", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("fract", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
+    add_intrinsic("abs", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("abs", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("abs", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("abs", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
+    add_intrinsic("dot", { &VEC2_TYPE, &VEC2_TYPE }, { "a", "b" }, &FLOAT_TYPE)
+    add_intrinsic("dot", { &VEC3_TYPE, &VEC3_TYPE }, { "a", "b" }, &FLOAT_TYPE)
+    add_intrinsic("dot", { &VEC4_TYPE, &VEC4_TYPE }, { "a", "b" }, &FLOAT_TYPE)
+    add_intrinsic("length", { &VEC2_TYPE }, { "v" }, &FLOAT_TYPE)
+    add_intrinsic("length", { &VEC3_TYPE }, { "v" }, &FLOAT_TYPE)
+    add_intrinsic("length", { &VEC4_TYPE }, { "v" }, &FLOAT_TYPE)
+    add_intrinsic("min", { &FLOAT_TYPE, &FLOAT_TYPE }, { "a", "b" }, &FLOAT_TYPE)
+    add_intrinsic("min", { &VEC2_TYPE, &VEC2_TYPE }, { "a", "b" }, &VEC2_TYPE)
+    add_intrinsic("min", { &VEC3_TYPE, &VEC3_TYPE }, { "a", "b" }, &VEC3_TYPE)
+    add_intrinsic("min", { &VEC4_TYPE, &VEC4_TYPE }, { "a", "b" }, &VEC4_TYPE)
 }
 
 add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil)
