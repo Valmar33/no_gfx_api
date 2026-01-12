@@ -23,6 +23,7 @@ Sampler_Descriptor :: struct { bytes: [2]u64 }
 // Enums
 Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
+Queue_Type :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
 Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float }
 Usage :: enum { Sampled = 0, Storage, Color_Attachment, Depth_Stencil_Attachment }
@@ -145,6 +146,7 @@ init: proc(window: ^sdl.Window, frames_in_flight: u32) : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
+// TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 
 // Memory
@@ -174,7 +176,7 @@ semaphore_wait: proc(sem: Semaphore, wait_value: u64) : _semaphore_wait
 semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
 
 // Command buffer
-get_queue: proc() -> Queue : _get_queue
+get_queue: proc(queue_type: Queue_Type, idx: u32) -> Queue : _get_queue
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 

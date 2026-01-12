@@ -77,7 +77,7 @@ main :: proc()
 
     gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
 
-    queue := gpu.get_queue()
+    queue := gpu.get_queue(.Main, 0)
     upload_cmd_buf := gpu.commands_begin(queue)
     gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
@@ -209,11 +209,13 @@ init_imgui :: proc(window: ^sdl.Window) -> ^imgui.Context
 
     imgui_impl_sdl3.init_for_vulkan(window)
 
+    queue := gpu.get_queue(.Main, 0)
+
     vk_instance := gpu.get_vulkan_instance()
     vk_physical_device := gpu.get_vulkan_physical_device()
     vk_device := gpu.get_vulkan_device()
-    vk_queue := gpu.get_vulkan_queue()
-    vk_queue_family := gpu.get_vulkan_queue_family()
+    vk_queue := gpu.get_vulkan_queue(queue)
+    vk_queue_family := gpu.get_vulkan_queue_family(queue)
     swapchain_image_count := gpu.get_swapchain_image_count()
 
     imgui_vk_init_info: imgui_impl_vulkan.Init_Info = {}

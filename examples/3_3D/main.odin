@@ -65,7 +65,7 @@ main :: proc()
     upload_arena := gpu.arena_init(1024 * 1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
 
-    queue := gpu.get_queue()
+    queue := gpu.get_queue(.Main, 0)
 
     upload_cmd_buf := gpu.commands_begin(queue)
     scene := load_scene_gltf(Sponza_Scene, &upload_arena, upload_cmd_buf)
