@@ -710,7 +710,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
 
 // Memory
 
-_mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr
+_mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr
 {
     vma_usage: vma.Memory_Usage
     properties: vk.MemoryPropertyFlags
@@ -734,11 +734,21 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> ra
     }
 
     buf_usage: vk.BufferUsageFlags
-    if mem_type == .GPU {
-        buf_usage = { .SHADER_DEVICE_ADDRESS, .INDEX_BUFFER, .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .RESOURCE_DESCRIPTOR_BUFFER_EXT }
-    } else {
-        buf_usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .INDIRECT_BUFFER }
+    switch alloc_type
+    {
+        case .Default:
+        {
+            buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER }
+            if mem_type == .GPU {
+                buf_usage += { .INDEX_BUFFER }
+            }
+        }
+        case .Descriptors:
+        {
+            buf_usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST }
+        }
     }
+
     buf_ci := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
         size = cast(vk.DeviceSize) bytes,
@@ -1132,7 +1142,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     spec_info: vk.SpecializationInfo
     spec_info_ptr: ^vk.SpecializationInfo = nil
     spec_count: u32 = 0
-    
+
     if is_compute
     {
         {
@@ -1144,7 +1154,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
             spec_data[spec_count] = group_size_x
             spec_count += 1
         }
-        
+
         {
             spec_map_entries[spec_count] = vk.SpecializationMapEntry {
                 constantID = 13371, // Random big ids to avoid conflicts with user defined constants
@@ -1154,7 +1164,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
             spec_data[spec_count] = group_size_y
             spec_count += 1
         }
-        
+
         {
             spec_map_entries[spec_count] = vk.SpecializationMapEntry {
                 constantID = 13372, // Random big ids to avoid conflicts with user defined constants
@@ -1185,7 +1195,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     } else {
         next_stage = {}
     }
-    
+
     shader_cis := vk.ShaderCreateInfoEXT {
         sType = .SHADER_CREATE_INFO_EXT,
         codeType = .SPIRV,
@@ -1204,13 +1214,13 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     shader: vk.ShaderEXT
     vk_check(vk.CreateShadersEXT(ctx.device, 1, &shader_cis, nil, &shader))
     shader_handle := transmute(Shader) shader
-    
+
     // Store work group size for compute shaders
     if is_compute
     {
         ctx.current_workgroup_size[shader_handle] = { group_size_x, group_size_y, group_size_z }
     }
-    
+
     return shader_handle
 }
 
@@ -1229,10 +1239,10 @@ _shader_destroy :: proc(shader: ^Shader)
 {
     vk_shader := transmute(vk.ShaderEXT) (shader^)
     vk.DestroyShaderEXT(ctx.device, vk_shader, nil)
-    
+
     // Remove from workgroup size map
     delete_key(&ctx.current_workgroup_size, shader^)
-    
+
     // Remove from any command buffer tracking
     for cmd_buf, compute_shader in ctx.cmd_buf_compute_shader
     {
@@ -1241,7 +1251,7 @@ _shader_destroy :: proc(shader: ^Shader)
             delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
         }
     }
-    
+
     shader^ = {}
 }
 
@@ -1354,7 +1364,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
 
         vk_submit_cmd_buf(vk_queue, vk_cmd_buf, vk_signal_sem, signal_value)
-        
+
         // Clear compute shader tracking for this command buffer
         delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
     }
@@ -1490,14 +1500,14 @@ _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazar
         // Destination: indirect command read (for draw/dispatch indirect)
         dst_access += { .INDIRECT_COMMAND_READ }
     }
-    
+
     if .Descriptors in hazards
     {
         // When descriptors are updated, ensure visibility
         src_access += { .SHADER_WRITE }
         dst_access += { .SHADER_READ }
     }
-    
+
     if .Depth_Stencil in hazards
     {
         // Depth/stencil attachment synchronization
@@ -1576,54 +1586,54 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     to_bind := []vk.ShaderEXT { vk_compute_shader }
     assert(len(shader_stages) == len(to_bind))
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
-    
+
     ctx.cmd_buf_compute_shader[cmd_buf] = compute_shader
 }
 
 _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
-    
+
     compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
     if !has_shader
     {
         log.error("cmd_dispatch called without a compute shader set. Call cmd_set_compute_shader first.")
         return
     }
-    
+
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data,
     }
-    
+
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
-    
+
     vk.CmdDispatch(vk_cmd_buf, num_groups_x, num_groups_y, num_groups_z)
 }
 
 _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
-    
+
     compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
     if !has_shader
     {
         log.error("cmd_dispatch_indirect called without a compute shader set. Call cmd_set_compute_shader first.")
         return
     }
-    
+
     arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found for indirect dispatch")
         return
     }
-    
+
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data,
     }
-    
+
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
-    
+
     vk.CmdDispatchIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset))
 }
 

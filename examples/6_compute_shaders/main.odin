@@ -67,24 +67,24 @@ main :: proc()
 
     texture_id := u32(0)
     sampler_id := u32(0)
-    
+
     // Allocate texture heap for compute shader
     texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
-    texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size))
+    texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size), alloc_type = .Descriptors)
     defer gpu.mem_free(texture_rw_heap)
     gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
     texture_rw_heap_gpu := gpu.host_to_device_ptr(texture_rw_heap)
 
     // Create texture descriptor for sampled access (fragment shader)
     texture_desc := gpu.texture_view_descriptor(output_texture, { format = .RGBA8_Unorm })
-    
+
     // Allocate texture heap for fragment shader
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536)
+    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
     defer gpu.mem_free(texture_heap)
     gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
 
     // Create sampler
-    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10)
+    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
     defer gpu.mem_free(sampler_heap)
     gpu.set_sampler_desc(sampler_heap, sampler_id, gpu.sampler_descriptor({}))
 
@@ -179,11 +179,11 @@ main :: proc()
         compute_data.cpu.time = total_time
 
         cmd_buf := gpu.commands_begin(queue)
-        
+
         // Dispatch compute shader to write to texture
         gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
-        
+
         num_groups_x := (Window_Size_X + group_size_x - 1) / group_size_x
         num_groups_y := (Window_Size_Y + group_size_y - 1) / group_size_y
         num_groups_z := u32(1)
@@ -199,10 +199,10 @@ main :: proc()
         } else {
             gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
         }
-        
+
         // Barrier to ensure compute shader finishes before rendering
         gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
-        
+
         // Render the texture to the swapchain using a fullscreen quad
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
@@ -213,13 +213,13 @@ main :: proc()
         textures := gpu.host_to_device_ptr(texture_heap)
         samplers := gpu.host_to_device_ptr(sampler_heap)
         gpu.cmd_set_texture_heap(cmd_buf, textures, nil, samplers)
-        
+
         Vert_Data :: struct {
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
         verts_data.cpu.verts = verts_local
-        
+
         Frag_Data :: struct {
             texture_id: u32,
             sampler_id: u32,
@@ -227,7 +227,7 @@ main :: proc()
         frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
         frag_data.cpu.texture_id = texture_id
         frag_data.cpu.sampler_id = sampler_id
-        
+
         gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, indices_local, u32(len(indices.cpu)), 1)
         gpu.cmd_end_render_pass(cmd_buf)
         gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)

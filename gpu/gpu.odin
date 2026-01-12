@@ -21,6 +21,7 @@ Texture_Descriptor :: struct { bytes: [4]u64 }
 Sampler_Descriptor :: struct { bytes: [2]u64 }
 
 // Enums
+Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Texture_Type :: enum { D2 = 0, D3, D1 }
 Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float }
@@ -147,7 +148,7 @@ swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks C
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 
 // Memory
-mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default) -> rawptr : _mem_alloc
+mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr : _mem_alloc
 mem_free: proc(ptr: rawptr, loc := #caller_location) : _mem_free
 host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr  // Only supports base allocation pointers, like mem_free!
 
