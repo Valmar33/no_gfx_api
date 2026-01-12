@@ -11,8 +11,8 @@ import "../../gpu"
 
 import sdl "vendor:sdl3"
 
-Window_Size_X :: 1000
-Window_Size_Y :: 1000
+Start_Window_Size_X :: 1000
+Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "Textures"
 
@@ -34,12 +34,18 @@ main :: proc()
     window_flags :: sdl.WindowFlags {
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
+        .RESIZABLE,
     }
-    window := sdl.CreateWindow(Example_Name, Window_Size_X, Window_Size_Y, window_flags)
+    window := sdl.CreateWindow(Example_Name, Start_Window_Size_X, Start_Window_Size_Y, window_flags)
     ensure(window != nil)
 
-    gpu.init(window, Frames_In_Flight)
+    window_size_x := i32(Start_Window_Size_X)
+    window_size_y := i32(Start_Window_Size_Y)
+
+    gpu.init()
     defer gpu.cleanup()
+
+    gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
@@ -48,7 +54,7 @@ main :: proc()
         gpu.shader_destroy(&frag_shader)
     }
 
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
+    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536 /*, alloc_type = .Descriptors*/)
     defer gpu.mem_free(texture_heap)
     sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
     defer gpu.mem_free(sampler_heap)
@@ -118,7 +124,11 @@ main :: proc()
     {
         proceed := handle_window_events(window)
         if !proceed do break
-        if .MINIMIZED in sdl.GetWindowFlags(window)
+
+        old_window_size_x := window_size_x
+        old_window_size_y := window_size_y
+        sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+        if .MINIMIZED in sdl.GetWindowFlags(window) || window_size_x <= 0 || window_size_y <= 0
         {
             sdl.Delay(16)
             continue
@@ -126,6 +136,9 @@ main :: proc()
 
         if next_frame > Frames_In_Flight {
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
+        }
+        if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
+            gpu.swapchain_resize()
         }
 
         last_ts := now_ts

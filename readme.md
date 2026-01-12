@@ -8,8 +8,9 @@ The API is straightforward to use:
 
 ```odin
 // --- Initialization
-gpu.init(window)  // (Only takes in an SDL window for now)
+gpu.init()
 defer gpu.cleanup()
+gpu.swapchain_init(surface, Frames_In_Flight)
 
 // --- Create shaders
 vert_shader := gpu.shader_create(/* ... */, .Vertex)

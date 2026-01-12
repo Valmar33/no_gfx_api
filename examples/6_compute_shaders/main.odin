@@ -4,13 +4,14 @@ package main
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
+import "core:fmt"
 
 import "../../gpu"
 
 import sdl "vendor:sdl3"
 
-Window_Size_X :: 1000
-Window_Size_Y :: 1000
+Start_Window_Size_X :: 1000
+Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "Compute Shader"
 
@@ -19,6 +20,8 @@ Use_Indirect :: true
 
 main :: proc()
 {
+    fmt.println("CREDITS: Shader \"Clearly a bug\" by Glow on https://www.shadertoy.com/view/33cGDj")
+
     ok_i := sdl.Init({ .VIDEO })
     assert(ok_i)
 
@@ -32,12 +35,18 @@ main :: proc()
     window_flags :: sdl.WindowFlags {
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
+        .RESIZABLE,
     }
-    window := sdl.CreateWindow(Example_Name, Window_Size_X, Window_Size_Y, window_flags)
+    window := sdl.CreateWindow(Example_Name, Start_Window_Size_X, Start_Window_Size_Y, window_flags)
     ensure(window != nil)
 
-    gpu.init(window, Frames_In_Flight)
+    window_size_x := i32(Start_Window_Size_X)
+    window_size_y := i32(Start_Window_Size_Y)
+
+    gpu.init()
     defer gpu.cleanup()
+
+    gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
     group_size_x := u32(8)
     group_size_y := u32(8)
@@ -51,15 +60,16 @@ main :: proc()
     }
 
     // Create a texture for the compute shader to write to
-    output_texture := gpu.alloc_and_create_texture({
+    output_desc := gpu.Texture_Desc {
         type = .D2,
-        dimensions = { Window_Size_X, Window_Size_Y, 1 },
+        dimensions = { u32(window_size_x), u32(window_size_y), 1 },
         mip_count = 1,
         layer_count = 1,
         sample_count = 1,
         format = .RGBA8_Unorm,
         usage = { .Storage, .Sampled },
-    })
+    }
+    output_texture := gpu.alloc_and_create_texture(output_desc)
     defer gpu.free_and_destroy_texture(&output_texture)
 
     // Create texture descriptor for RW access (compute shader)
@@ -153,7 +163,11 @@ main :: proc()
     {
         proceed := handle_window_events(window)
         if !proceed do break
-        if .MINIMIZED in sdl.GetWindowFlags(window)
+
+        old_window_size_x := window_size_x
+        old_window_size_y := window_size_y
+        sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+        if .MINIMIZED in sdl.GetWindowFlags(window) || window_size_x <= 0 || window_size_y <= 0
         {
             sdl.Delay(16)
             continue
@@ -161,6 +175,22 @@ main :: proc()
 
         if next_frame > Frames_In_Flight {
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
+        }
+        if old_window_size_x != window_size_x || old_window_size_y != window_size_y
+        {
+            gpu.queue_wait_idle(queue)
+            gpu.swapchain_resize()
+
+            output_desc.dimensions.x = u32(window_size_x)
+            output_desc.dimensions.y = u32(window_size_y)
+            gpu.free_and_destroy_texture(&output_texture)
+            output_texture = gpu.alloc_and_create_texture(output_desc)
+
+            // Update descriptor for new texture
+            texture_desc = gpu.texture_view_descriptor(output_texture, {})
+            texture_rw_desc := gpu.texture_rw_view_descriptor(output_texture, {})
+            gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
+            gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
         }
 
         last_ts := now_ts
@@ -175,7 +205,7 @@ main :: proc()
         // Allocate compute data for this frame with current time and resolution
         compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
         compute_data.cpu.output_texture_id = texture_id
-        compute_data.cpu.resolution = { f32(Window_Size_X), f32(Window_Size_Y) }
+        compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
         compute_data.cpu.time = total_time
 
         cmd_buf := gpu.commands_begin(queue)
@@ -184,8 +214,8 @@ main :: proc()
         gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
 
-        num_groups_x := (Window_Size_X + group_size_x - 1) / group_size_x
-        num_groups_y := (Window_Size_Y + group_size_y - 1) / group_size_y
+        num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
+        num_groups_y := (u32(window_size_y) + group_size_y - 1) / group_size_y
         num_groups_z := u32(1)
 
         if Use_Indirect {

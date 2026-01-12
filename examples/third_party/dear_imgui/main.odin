@@ -11,8 +11,8 @@ import imgui "odin-imgui"
 import imgui_impl_sdl3 "odin-imgui/imgui_impl_sdl3"
 import imgui_impl_vulkan "odin-imgui/imgui_impl_vulkan"
 
-Window_Size_X :: 1000
-Window_Size_Y :: 1000
+Start_Window_Size_X :: 1000
+Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "ImGUI"
 
@@ -31,12 +31,18 @@ main :: proc()
     window_flags :: sdl.WindowFlags {
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
+        .RESIZABLE,
     }
-    window := sdl.CreateWindow(Example_Name, Window_Size_X, Window_Size_Y, window_flags)
+    window := sdl.CreateWindow(Example_Name, Start_Window_Size_X, Start_Window_Size_Y, window_flags)
     ensure(window != nil)
 
-    gpu.init(window, Frames_In_Flight)
+    window_size_x := i32(Start_Window_Size_X)
+    window_size_y := i32(Start_Window_Size_Y)
+
+    gpu.init()
     defer gpu.cleanup()
+
+    gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
@@ -103,7 +109,11 @@ main :: proc()
     {
         proceed := handle_window_events(window)
         if !proceed do break
-        if .MINIMIZED in sdl.GetWindowFlags(window)
+
+        old_window_size_x := window_size_x
+        old_window_size_y := window_size_y
+        sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+        if .MINIMIZED in sdl.GetWindowFlags(window) || window_size_x <= 0 || window_size_y <= 0
         {
             sdl.Delay(16)
             continue
@@ -111,6 +121,9 @@ main :: proc()
 
         if next_frame > Frames_In_Flight {
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
+        }
+        if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
+            gpu.swapchain_resize()
         }
 
         last_ts := now_ts
@@ -205,7 +218,7 @@ init_imgui :: proc(window: ^sdl.Window) -> ^imgui.Context
     ctx := imgui.create_context(nil)
     io := imgui.get_io()
     io.config_flags += {.Nav_Enable_Keyboard, .Nav_Enable_Gamepad}
-    io.display_size = {Window_Size_X, Window_Size_Y}
+    io.display_size = {Start_Window_Size_X, Start_Window_Size_Y}
 
     imgui_impl_sdl3.init_for_vulkan(window)
 

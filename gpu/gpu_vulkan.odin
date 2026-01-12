@@ -35,6 +35,7 @@ GPU_Alloc_Meta :: struct #all_or_none
     device_address: vk.DeviceAddress,
     align: u32,
     buf_size: vk.DeviceSize,
+    alloc_type: Allocation_Type,
 }
 
 @(private="file")
@@ -109,6 +110,7 @@ Context :: struct
     // Swapchain
     swapchain: Swapchain,
     swapchain_image_idx: u32,
+    frames_in_flight: u32,
 
     // Descriptor sizes
     texture_desc_size: u32,
@@ -127,7 +129,7 @@ ctx: Context
 @(private="file")
 vk_logger: log.Logger
 
-_init :: proc(window: ^sdl.Window, frames_in_flight: u32)
+_init :: proc()
 {
     init_scratch_arenas()
 
@@ -206,12 +208,6 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
         assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
 
         vk_check(vk.CreateDebugUtilsMessengerEXT(ctx.instance, &debug_messenger_ci, nil, &ctx.debug_messenger))
-    }
-
-    // Create surface
-    {
-        ok_s := sdl.Vulkan_CreateSurface(window, ctx.instance, nil, &ctx.surface)
-        if !ok_s do fatal_error("Could not create vulkan surface.")
     }
 
     // Physical device
@@ -518,10 +514,6 @@ _init :: proc(window: ^sdl.Window, frames_in_flight: u32)
             }
             vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout_compute))
         }
-
-        win_width, win_height: i32
-        assert(sdl.GetWindowSize(window, &win_width, &win_height))
-        ctx.swapchain = create_swapchain(u32(win_width), u32(win_height), frames_in_flight)
     }
 
     // Tree init
@@ -563,7 +555,7 @@ _cleanup :: proc()
         vk.DestroySampler(ctx.device, sampler.sampler, nil)
     }
 
-    destroy_swapchain(ctx.swapchain)
+    destroy_swapchain(&ctx.swapchain)
     for type in Queue_Type {
         for timeline in ctx.cmd_bufs_timelines[type] {
             vk.DestroySemaphore(ctx.device, timeline.sem, nil)
@@ -588,6 +580,31 @@ _wait_idle :: proc()
     vk.DeviceWaitIdle(ctx.device)
 }
 
+_swapchain_init :: proc(surface: vk.SurfaceKHR, frames_in_flight: u32)
+{
+    ctx.frames_in_flight = frames_in_flight
+    ctx.surface = surface
+    recreate_swapchain()
+}
+
+_swapchain_resize :: proc()
+{
+    queue_wait_idle(get_queue(.Main, 0))
+    recreate_swapchain()
+}
+
+@(private="file")
+recreate_swapchain :: proc()
+{
+    destroy_swapchain(&ctx.swapchain)
+
+    surface_caps: vk.SurfaceCapabilitiesKHR
+    vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phys_device, ctx.surface, &surface_caps))
+    extent := surface_caps.currentExtent
+
+    ctx.swapchain = create_swapchain(max(extent.width, 1), max(extent.height, 1), ctx.frames_in_flight)
+}
+
 _swapchain_acquire_next :: proc() -> Texture
 {
     fence_ci := vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO }
@@ -595,7 +612,11 @@ _swapchain_acquire_next :: proc() -> Texture
     vk_check(vk.CreateFence(ctx.device, &fence_ci, nil, &fence))
     defer vk.DestroyFence(ctx.device, fence, nil)
 
-    vk_check(vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx))
+    res := vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx)
+    if res == .SUBOPTIMAL_KHR do log.warn("Suboptimal swapchain acquire!")
+    if res != .SUCCESS && res != .SUBOPTIMAL_KHR {
+        vk_check(res)
+    }
 
     vk_check(vk.WaitForFences(ctx.device, 1, &fence, true, max(u64)))
 
@@ -730,14 +751,18 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
         timeline.recording = false
     }
 
-    vk_check(vk.QueuePresentKHR(vk_queue, &{
+    res := vk.QueuePresentKHR(vk_queue, &{
         sType = .PRESENT_INFO_KHR,
         swapchainCount = 1,
         waitSemaphoreCount = 1,
         pWaitSemaphores = &present_semaphore,
         pSwapchains = &ctx.swapchain.handle,
         pImageIndices = &ctx.swapchain_image_idx,
-    }))
+    })
+    if res == .SUBOPTIMAL_KHR do log.warn("Suboptimal swapchain acquire!")
+    if res != .SUCCESS && res != .SUBOPTIMAL_KHR {
+        vk_check(res)
+    }
 }
 
 // Memory
@@ -820,6 +845,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
         device_address = addr,
         align = u32(align),
         buf_size = cast(vk.DeviceSize) bytes,
+        alloc_type = alloc_type,
     })
     gpu_alloc_idx := u32(len(ctx.gpu_allocs)) - 1
     ctx.gpu_ptr_to_alloc[addr_ptr] = gpu_alloc_idx
@@ -954,6 +980,9 @@ _texture_destroy :: proc(texture: ^Texture)
     for view in views {
         vk.DestroyImageView(ctx.device, view.view, nil)
     }
+    delete(views^)
+    views^ = {}
+    delete_key(&ctx.image_views, vk_image)
 
     vk.DestroyImage(ctx.device, vk_image, nil)
     texture^ = {}
@@ -1046,7 +1075,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
     info := vk.DescriptorGetInfoEXT {
         sType = .DESCRIPTOR_GET_INFO_EXT,
         type = .SAMPLED_IMAGE,
-        data = { pSampledImage = &{ sampler = {}, imageView = view, imageLayout = .GENERAL } }
+        data = { pSampledImage = &{ imageView = view, imageLayout = .GENERAL } }
     }
     vk.GetDescriptorEXT(ctx.device, &info, int(ctx.texture_desc_size), &desc)
     return desc
@@ -1338,6 +1367,12 @@ _get_queue :: proc(queue_type: Queue_Type, idx: u32) -> Queue
     return cast(Queue) queue
 }
 
+_queue_wait_idle :: proc(queue: Queue)
+{
+    vk_queue := cast(vk.Queue) queue
+    vk.QueueWaitIdle(vk_queue)
+}
+
 _commands_begin :: proc(queue: Queue) -> Command_Buffer
 {
     vk_queue := cast(vk.Queue) queue
@@ -1428,6 +1463,48 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
     if textures == nil && textures_rw == nil && samplers == nil do return
+
+    // Check pointers. Drivers are currently not very good at recovering from situations
+    // like this (e.g. on my setup, the whole desktop freezes for 10 seconds) so we try
+    // to catch these at the API level if possible.
+    {
+        if textures != nil
+        {
+            alloc, ok_s := search_alloc_from_gpu_ptr(textures)
+            if !ok_s {
+                log.error("Alloc not found.")
+                return
+            }
+            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
+                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
+                return
+            }
+        }
+        if textures_rw != nil
+        {
+            alloc, ok_s := search_alloc_from_gpu_ptr(textures_rw)
+            if !ok_s {
+                log.error("Alloc not found.")
+                return
+            }
+            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
+                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
+                return
+            }
+        }
+        if samplers != nil
+        {
+            alloc, ok_s := search_alloc_from_gpu_ptr(samplers)
+            if !ok_s {
+                log.error("Alloc not found.")
+                return
+            }
+            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
+                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
+                return
+            }
+        }
+    }
 
     infos: [3]vk.DescriptorBufferBindingInfoEXT
     // Fill in infos with the subset of valid pointers
@@ -2043,7 +2120,7 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
 }
 
 @(private="file")
-destroy_swapchain :: proc(swapchain: Swapchain)
+destroy_swapchain :: proc(swapchain: ^Swapchain)
 {
     for image in swapchain.images
     {
@@ -2063,6 +2140,8 @@ destroy_swapchain :: proc(swapchain: Swapchain)
     }
     delete(swapchain.image_views)
     vk.DestroySwapchainKHR(ctx.device, swapchain.handle, nil)
+
+    swapchain^ = {}
 }
 
 @(private="file")

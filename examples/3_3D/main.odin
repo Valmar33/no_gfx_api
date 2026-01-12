@@ -13,8 +13,8 @@ import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
 
-Window_Size_X :: 1000
-Window_Size_Y :: 1000
+Start_Window_Size_X :: 1000
+Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "3D"
 
@@ -37,22 +37,28 @@ main :: proc()
     window_flags :: sdl.WindowFlags {
         .HIGH_PIXEL_DENSITY,
         .VULKAN,
+        .RESIZABLE,
     }
-    window := sdl.CreateWindow(Example_Name, Window_Size_X, Window_Size_Y, window_flags)
+    window := sdl.CreateWindow(Example_Name, Start_Window_Size_X, Start_Window_Size_Y, window_flags)
     ensure(window != nil)
 
-    gpu.init(window, Frames_In_Flight)
+    window_size_x := i32(Start_Window_Size_X)
+    window_size_y := i32(Start_Window_Size_Y)
+
+    gpu.init()
     defer gpu.cleanup()
 
-    dim := [3]u32 {  }
-    depth_texture := gpu.alloc_and_create_texture({
-        dimensions = { Window_Size_X, Window_Size_Y, 1 },
+    gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
+
+    depth_desc := gpu.Texture_Desc {
+        dimensions = { u32(window_size_x), u32(window_size_y), 1 },
         format = .D32_Float,
         mip_count = 1,
         layer_count = 1,
         sample_count = 1,
         usage = { .Depth_Stencil_Attachment },
-    })
+    }
+    depth_texture := gpu.alloc_and_create_texture(depth_desc)
     defer gpu.free_and_destroy_texture(&depth_texture)
 
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
@@ -85,7 +91,11 @@ main :: proc()
     {
         proceed := handle_window_events(window)
         if !proceed do break
-        if .MINIMIZED in sdl.GetWindowFlags(window)
+
+        old_window_size_x := window_size_x
+        old_window_size_y := window_size_y
+        sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+        if .MINIMIZED in sdl.GetWindowFlags(window) || window_size_x <= 0 || window_size_y <= 0
         {
             sdl.Delay(16)
             continue
@@ -94,13 +104,22 @@ main :: proc()
         if next_frame > Frames_In_Flight {
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
         }
+        if old_window_size_x != window_size_x || old_window_size_y != window_size_y
+        {
+            gpu.queue_wait_idle(queue)
+            gpu.swapchain_resize()
+            depth_desc.dimensions.x = u32(window_size_x)
+            depth_desc.dimensions.y = u32(window_size_y)
+            gpu.free_and_destroy_texture(&depth_texture)
+            depth_texture = gpu.alloc_and_create_texture(depth_desc)
+        }
 
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
         delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
 
         world_to_view := first_person_camera_view(delta_time)
-        aspect_ratio := f32(Window_Size_X) / f32(Window_Size_Y)
+        aspect_ratio := f32(window_size_x) / f32(window_size_y)
         view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, aspect_ratio, 0.1, 1000.0, false)
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]

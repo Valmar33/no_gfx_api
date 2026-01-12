@@ -142,9 +142,11 @@ Dispatch_Indirect_Command :: struct {
 // Procedures
 
 // Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
-init: proc(window: ^sdl.Window, frames_in_flight: u32) : _init
+init: proc() : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
+swapchain_init: proc(surface: vk.SurfaceKHR, frames_in_flight: u32) : _swapchain_init
+swapchain_resize: proc() : _swapchain_resize  // NOTE: Do not call this every frame! Only if the dimensions change.
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
 // TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
@@ -177,6 +179,7 @@ semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
 
 // Command buffer
 get_queue: proc(queue_type: Queue_Type, idx: u32) -> Queue : _get_queue
+queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
@@ -340,8 +343,8 @@ alloc_and_create_texture :: proc(desc: Texture_Desc, signal_sem: Semaphore = {},
 
 free_and_destroy_texture :: proc(texture: ^Owned_Texture)
 {
-    mem_free(texture.mem)
     texture_destroy(texture)
+    mem_free(texture.mem)
     texture^ = {}
 }
 
@@ -364,4 +367,15 @@ set_sampler_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Sample
     desc_size := #force_inline get_sampler_descriptor_size()
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+}
+
+// Swapchain utils
+
+swapchain_init_from_sdl :: proc(window: ^sdl.Window, frames_in_flight: u32)
+{
+    vk_surface: vk.SurfaceKHR
+    ok := sdl.Vulkan_CreateSurface(window, get_vulkan_instance(), nil, &vk_surface)
+    ensure(ok, "Could not create surface.")
+
+    swapchain_init(vk_surface, frames_in_flight)
 }
