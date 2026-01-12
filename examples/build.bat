@@ -1,9 +1,22 @@
 @echo off
 setlocal
 
+if not exist "../build" mkdir "../build"
+if not exist "../build/third_party" mkdir "../build/third_party"
+
+set flags=
+
 for /D %%F in (*) do (
-    : odin build %%F -vet -debug -out:../build/%%F.exe
-    odin build %%F -debug -out:../build/%%F.exe
+    if /I not "%%F"=="third_party" (
+        odin build %%F %flags% -debug -out:../build/%%F.exe
+        if errorlevel 1 (
+            exit /b 1
+        )
+    )
+)
+
+for /D %%F in (third_party/*) do (
+    odin build third_party/%%F %flags% -debug -out:../build/third_party/%%F.exe
     if errorlevel 1 (
         exit /b 1
     )
