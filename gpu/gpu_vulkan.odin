@@ -2502,10 +2502,18 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
             supports_compute  := .COMPUTE in props.queueFlags
             supports_transfer := .TRANSFER in props.queueFlags
 
-            if graphics != supports_graphics do continue
-            if compute  != supports_compute  do continue
-            if transfer != supports_transfer do continue
-            return u32(i)
+            // NOTE: If a queue family supports graphics, it is required
+            // to also support transfer, but it's NOT required
+            // to report .TRANSFER in its queueFlags, as stated in
+            // the Vulkan spec: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html
+            // (Why?????????)
+
+            if graphics && supports_graphics && compute == supports_compute do return u32(i)
+            if !graphics && !supports_graphics && compute && supports_compute do return u32(i)
+
+            if graphics == supports_graphics && compute == supports_compute && transfer == supports_transfer {
+                return u32(i)
+            }
         }
     }
 
