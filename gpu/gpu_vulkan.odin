@@ -53,12 +53,6 @@ Timeline :: struct
     recording: bool,
 }
 
-Image_View_Info :: struct
-{
-    info: vk.ImageViewCreateInfo,
-    view: vk.ImageView,
-}
-
 Sampler_Info :: struct
 {
     info: vk.SamplerCreateInfo,
@@ -76,23 +70,17 @@ Context :: struct
     instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
     surface: vk.SurfaceKHR,
-
+    phys_device: vk.PhysicalDevice,
+    device: vk.Device,
     vma_allocator: vma.Allocator,
 
+    // Allocations
     gpu_allocs: [dynamic]GPU_Alloc_Meta,
     // TODO: freelist of gpu allocs
     cpu_ptr_to_alloc: map[rawptr]u32,  // Each entry has an index to its corresponding GPU allocation
     gpu_ptr_to_alloc: map[rawptr]u32,  // From base GPU allocation pointer to metadata
     alloc_tree: rbt.Tree(Alloc_Range, u32),
-
-    phys_device: vk.PhysicalDevice,
-    device: vk.Device,
     queue_families: [Queue_Type]u32,
-    queue_infos: map[vk.Queue]Queue_Info,
-
-    cmd_pools: [Queue_Type]vk.CommandPool,
-    cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
-    cmd_bufs_timelines: [Queue_Type][10]Timeline,
 
     // Common resources
     textures_desc_layout: vk.DescriptorSetLayout,
@@ -103,9 +91,13 @@ Context :: struct
     common_pipeline_layout_graphics: vk.PipelineLayout,
     common_pipeline_layout_compute: vk.PipelineLayout,
 
-    // Descriptor objects
-    image_views: map[vk.Image][dynamic]Image_View_Info,
-    samplers: [dynamic]Sampler_Info,
+    // Resource pools
+    queue_infos: map[vk.Queue]Queue_Info,
+    textures: Pool(Texture_Info),
+    cmd_pools: [Queue_Type]vk.CommandPool,
+    cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
+    cmd_bufs_timelines: [Queue_Type][10]Timeline,
+    samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
 
     // Swapchain
     swapchain: Swapchain,
@@ -120,6 +112,27 @@ Context :: struct
     // Shader metadata
     current_workgroup_size: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
     cmd_buf_compute_shader: map[Command_Buffer]Shader,  // Tracks current compute shader per command buffer
+}
+
+@(private="file")
+Key :: struct
+{
+    idx: u64
+}
+#assert(size_of(Key) == 8)
+
+@(private="file")
+Texture_Info :: struct
+{
+    handle: vk.Image,
+    views: [dynamic]Image_View_Info
+}
+
+@(private="file")
+Image_View_Info :: struct
+{
+    info: vk.ImageViewCreateInfo,
+    view: vk.ImageView,
 }
 
 // Initialization
@@ -516,6 +529,10 @@ _init :: proc()
         }
     }
 
+    // Resource pools
+    // NOTE: Reserve slot 0 for all resources as key 0 is invalid.
+    pool_append(&ctx.textures, Texture_Info {})
+
     // Tree init
     rbt.init_cmp(&ctx.alloc_tree, proc(range_a: Alloc_Range, range_b: Alloc_Range) -> rbt.Ordering {
         // NOTE: When searching, Alloc_Range { ptr, 0 } is used.
@@ -660,7 +677,7 @@ _swapchain_acquire_next :: proc() -> Texture
     return Texture {
         dimensions = { ctx.swapchain.width, ctx.swapchain.height, 1 },
         format = .BGRA8_Unorm,
-        handle = transmute(Texture_Handle) ctx.swapchain.images[ctx.swapchain_image_idx],
+        handle = transmute(Texture_Handle) ctx.swapchain.texture_keys[ctx.swapchain_image_idx],
     }
 }
 
@@ -965,26 +982,28 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
         vk_submit_cmd_buf(vk_queue, cmd_buf, vk_signal_sem, signal_value)
     }
 
+    tex_info := Texture_Info { image, {} }
     return {
         dimensions = desc.dimensions,
         format = desc.format,
-        handle = transmute(Texture_Handle) image
+        handle = transmute(Texture_Handle) u64(pool_append(&ctx.textures, tex_info))
     }
 }
 
 _texture_destroy :: proc(texture: ^Texture)
 {
-    vk_image := transmute(vk.Image) texture.handle
+    tex_key  := transmute(Key) texture.handle
+    tex_info := &ctx.textures.array[tex_key.idx]
+    vk_image := tex_info.handle
 
-    views := &ctx.image_views[vk_image]
-    for view in views {
+    for view in tex_info.views {
         vk.DestroyImageView(ctx.device, view.view, nil)
     }
-    delete(views^)
-    views^ = {}
-    delete_key(&ctx.image_views, vk_image)
+    delete(tex_info.views)
+    tex_info.views = {}
 
     vk.DestroyImage(ctx.device, vk_image, nil)
+    pool_free_idx(&ctx.textures, u32(tex_key.idx))
     texture^ = {}
 }
 
@@ -1018,38 +1037,29 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 }
 
 @(private="file")
-get_or_add_image_view :: proc(image: vk.Image, info: vk.ImageViewCreateInfo) -> vk.ImageView
+get_or_add_image_view :: proc(tex_key: Key, info: vk.ImageViewCreateInfo) -> vk.ImageView
 {
-    entry, found := &ctx.image_views[image]
-    if !found
-    {
-        ctx.image_views[image] = {}
-        image_view: vk.ImageView
-        view_ci := info
-        vk_check(vk.CreateImageView(ctx.device, &view_ci, nil, &image_view))
-        append(&ctx.image_views[image], Image_View_Info { info, image_view })
-        return image_view
-    }
-    else
-    {
-        for view in entry
-        {
-            if view.info == info {
-                return view.view
-            }
-        }
+    tex_info := &ctx.textures.array[tex_key.idx]
 
-        image_view: vk.ImageView
-        view_ci := info
-        vk_check(vk.CreateImageView(ctx.device, &view_ci, nil, &image_view))
-        append(entry, Image_View_Info { info, image_view })
-        return image_view
+    for view in tex_info.views
+    {
+        if view.info == info {
+            return view.view
+        }
     }
+
+    image_view: vk.ImageView
+    view_ci := info
+    vk_check(vk.CreateImageView(ctx.device, &view_ci, nil, &image_view))
+    append(&tex_info.views, Image_View_Info { info, image_view })
+    return image_view
 }
 
 _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
 {
-    vk_image := transmute(vk.Image) texture.handle
+    tex_key := transmute(Key) texture.handle
+    tex_info := ctx.textures.array[tex_key.idx]
+    vk_image := tex_info.handle
 
     format := view_desc.format
     if format == .Default {
@@ -1069,7 +1079,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(vk_image, image_view_ci)
+    view := get_or_add_image_view(tex_key, image_view_ci)
 
     desc: Texture_Descriptor
     info := vk.DescriptorGetInfoEXT {
@@ -1083,7 +1093,9 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
 
 _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
 {
-    vk_image := transmute(vk.Image) texture.handle
+    tex_key := transmute(Key) texture.handle
+    tex_info := ctx.textures.array[tex_key.idx]
+    vk_image := tex_info.handle
 
     format := view_desc.format
     if format == .Default {
@@ -1103,7 +1115,7 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(vk_image, image_view_ci)
+    view := get_or_add_image_view(tex_key, image_view_ci)
 
     desc: Texture_Descriptor
     info := vk.DescriptorGetInfoEXT {
@@ -1433,7 +1445,9 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes:
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
-    vk_image := transmute(vk.Image) texture.handle
+    tex_key := transmute(Key) texture.handle
+    tex_info := ctx.textures.array[tex_key.idx]
+    vk_image := tex_info.handle
 
     src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
     if !ok_s {
@@ -2090,6 +2104,7 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
 
     vk_check(vk.GetSwapchainImagesKHR(ctx.device, res.handle, &image_count, nil))
     res.images = make([]vk.Image, image_count, context.allocator)
+    res.texture_keys = make([]Key, image_count, context.allocator)
     vk_check(vk.GetSwapchainImagesKHR(ctx.device, res.handle, &image_count, raw_data(res.images)))
 
     res.image_views = make([]vk.ImageView, image_count, context.allocator)
@@ -2107,6 +2122,11 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
             },
         }
         vk_check(vk.CreateImageView(ctx.device, &image_view_ci, nil, &res.image_views[i]))
+
+        tex_info := Texture_Info { handle = image }
+        append(&tex_info.views, Image_View_Info { info = image_view_ci, view = res.image_views[i] })
+        idx := pool_append(&ctx.textures, tex_info)
+        res.texture_keys[i] = { idx = u64(idx) }
     }
 
     res.present_semaphores = make([]vk.Semaphore, image_count, context.allocator)
@@ -2122,14 +2142,6 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
 @(private="file")
 destroy_swapchain :: proc(swapchain: ^Swapchain)
 {
-    for image in swapchain.images
-    {
-        views := &ctx.image_views[image]
-        for view in views {
-            vk.DestroyImageView(ctx.device, view.view, nil)
-        }
-    }
-
     delete(swapchain.images)
     for semaphore in swapchain.present_semaphores {
         vk.DestroySemaphore(ctx.device, semaphore, nil)
@@ -2150,6 +2162,7 @@ Swapchain :: struct
     handle: vk.SwapchainKHR,
     width, height: u32,
     images: []vk.Image,
+    texture_keys: []Key,
     image_views: []vk.ImageView,
     present_semaphores: []vk.Semaphore,
 }
@@ -2356,7 +2369,9 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
 {
     view_desc := attach.view
     texture := attach.texture
-    vk_image := transmute(vk.Image) texture.handle
+    tex_key := transmute(Key) texture.handle
+    tex_info := ctx.textures.array[tex_key.idx]
+    vk_image := tex_info.handle
 
     format := view_desc.format
     if format == .Default {
@@ -2376,7 +2391,7 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(vk_image, image_view_ci)
+    view := get_or_add_image_view(tex_key, image_view_ci)
 
     return {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -2521,16 +2536,9 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
 }
 
 @(private="file")
-Pool_Element :: struct($T: typeid)
-{
-    using el: T,
-    present: bool,
-}
-
-@(private="file")
 Pool :: struct($T: typeid)
 {
-    array: [dynamic]Pool_Element(T),
+    array: [dynamic]T,
     free_list: [dynamic]u32,
 }
 
@@ -2538,31 +2546,23 @@ Pool :: struct($T: typeid)
 pool_append :: proc(using pool: ^Pool($T), el: T) -> u32
 {
     free_idx: u32
-    if len(free_list) > 0
-    {
+    if len(free_list) > 0 {
         free_idx = pop(&free_list)
-    }
-    else
-    {
-        append(&array, {})
-        free_idx = len(array) - 1
+    } else {
+        append(&array, T {})
+        free_idx = u32(len(array)) - 1
     }
 
-    array[free_idx].el = el
-    array[free_idx].present = true
+    array[free_idx] = el
     return free_idx
 }
 
 @(private="file")
 pool_free_idx :: proc(using pool: ^Pool($T), idx: u32)
 {
-    if idx == len(array)
-    {
+    if idx == u32(len(array)) {
         pop(&array)
-    }
-    else
-    {
-        array[idx].present = false
+    } else {
         append(&free_list, idx)
     }
 }
