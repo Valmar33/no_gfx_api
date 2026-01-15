@@ -104,7 +104,7 @@ There are a few problems with building this API on top of Vulkan:
 
 ## Shaders
 
-It is possible to write shaders in any language that compiles to SPIR-V. no_gfx_api uses Scalar Vulkan layout which means that CPU and GPU memory layout for structures is the same. You need to have these exact bindings in your shader if you are not using MUSL or Slang:
+It is possible to write shaders in any language that compiles to SPIR-V. You need to have these exact bindings in your shader if you are not using MUSL or Slang:
 
 ```glsl
 layout(set = 0, binding = 0) uniform texture2D texture_heap[];
@@ -154,8 +154,7 @@ The compiler itself just transpiles to GLSL.
 
 ### Slang Shading Language
 
-[Slang](https://shader-slang.org/) comes bundled with Vulkan SDK so you probably already have `slangc` installed. Slang has plugins for various IDEs, including a language server. Make sure to include the `shared.slang` file in your shader. Make sure to compile your shaders with
-`-fvk-use-scalar-layout -force-glsl-scalar-layout` flags! Also make sure you have recent enough Vulkan SDK otherwise you might get validation errors from [this issue](https://github.com/shader-slang/slang/issues/8902). Look at `examples/build_shaders_slang.bat` for an example of how to build shaders with Slang.
+[Slang](https://shader-slang.org/) comes bundled with Vulkan SDK so you probably already have `slangc` installed. Slang has plugins for various IDEs, including a language server. Make sure you have recent enough Vulkan SDK otherwise you might get validation errors from [this issue](https://github.com/shader-slang/slang/issues/8902). Look at `examples/build_shaders_slang.bat` for an example of how to build shaders with Slang.
 
 Using Slang with no_gfx_api is easy, you define your structs to match your CPU structs and then use the `GraphicsPipelineData` and `ComputePipelineData` to access your data like so.
 
