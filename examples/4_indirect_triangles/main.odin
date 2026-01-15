@@ -15,7 +15,7 @@ Frames_In_Flight :: 3
 Example_Name :: "Indirect Multi Triangles"
 Num_Triangles :: 32
 
-Use_Indirect_Multi :: false
+Use_Indirect_Multi :: true
 
 main :: proc()
 {
