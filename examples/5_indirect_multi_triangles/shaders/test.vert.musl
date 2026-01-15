@@ -9,8 +9,15 @@ Data :: struct
     verts: []Vertex,
 }
 
+// IndirectData extends Draw_Indexed_Indirect_Command with user data fields
+// The struct layout matches the Odin struct that uses `using cmd: gpu.Draw_Indexed_Indirect_Command`
 IndirectData :: struct
 {
+    index_count: uint,
+    instance_count: uint,
+    first_index: uint,
+    vertex_offset: int,
+    first_instance: uint,
     color: vec3,
     pos: vec3,
     size: float,
