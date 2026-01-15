@@ -7,6 +7,7 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
+import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -53,17 +54,6 @@ Timeline :: struct
     recording: bool,
 }
 
-Sampler_Info :: struct
-{
-    info: vk.SamplerCreateInfo,
-    sampler: vk.Sampler,
-}
-
-Queue_Info :: struct #all_or_none
-{
-    type: Queue_Type,
-}
-
 @(private="file")
 Context :: struct
 {
@@ -80,7 +70,6 @@ Context :: struct
     cpu_ptr_to_alloc: map[rawptr]u32,  // Each entry has an index to its corresponding GPU allocation
     gpu_ptr_to_alloc: map[rawptr]u32,  // From base GPU allocation pointer to metadata
     alloc_tree: rbt.Tree(Alloc_Range, u32),
-    queue_families: [Queue_Type]u32,
 
     // Common resources
     textures_desc_layout: vk.DescriptorSetLayout,
@@ -92,7 +81,7 @@ Context :: struct
     common_pipeline_layout_compute: vk.PipelineLayout,
 
     // Resource pools
-    queue_infos: map[vk.Queue]Queue_Info,
+    queues: [len(Queue_Type) + 1]Queue_Info,  // Reserve slot 0 for invalid queue.
     textures: Pool(Texture_Info),
     cmd_pools: [Queue_Type]vk.CommandPool,
     cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
@@ -133,6 +122,22 @@ Image_View_Info :: struct
 {
     info: vk.ImageViewCreateInfo,
     view: vk.ImageView,
+}
+
+@(private="file")
+Sampler_Info :: struct
+{
+    info: vk.SamplerCreateInfo,
+    sampler: vk.Sampler,
+}
+
+@(private="file")
+Queue_Info :: struct
+{
+    handle: vk.Queue,
+    family_idx: u32,
+    queue_idx: u32,
+    queue_type: Queue_Type,
 }
 
 // Initialization
@@ -276,31 +281,51 @@ _init :: proc()
     ctx.sampler_desc_size = u32(props.samplerDescriptorSize)
 
     // Queues create info
-    ctx.queue_families[.Main] = find_queue_family(true, true, true)
-    ctx.queue_families[.Compute] = find_queue_family(graphics = false, compute = true, transfer = true)
-    ctx.queue_families[.Transfer] = find_queue_family(graphics = false, compute = false, transfer = true)
-    queue_create_infos := []vk.DeviceQueueCreateInfo {
-        // Main queue
+    queue_create_infos: [dynamic]vk.DeviceQueueCreateInfo
+    defer delete(queue_create_infos)
+    {
+        queue_families: [3]u32  // Main, Compute, Transfer
+        queue_indices: [3]u32
+        queue_count: [3]u32 = { 1, 1, 1 }
+        is_subsumed: [3]bool
+        queue_families[0] = find_queue_family(true, true, true)
+        queue_families[1] = find_queue_family(graphics = false, compute = true, transfer = true)
+        queue_families[2] = find_queue_family(graphics = false, compute = false, transfer = true)
+        for i := 1; i < len(queue_families); i += 1
         {
-            sType = .DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = ctx.queue_families[.Main],
-            queueCount = 1,
-            pQueuePriorities = raw_data([]f32 { 0.0 }),
-        },
-        // Compute queues
+            for j := 0; j < i; j += 1
+            {
+                if queue_families[i] == queue_families[j]
+                {
+                    assert(!is_subsumed[j])
+                    queue_indices[i] = queue_indices[j] + 1
+                    is_subsumed[i] = true
+                    queue_count[j] += 1
+                    break
+                }
+            }
+        }
+
+        max_queue_count := max(queue_count[0], queue_count[1], queue_count[2])
+        queue_priorities := make([]f32, max_queue_count, allocator = scratch)  // Filled in with zeros
+
+        for i in 0..<len(queue_families)
         {
-            sType = .DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = ctx.queue_families[.Compute],
-            queueCount = 4,
-            pQueuePriorities = raw_data([]f32 { 0.0, 0.0, 0.0, 0.0 }),
-        },
-        // Transfer queue
-        {
-            sType = .DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = ctx.queue_families[.Transfer],
-            queueCount = 1,
-            pQueuePriorities = raw_data([]f32 { 0.0, 0.0 }),
-        },
+            if is_subsumed[i] do continue
+
+            append(&queue_create_infos, vk.DeviceQueueCreateInfo {
+                sType = .DEVICE_QUEUE_CREATE_INFO,
+                queueFamilyIndex = queue_families[i],
+                queueCount = queue_count[i],
+                pQueuePriorities = raw_data(queue_priorities)
+            })
+        }
+
+        for i in 0..<3 {
+            ctx.queues[i+1] = { handle = nil, family_idx = queue_families[i], queue_idx = queue_indices[i], queue_type = cast(Queue_Type) i }
+        }
+
+        fmt.println(queue_create_infos)
     }
 
     // Device
@@ -375,7 +400,7 @@ _init :: proc()
     {
         cmd_pool_ci := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
-            queueFamilyIndex = ctx.queue_families[type],
+            queueFamilyIndex = ctx.queues[type].family_idx,
             flags = { .TRANSIENT, .RESET_COMMAND_BUFFER }
         }
         vk_check(vk.CreateCommandPool(ctx.device, &cmd_pool_ci, nil, &ctx.cmd_pools[type]))
@@ -606,7 +631,7 @@ _swapchain_init :: proc(surface: vk.SurfaceKHR, frames_in_flight: u32)
 
 _swapchain_resize :: proc()
 {
-    queue_wait_idle(get_queue(.Main, 0))
+    queue_wait_idle(get_queue(.Main))
     recreate_swapchain()
 }
 
@@ -639,8 +664,7 @@ _swapchain_acquire_next :: proc() -> Texture
 
     // Transition layout from swapchain
     {
-        vk_queue := transmute(vk.Queue) get_queue(.Main, 0)
-        cmd_buf := vk_acquire_cmd_buf(vk_queue)
+        cmd_buf := vk_acquire_cmd_buf(get_queue(.Main))
 
         cmd_buf_bi := vk.CommandBufferBeginInfo {
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -671,7 +695,7 @@ _swapchain_acquire_next :: proc() -> Texture
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
 
-        vk_submit_cmd_buf(vk_queue, cmd_buf)
+        vk_submit_cmd_buf(get_queue(.Main), cmd_buf)
     }
 
     return Texture {
@@ -683,7 +707,7 @@ _swapchain_acquire_next :: proc() -> Texture
 
 _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
 {
-    vk_queue := cast(vk.Queue) queue
+    vk_queue := get_resource(queue, &ctx.queues).handle
     vk_sem_wait := transmute(vk.Semaphore) sem_wait
 
     present_semaphore := ctx.swapchain.present_semaphores[ctx.swapchain_image_idx]
@@ -695,7 +719,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
         // Switch to optimal layout for presentation (this is mandatory)
         cmd_buf: vk.CommandBuffer
         {
-            cmd_buf = vk_acquire_cmd_buf(vk_queue)
+            cmd_buf = vk_acquire_cmd_buf(queue)
 
             cmd_buf_bi := vk.CommandBufferBeginInfo {
                 sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -727,7 +751,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
             vk_check(vk.EndCommandBuffer(cmd_buf))
         }
 
-        timeline := vk_get_cmd_buf_timeline(vk_queue, cmd_buf)
+        timeline := vk_get_cmd_buf_timeline(queue, cmd_buf)
         timeline.val += 1
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
@@ -948,8 +972,9 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
 
     // Transition layout from UNDEFINED to GENERAL
     {
-        vk_queue := transmute(vk.Queue) get_queue(.Main, 0)
-        cmd_buf := vk_acquire_cmd_buf(vk_queue)
+        queue := get_queue(.Main)
+
+        cmd_buf := vk_acquire_cmd_buf(queue)
 
         cmd_buf_bi := vk.CommandBufferBeginInfo {
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -979,7 +1004,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
         })
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
-        vk_submit_cmd_buf(vk_queue, cmd_buf, vk_signal_sem, signal_value)
+        vk_submit_cmd_buf(get_queue(.Main), cmd_buf, vk_signal_sem, signal_value)
     }
 
     tex_info := Texture_Info { image, {} }
@@ -992,8 +1017,8 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
 
 _texture_destroy :: proc(texture: ^Texture)
 {
-    tex_key  := transmute(Key) texture.handle
-    tex_info := &ctx.textures.array[tex_key.idx]
+    tex_key := transmute(Key) texture.handle
+    tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
     for view in tex_info.views {
@@ -1037,9 +1062,9 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 }
 
 @(private="file")
-get_or_add_image_view :: proc(tex_key: Key, info: vk.ImageViewCreateInfo) -> vk.ImageView
+get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateInfo) -> vk.ImageView
 {
-    tex_info := &ctx.textures.array[tex_key.idx]
+    tex_info := get_resource(texture, ctx.textures)
 
     for view in tex_info.views
     {
@@ -1057,8 +1082,7 @@ get_or_add_image_view :: proc(tex_key: Key, info: vk.ImageViewCreateInfo) -> vk.
 
 _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
 {
-    tex_key := transmute(Key) texture.handle
-    tex_info := ctx.textures.array[tex_key.idx]
+    tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
     format := view_desc.format
@@ -1079,7 +1103,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(tex_key, image_view_ci)
+    view := get_or_add_image_view(texture.handle, image_view_ci)
 
     desc: Texture_Descriptor
     info := vk.DescriptorGetInfoEXT {
@@ -1093,8 +1117,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
 
 _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
 {
-    tex_key := transmute(Key) texture.handle
-    tex_info := ctx.textures.array[tex_key.idx]
+    tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
     format := view_desc.format
@@ -1115,7 +1138,7 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(tex_key, image_view_ci)
+    view := get_or_add_image_view(texture.handle, image_view_ci)
 
     desc: Texture_Descriptor
     info := vk.DescriptorGetInfoEXT {
@@ -1371,25 +1394,27 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 
 // Command buffer
 
-_get_queue :: proc(queue_type: Queue_Type, idx: u32) -> Queue
+_get_queue :: proc(queue_type: Queue_Type) -> Queue
 {
-    queue: vk.Queue
-    vk.GetDeviceQueue(ctx.device, cast(u32)queue_type, idx, &queue)
-    ctx.queue_infos[queue] = { queue_type }
-    return cast(Queue) queue
+    queue_info := &ctx.queues[cast(u32) queue_type + 1]
+    if queue_info.handle == nil
+    {
+        queue: vk.Queue
+        vk.GetDeviceQueue(ctx.device, queue_info.family_idx, queue_info.queue_idx, &queue)
+        queue_info.handle = queue
+    }
+
+    return transmute(Queue) Key { idx = cast(u64) queue_type + 1 }
 }
 
 _queue_wait_idle :: proc(queue: Queue)
 {
-    vk_queue := cast(vk.Queue) queue
-    vk.QueueWaitIdle(vk_queue)
+    vk.QueueWaitIdle(get_resource(queue, &ctx.queues).handle)
 }
 
 _commands_begin :: proc(queue: Queue) -> Command_Buffer
 {
-    vk_queue := cast(vk.Queue) queue
-
-    cmd_buf := vk_acquire_cmd_buf(vk_queue)
+    cmd_buf := vk_acquire_cmd_buf(queue)
 
     cmd_buf_bi := vk.CommandBufferBeginInfo {
         sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -1402,7 +1427,8 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
 
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
 {
-    vk_queue := cast(vk.Queue) queue
+    queue_info := get_resource(queue, &ctx.queues)
+    vk_queue := queue_info.handle
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
     for cmd_buf in cmd_bufs
@@ -1410,7 +1436,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
 
-        vk_submit_cmd_buf(vk_queue, vk_cmd_buf, vk_signal_sem, signal_value)
+        vk_submit_cmd_buf(queue, vk_cmd_buf, vk_signal_sem, signal_value)
 
         // Clear compute shader tracking for this command buffer
         delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
@@ -1445,8 +1471,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes:
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
-    tex_key := transmute(Key) texture.handle
-    tex_info := ctx.textures.array[tex_key.idx]
+    tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
     src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
@@ -2202,9 +2227,10 @@ get_buf_size_from_gpu_ptr :: proc(ptr: rawptr) -> (size: vk.DeviceSize, ok: bool
 
 // Command buffers
 @(private="file")
-vk_acquire_cmd_buf :: proc(queue: vk.Queue) -> vk.CommandBuffer
+vk_acquire_cmd_buf :: proc(queue: Queue) -> vk.CommandBuffer
 {
-    queue_type := ctx.queue_infos[queue].type
+    queue_info := get_resource(queue, &ctx.queues)
+    queue_type := queue_info.queue_type
 
     // Poll semaphores
     found_free := -1
@@ -2230,9 +2256,11 @@ vk_acquire_cmd_buf :: proc(queue: vk.Queue) -> vk.CommandBuffer
 }
 
 @(private="file")
-vk_submit_cmd_buf :: proc(queue: vk.Queue, cmd_buf: vk.CommandBuffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
+vk_submit_cmd_buf :: proc(queue: Queue, cmd_buf: vk.CommandBuffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
-    queue_type := ctx.queue_infos[queue].type
+    queue_info := get_resource(queue, &ctx.queues)
+    vk_queue := queue_info.handle
+    queue_type := queue_info.queue_type
 
     // Find command buffer in array
     found_idx := -1
@@ -2271,15 +2299,16 @@ vk_submit_cmd_buf :: proc(queue: vk.Queue, cmd_buf: vk.CommandBuffer, signal_sem
         signalSemaphoreCount = u32(len(signal_sems)),
         pSignalSemaphores = raw_data(signal_sems)
     }
-    vk_check(vk.QueueSubmit(queue, 1, &submit_info, {}))
+    vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 
     ctx.cmd_bufs_timelines[queue_type][found_idx].recording = false
 }
 
 @(private="file")
-vk_get_cmd_buf_timeline :: proc(queue: vk.Queue, cmd_buf: vk.CommandBuffer) -> ^Timeline
+vk_get_cmd_buf_timeline :: proc(queue: Queue, cmd_buf: vk.CommandBuffer) -> ^Timeline
 {
-    queue_type := ctx.queue_infos[queue].type
+    queue_info := get_resource(queue, &ctx.queues)
+    queue_type := queue_info.queue_type
 
     // Find command buffer in array
     found_idx := -1
@@ -2369,8 +2398,7 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
 {
     view_desc := attach.view
     texture := attach.texture
-    tex_key := transmute(Key) texture.handle
-    tex_info := ctx.textures.array[tex_key.idx]
+    tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
     format := view_desc.format
@@ -2391,7 +2419,7 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
             layerCount = 1,
         }
     }
-    view := get_or_add_image_view(tex_key, image_view_ci)
+    view := get_or_add_image_view(texture.handle, image_view_ci)
 
     return {
         sType = .RENDERING_ATTACHMENT_INFO,
@@ -2513,22 +2541,34 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
 
         for props, i in family_properties
         {
-            supports_graphics := .GRAPHICS in props.queueFlags
-            supports_compute  := .COMPUTE in props.queueFlags
-            supports_transfer := .TRANSFER in props.queueFlags
-
             // NOTE: If a queue family supports graphics, it is required
             // to also support transfer, but it's NOT required
             // to report .TRANSFER in its queueFlags, as stated in
             // the Vulkan spec: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html
             // (Why?????????)
+            supports_graphics := .GRAPHICS in props.queueFlags
+            supports_compute  := .COMPUTE in props.queueFlags
+            supports_transfer := .TRANSFER in props.queueFlags || supports_graphics || supports_compute
 
-            if graphics && supports_graphics && compute == supports_compute do return u32(i)
-            if !graphics && !supports_graphics && compute && supports_compute do return u32(i)
+            if graphics != supports_graphics do continue
+            if compute  != supports_compute  do continue
+            if transfer != supports_transfer do continue
 
-            if graphics == supports_graphics && compute == supports_compute && transfer == supports_transfer {
-                return u32(i)
-            }
+            return u32(i)
+        }
+
+        // Ideal queue family Not found. Be a little less strict now in your search.
+        for props, i in family_properties
+        {
+            supports_graphics := .GRAPHICS in props.queueFlags
+            supports_compute  := .COMPUTE in props.queueFlags
+            supports_transfer := .TRANSFER in props.queueFlags || supports_graphics || supports_compute
+
+            if graphics && !supports_graphics do continue
+            if compute  && !supports_compute  do continue
+            if transfer && !supports_transfer do continue
+
+            return u32(i)
         }
     }
 
@@ -2576,6 +2616,35 @@ pool_destroy :: proc(using pool: ^Pool($T))
     free_list = {}
 }
 
+@(private="file")
+get_resource_from_pool :: proc(key: $T, pool: $T2/Pool($T3)) -> ^T3 where size_of(T) == 8
+{
+    key_ := transmute(Key) key
+    return &pool.array[key_.idx]
+}
+
+@(private="file")
+get_resource_from_slice :: proc(key: $T, array: $T2/[]$T3) -> ^T3 where size_of(T) == 8
+{
+    key_ := transmute(Key) key
+    return &array[key_.idx]
+}
+
+@(private="file")
+get_resource_from_array :: proc(key: $T, array: ^$T2/[$S]$T3) -> ^T3 where size_of(T) == 8
+{
+    key_ := transmute(Key) key
+    return &array[key_.idx]
+}
+
+@(private="file")
+get_resource :: proc
+{
+    get_resource_from_pool,
+    get_resource_from_slice,
+    get_resource_from_array,
+}
+
 // Interop
 
 _get_vulkan_instance :: proc() -> vk.Instance
@@ -2595,12 +2664,12 @@ _get_vulkan_device :: proc() -> vk.Device
 
 _get_vulkan_queue :: proc(queue: Queue) -> vk.Queue
 {
-    return transmute(vk.Queue) queue
+    return get_resource(queue, &ctx.queues).handle
 }
 
 _get_vulkan_queue_family :: proc(queue: Queue) -> u32
 {
-    return ctx.queue_families[ctx.queue_infos[transmute(vk.Queue) queue].type]
+    return get_resource(queue, &ctx.queues).family_idx
 }
 
 _get_vulkan_command_buffer :: proc(cmd_buf: Command_Buffer) -> vk.CommandBuffer

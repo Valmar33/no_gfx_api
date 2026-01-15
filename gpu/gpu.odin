@@ -177,11 +177,13 @@ semaphore_create: proc(init_value: u64 = 0) -> Semaphore : _semaphore_create
 semaphore_wait: proc(sem: Semaphore, wait_value: u64) : _semaphore_wait
 semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
 
-// Command buffer
-get_queue: proc(queue_type: Queue_Type, idx: u32) -> Queue : _get_queue
+// Queues
+get_queue: proc(queue_type: Queue_Type) -> Queue : _get_queue
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
-commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
+
+// Command buffer
+commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 
 // Commands
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
