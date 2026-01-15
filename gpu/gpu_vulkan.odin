@@ -146,7 +146,7 @@ ctx: Context
 @(private="file")
 vk_logger: log.Logger
 
-_init :: proc()
+_init :: proc(features := Features {})
 {
     init_scratch_arenas()
 
@@ -2559,6 +2559,68 @@ to_vk_address_mode :: proc(addr_mode: Address_Mode) -> vk.SamplerAddressMode
         case .Clamp_To_Edge: return .CLAMP_TO_EDGE
     }
     return {}
+}
+
+@(private="file")
+to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.AccelerationStructureBuildGeometryInfoKHR
+{
+    geometries := make([]vk.AccelerationStructureGeometryKHR, len(blas_desc.shapes))
+    for &geom, i in geometries
+    {
+        switch shape in blas_desc.shapes[i]
+        {
+            case BVH_Mesh_Desc:
+            {
+                flags: vk.GeometryFlagsKHR = { .OPAQUE } if shape.opacity == .Fully_Opaque else {}
+                geom = vk.AccelerationStructureGeometryKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                    flags = flags,
+                    geometryType = .TRIANGLES,
+                    geometry = { triangles = {
+                        sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                        vertexFormat = .R32G32B32_SFLOAT,
+                        vertexStride = vk.DeviceSize(shape.vertex_stride),
+                        maxVertex = shape.max_vertex,
+                        indexType = .UINT32,
+                    } }
+                }
+            }
+            case BVH_AABB_Desc:
+            {
+                flags: vk.GeometryFlagsKHR = { .OPAQUE } if shape.opacity == .Fully_Opaque else {}
+                geom = vk.AccelerationStructureGeometryKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                    flags = flags,
+                    geometryType = .AABBS,
+                    geometry = { aabbs = {
+                        stride = vk.DeviceSize(shape.stride)
+                    } }
+                }
+            }
+        }
+    }
+
+    return vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = to_vk_bvh_flags(blas_desc.hint, blas_desc.caps),
+        type = .BOTTOM_LEVEL,
+        mode = .BUILD,
+        geometryCount = u32(len(geometries)),
+        pGeometries = raw_data(geometries)
+    }
+}
+
+@(private="file")
+to_vk_bvh_flags :: proc(hint: BVH_Hint, caps: BVH_Capabilities) -> vk.BuildAccelerationStructureFlagsKHR
+{
+    flags: vk.BuildAccelerationStructureFlagsKHR
+    if .Update in caps do            flags += { .ALLOW_UPDATE }
+    if .Compaction in caps do        flags += { .ALLOW_COMPACTION }
+    if hint == .Prefer_Fast_Trace do flags += { .PREFER_FAST_TRACE }
+    if hint == .Prefer_Fast_Build do flags += { .PREFER_FAST_BUILD }
+    if hint == .Prefer_Low_Memory do flags += { .LOW_MEMORY }
+
+    return flags
 }
 
 @(private="file")

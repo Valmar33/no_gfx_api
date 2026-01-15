@@ -23,6 +23,8 @@ Sampler_Descriptor :: struct { bytes: [2]u64 }
 BVH_Descriptor :: struct { bytes: [4]u64 }
 
 // Enums
+Feature :: enum { Raytracing = 0 }
+Features :: bit_set[Feature; u32]
 Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Queue_Type :: enum { Main = 0, Compute, Transfer }
@@ -46,10 +48,11 @@ Color_Component_Flags :: distinct bit_set[Color_Component_Flag; u8]
 Filter :: enum { Linear = 0, Nearest }
 Address_Mode :: enum { Repeat = 0, Mirrored_Repeat, Clamp_To_Edge }
 BVH_Instance_Flag :: enum { Disable_Culling = 0, Flip_Facing = 1, Force_Opaque = 2, Force_Not_Opaque = 3 }
+BVH_Opacity :: enum { Fully_Opaque = 0, Transparent }
 BVH_Instance_Flags :: distinct bit_set[BVH_Instance_Flag; u32]
-BVH_Build_Hint :: enum { Default = 0, Prefer_Fast_Trace, Prefer_Fast_Build }
-BVH_Build_Capability :: enum { Update = 0, Compaction }
-BVH_Build_Capabilities :: distinct bit_set[BVH_Build_Capability; u32]
+BVH_Hint :: enum { Default = 0, Prefer_Fast_Trace, Prefer_Fast_Build, Prefer_Low_Memory }
+BVH_Capability :: enum { Update = 0, Compaction }
+BVH_Capabilities :: distinct bit_set[BVH_Capability; u32]
 
 // Constants
 All_Mips: u8 : max(u8)
@@ -162,34 +165,37 @@ BVH_Instance :: struct
     blas: BVH,
 }
 
-BVH_Geometry_Desc :: struct
+BVH_Mesh_Desc :: struct
 {
-    // Number of coordinates supplied per vertex position. Remaining coordinates
-    // will be filled in like this: (x: 0, y: 0, z: 0, w: 1). Coordinates must be
-    // f32 values. 0 defaults to 3. Allowed range: [0, 4]
-    vertex_coord_count: u32,
+    opacity: BVH_Opacity,
     vertex_stride: u32,
-    num_verts: u32,
+    max_vertex: u32,  // e.g. if reading vertices [200..300], this value must be 300
 }
+BVH_AABB_Desc :: struct { opacity: BVH_Opacity, stride: u32 }
+BVH_Shape_Desc :: union { BVH_Mesh_Desc, BVH_AABB_Desc }
+
+BVH_Mesh :: struct { verts: rawptr, indices: rawptr }
+BVH_AABB :: struct { data: rawptr }
+BVH_Shape :: union { BVH_Mesh, BVH_AABB }
 
 BLAS_Desc :: struct
 {
-    hint: BVH_Build_Hint,
-    caps: BVH_Build_Capabilities,
-    geometries: []BVH_Geometry_Desc,
+    hint: BVH_Hint,
+    caps: BVH_Capabilities,
+    shapes: []BVH_Shape_Desc,
 }
 
 TLAS_Desc :: struct
 {
-    hint: BVH_Build_Hint,
-    caps: BVH_Build_Capabilities,
-    num_instances: u32,
+    hint: BVH_Hint,
+    caps: BVH_Capabilities,
+    instance_count: u32,
 }
 
 // Procedures
 
 // Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
-init: proc() : _init
+init: proc(features := Features {}) : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
 swapchain_init: proc(surface: vk.SurfaceKHR, frames_in_flight: u32) : _swapchain_init
@@ -279,7 +285,7 @@ cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_ve
 cmd_draw_indexed_instanced_indirect_multi_data: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
                                                       indices: rawptr, arguments: rawptr, draw_count: rawptr, data_vertex_shared: rawptr,
                                                       data_pixel_shared: rawptr) : _cmd_draw_indexed_instanced_indirect_multi_data
-cmd_build_blas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, verts: rawptr, indices: rawptr);
+cmd_build_blas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape);
 cmd_build_tlas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr);
 
 /////////////////////////
