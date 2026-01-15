@@ -279,12 +279,9 @@ cmd_end_render_pass: proc(cmd_buf: Command_Buffer) : _cmd_end_render_pass
 cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
                                  indices: rawptr, index_count: u32, instance_count: u32 = 1) : _cmd_draw_indexed_instanced
 cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                          indices: rawptr, arguments: rawptr) : _cmd_draw_indexed_instanced_indirect
+                                          indices: rawptr, indirect_arguments: rawptr) : _cmd_draw_indexed_instanced_indirect
 cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                 indices: rawptr, arguments: rawptr, draw_count: rawptr) : _cmd_draw_indexed_instanced_indirect_multi
-cmd_draw_indexed_instanced_indirect_multi_data: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                      indices: rawptr, arguments: rawptr, draw_count: rawptr, data_vertex_shared: rawptr,
-                                                      data_pixel_shared: rawptr) : _cmd_draw_indexed_instanced_indirect_multi_data
+                                                 indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr) : _cmd_draw_indexed_instanced_indirect_multi
 cmd_build_blas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape);
 cmd_build_tlas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr);
 

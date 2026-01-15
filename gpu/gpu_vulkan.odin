@@ -18,8 +18,7 @@ Max_Textures :: 65535
 Graphics_Shader_Push_Constants :: struct #packed {
     vert_data: rawptr,
     frag_data: rawptr,
-    vert_indirect_data: rawptr,
-    frag_indirect_data: rawptr,
+    indirect_data: rawptr,
 }
 
 @(private="file")
@@ -1898,8 +1897,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     push_constants := Graphics_Shader_Push_Constants {
         vert_data = vertex_data,
         frag_data = fragment_data,
-        vert_indirect_data = vertex_data,
-        frag_indirect_data = fragment_data,
+        indirect_data = nil,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
@@ -1908,7 +1906,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
 }
 
 _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                            indices: rawptr, arguments: rawptr)
+                                            indices: rawptr, indirect_arguments: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
@@ -1919,7 +1917,7 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
         return
     }
 
-    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
+    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(indirect_arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found")
@@ -1929,8 +1927,7 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     push_constants := Graphics_Shader_Push_Constants {
         vert_data = vertex_data,
         frag_data = fragment_data,
-        vert_indirect_data = vertex_data,
-        frag_indirect_data = fragment_data,
+        indirect_data = indirect_arguments,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
@@ -1938,10 +1935,8 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     vk.CmdDrawIndexedIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), 1, 0)
 }
 
-@(private="file")
-_cmd_draw_indexed_instanced_indirect_multi_impl :: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                         indices: rawptr, arguments: rawptr, draw_count: rawptr,
-                                                         data_vertex_shared: rawptr, data_pixel_shared: rawptr)
+_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
+                                                    indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
@@ -1952,7 +1947,7 @@ _cmd_draw_indexed_instanced_indirect_multi_impl :: proc(cmd_buf: Command_Buffer,
         return
     }
 
-    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
+    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(indirect_arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found")
@@ -1966,19 +1961,20 @@ _cmd_draw_indexed_instanced_indirect_multi_impl :: proc(cmd_buf: Command_Buffer,
         return
     }
 
+    // data_vertex and data_pixel are shared data for vertex and fragment shaders
+    // indirect_arguments points to the unified indirect data array containing both command and user data
+    // The stride is the size of the combined struct { IndirectDrawCommand cmd; UserData data; }
     push_constants := Graphics_Shader_Push_Constants {
-        vert_data = data_vertex_shared,
-        frag_data = data_pixel_shared,
-        vert_indirect_data = data_vertex,
-        frag_indirect_data = data_pixel,
+        vert_data = data_vertex,
+        frag_data = data_pixel,
+        indirect_data = indirect_arguments,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
     vk.CmdBindIndexBuffer(vk_cmd_buf, indices_buf, vk.DeviceSize(indices_offset), .UINT32)
-    stride := u32(size_of(vk.DrawIndexedIndirectCommand))
 
     max_draw_count: u32 = 0xFFFFFFFF
-    buf_size, ok_size := get_buf_size_from_gpu_ptr(arguments)
+    buf_size, ok_size := get_buf_size_from_gpu_ptr(indirect_arguments)
     if ok_size && buf_size > vk.DeviceSize(arguments_offset)
     {
         available_size := buf_size - vk.DeviceSize(arguments_offset)
@@ -1986,19 +1982,6 @@ _cmd_draw_indexed_instanced_indirect_multi_impl :: proc(cmd_buf: Command_Buffer,
     }
 
     vk.CmdDrawIndexedIndirectCount(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), draw_count_buf, vk.DeviceSize(draw_count_offset), max_draw_count, stride)
-}
-
-_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                    indices: rawptr, arguments: rawptr, draw_count: rawptr)
-{
-    _cmd_draw_indexed_instanced_indirect_multi_impl(cmd_buf, data_vertex, data_pixel, indices, arguments, draw_count, data_vertex, data_pixel)
-}
-
-_cmd_draw_indexed_instanced_indirect_multi_data :: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                         indices: rawptr, arguments: rawptr, draw_count: rawptr, data_vertex_shared: rawptr,
-                                                         data_pixel_shared: rawptr)
-{
-    _cmd_draw_indexed_instanced_indirect_multi_impl(cmd_buf, data_vertex, data_pixel, indices, arguments, draw_count, data_vertex_shared, data_pixel_shared)
 }
 
 @(private="file")
