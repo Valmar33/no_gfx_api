@@ -7,7 +7,6 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
-import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -324,8 +323,6 @@ _init :: proc()
         for i in 0..<3 {
             ctx.queues[i+1] = { handle = nil, family_idx = queue_families[i], queue_idx = queue_indices[i], queue_type = cast(Queue_Type) i }
         }
-
-        fmt.println(queue_create_infos)
     }
 
     // Device
