@@ -134,8 +134,7 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
         } else {
             writefln("%v _res_vert_data_;", data_type_str)
             writefln("%v _res_frag_data_;", data_type_str)
-            writefln("%v _res_vert_indirect_data_;", indirect_data_type_glsl)
-            writefln("%v _res_frag_indirect_data_;", indirect_data_type_glsl)
+            writefln("%v _res_indirect_data_;", indirect_data_type_glsl)
         }
     }
     writeln("};")
@@ -509,15 +508,7 @@ attribute_to_glsl :: proc(attribute: Ast_Attribute, ast: Ast, shader_type: Shade
             }
         case .Instance_ID:  return "gl_InstanceID"
         case .Draw_ID:       return "gl_DrawID"
-        case .Indirect_Data:
-        {
-            // Indirect data comes from push constants: pointer to start of array, indexed by gl_DrawID
-            if ast.used_indirect_data_type != nil {
-                indirect_data_name := "_res_vert_indirect_data_" if shader_type == .Vertex else "_res_frag_indirect_data_"
-                return strings.concatenate({indirect_data_name, "._res_[gl_DrawID]"})
-            }
-            return "_res_indirect_data_._res_[gl_DrawID]"
-        }
+        case .Indirect_Data: return "_res_indirect_data_._res_[gl_DrawID]"
         case .Workgroup_ID: return "gl_WorkGroupID"
         case .Local_Invocation_ID: return "gl_LocalInvocationID"
         case .Group_Size: return "gl_WorkGroupSize"
