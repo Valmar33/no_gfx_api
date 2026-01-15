@@ -17,8 +17,10 @@ Command_Buffer :: distinct Handle
 Queue :: distinct Handle
 Semaphore :: distinct Handle
 Shader :: distinct Handle
+BVH :: distinct Handle
 Texture_Descriptor :: struct { bytes: [4]u64 }
 Sampler_Descriptor :: struct { bytes: [2]u64 }
+BVH_Descriptor :: struct { bytes: [4]u64 }
 
 // Enums
 Allocation_Type :: enum { Default = 0, Descriptors }
@@ -40,9 +42,14 @@ Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil }
 Hazard_Flags :: bit_set[Hazard; u32]
 Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, All }
 Color_Component_Flag :: enum { R = 0, G = 1, B = 2, A = 3 }
-ColorComponentFlags :: distinct bit_set[Color_Component_Flag; u8]
+Color_Component_Flags :: distinct bit_set[Color_Component_Flag; u8]
 Filter :: enum { Linear = 0, Nearest }
 Address_Mode :: enum { Repeat = 0, Mirrored_Repeat, Clamp_To_Edge }
+BVH_Instance_Flag :: enum { Disable_Culling = 0, Flip_Facing = 1, Force_Opaque = 2, Force_Not_Opaque = 3 }
+BVH_Instance_Flags :: distinct bit_set[BVH_Instance_Flag; u32]
+BVH_Build_Hint :: enum { Default = 0, Prefer_Fast_Trace, Prefer_Fast_Build }
+BVH_Build_Capability :: enum { Update = 0, Compaction }
+BVH_Build_Capabilities :: distinct bit_set[BVH_Build_Capability; u32]
 
 // Constants
 All_Mips: u8 : max(u8)
@@ -125,7 +132,8 @@ Blend_State :: struct
     color_write_mask: u8,
 }
 
-Draw_Indexed_Indirect_Command :: struct {
+Draw_Indexed_Indirect_Command :: struct
+{
     index_count: u32,
     instance_count: u32,
     first_index: u32,
@@ -133,10 +141,49 @@ Draw_Indexed_Indirect_Command :: struct {
     first_instance: u32,
 }
 
-Dispatch_Indirect_Command :: struct {
+Dispatch_Indirect_Command :: struct
+{
     num_groups_x: u32,
     num_groups_y: u32,
     num_groups_z: u32,
+}
+
+BVH_Instance :: struct
+{
+    transform: [3][4]f32,
+    using _: bit_field u32 {
+        custom_idx: u32 | 24,
+        mask:       u32 | 8,
+    },
+    using _: bit_field u32 {
+        _unused: u32 | 24,
+        flags:   BVH_Instance_Flag | 8,
+    },
+    blas: BVH,
+}
+
+BVH_Geometry_Desc :: struct
+{
+    // Number of coordinates supplied per vertex position. Remaining coordinates
+    // will be filled in like this: (x: 0, y: 0, z: 0, w: 1). Coordinates must be
+    // f32 values. 0 defaults to 3. Allowed range: [0, 4]
+    vertex_coord_count: u32,
+    vertex_stride: u32,
+    num_verts: u32,
+}
+
+BLAS_Desc :: struct
+{
+    hint: BVH_Build_Hint,
+    caps: BVH_Build_Capabilities,
+    geometries: []BVH_Geometry_Desc,
+}
+
+TLAS_Desc :: struct
+{
+    hint: BVH_Build_Hint,
+    caps: BVH_Build_Capabilities,
+    num_instances: u32,
 }
 
 // Procedures
@@ -182,6 +229,18 @@ get_queue: proc(queue_type: Queue_Type) -> Queue : _get_queue
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
+// Raytracing
+blas_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_size_and_align
+blas_create: proc(desc: BLAS_Desc, storage: rawptr) -> BVH : _blas_create
+blas_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_scratch_buffer_size_and_align
+//tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
+//tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
+//tlas_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_scratch_buffer_size_and_align
+//bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
+//bvh_create :: proc { blas_create, tlas_create }
+//bvh_scratch_buffer_size_and_align :: proc { blas_scratch_buffer_size_and_align, tlas_scratch_buffer_size_and_align }
+//get_bvh_descriptor_size: proc(bvh: BVH) -> u32 : _get_bvh_descriptor_size
+
 // Command buffer
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 
@@ -190,6 +249,7 @@ cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i6
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
 cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
+cmd_set_bvh_desc_heap: proc();
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -219,6 +279,8 @@ cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_ve
 cmd_draw_indexed_instanced_indirect_multi_data: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
                                                       indices: rawptr, arguments: rawptr, draw_count: rawptr, data_vertex_shared: rawptr,
                                                       data_pixel_shared: rawptr) : _cmd_draw_indexed_instanced_indirect_multi_data
+cmd_build_blas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, verts: rawptr, indices: rawptr);
+cmd_build_tlas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr);
 
 /////////////////////////
 // Userland Utilities
@@ -370,6 +432,39 @@ set_sampler_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Sample
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
+
+/*
+Owned_BVH :: struct
+{
+    handle: BVH,
+    mem: rawptr,
+}
+
+alloc_and_create_blas :: proc(desc: BLAS_Desc) -> Owned_BVH
+{
+    size, align := bvh_size_and_align(desc)
+    ptr := mem_alloc(size, align, .GPU)
+    bvh := bvh_create(desc, ptr)
+    return Owned_BVH { bvh, ptr }
+}
+
+alloc_and_create_tlas :: proc(desc: TLAS_Desc) -> Owned_BVH
+{
+    size, align := bvh_size_and_align(desc)
+    ptr := mem_alloc(size, align, .GPU)
+    bvh := bvh_create(desc, ptr)
+    return Owned_BVH { bvh, ptr }
+}
+
+alloc_and_create_bvh :: proc { alloc_and_create_blas, alloc_and_create_tlas }
+
+free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
+{
+    bvh_destroy(bvh.handle)
+    mem_free(bvh.mem)
+    bvh^ = {}
+}
+*/
 
 // Swapchain utils
 

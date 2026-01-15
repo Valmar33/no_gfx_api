@@ -1389,6 +1389,42 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
     sem^ = {}
 }
 
+// Raytracing
+_blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+{
+    return {}, {}
+}
+
+_blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
+{
+    return {}
+}
+
+_blas_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+{
+    return {}, {}
+}
+
+_tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+{
+    return {}, {}
+}
+
+_tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
+{
+    return {}
+}
+
+_tlas_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+{
+    return {}, {}
+}
+
+_get_bvh_descriptor_size :: proc(bvh: BVH) -> u32
+{
+    return {}
+}
+
 // Command buffer
 
 _get_queue :: proc(queue_type: Queue_Type) -> Queue
