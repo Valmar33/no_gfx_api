@@ -1391,7 +1391,7 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 // Raytracing
 _blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 {
-    return {}, {}
+    return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 1
 }
 
 _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
@@ -1399,9 +1399,9 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
     return {}
 }
 
-_blas_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+_blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 {
-    return {}, {}
+    return u64(get_vk_blas_size_info(desc).buildScratchSize), 1
 }
 
 _tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
@@ -1422,6 +1422,34 @@ _tlas_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, alig
 _get_bvh_descriptor_size :: proc(bvh: BVH) -> u32
 {
     return {}
+}
+
+_bvh_destroy :: proc(bvh: ^BVH)
+{
+    // TODO!
+    bvh^ = {}
+}
+
+@(private="file")
+get_vk_blas_size_info :: proc(desc: BLAS_Desc) -> vk.AccelerationStructureBuildSizesInfoKHR
+{
+    scratch, _ := acquire_scratch()
+
+    primitive_count := u32(0)
+    for shape in desc.shapes
+    {
+        switch s in shape
+        {
+            case BVH_Mesh_Desc: primitive_count += s.tri_count
+            case BVH_AABB_Desc: primitive_count += s.aabb_count
+        }
+    }
+
+    build_info := to_vk_blas_desc(desc, scratch)
+
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
+    vk.GetAccelerationStructureBuildSizesKHR(ctx.device, .DEVICE, &build_info, &primitive_count, &size_info)
+    return size_info
 }
 
 // Command buffer

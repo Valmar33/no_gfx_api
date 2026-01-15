@@ -1,0 +1,18 @@
+
+Data :: struct
+{
+    output_texture_id: textureid,
+    resolution: vec2,
+}
+
+main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
+{
+    if global_invocation_id.x < data.resolution.x
+    {
+        if global_invocation_id.y < data.resolution.y
+        {
+            color := vec4(1.0, 1.0, 1.0, 1.0);
+            imageStore(data.output_texture_id, global_invocation_id.xy, color);
+        }
+    }
+}
