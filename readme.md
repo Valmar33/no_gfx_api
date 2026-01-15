@@ -102,7 +102,24 @@ There are a few problems with building this API on top of Vulkan:
 2) Shader arguments are all passed via a single pointer. This prevents the prefetching discussed in the article from taking place, so I think shaders will in general be slightly slower.
 3) If you're trying to debug the examples using RenderDoc, and you can't, that's because debugging of descriptor buffers is simply broken on AMD due to a driver bug, and this project uses them. [The bug has been reported](https://github.com/baldurk/renderdoc/issues/2880) on July 2025, so you can either switch to an NVidia card or annoy AMD if you want this fixed (half joking).
 
-## Mockup Shading Language (MUSL)
+## Shaders
+
+It is possible to write shaders in any language that compiles to SPIR-V. no_gfx_api uses Scalar Vulkan layout which means that CPU and GPU memory layout for structures is the same. You need to have these exact bindings in your shader if you are not using MUSL or Slang:
+
+```glsl
+layout(set = 0, binding = 0) uniform texture2D texture_heap[];
+layout(set = 1, binding = 0) uniform image2D texture_heap_rw[];
+layout(set = 2, binding = 0) uniform sampler sampler_heap[];
+
+layout(push_constant, scalar) uniform Push
+{
+    uint64_t vert_data_buffer_device_address;
+    uint64_t frag_data_buffer_device_address;
+    uint64_t indirect_data_buffer_device_address;
+};
+```
+
+### Mockup Shading Language (MUSL)
 
 For fun, I also whipped up a quick prototype of a shading language with decent pointer syntax:
 
@@ -135,6 +152,48 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
 
 The compiler itself just transpiles to GLSL.
 
+### Slang Shading Language
+
+[Slang](https://shader-slang.org/) comes bundled with Vulkan SDK so you probably already have `slangc` installed. Slang has plugins for various IDEs, including a language server. Make sure to include the `shared.slang` file in your shader. Make sure to compile your shaders with
+`-fvk-use-scalar-layout -force-glsl-scalar-layout` flags! Also make sure you have recent enough Vulkan SDK otherwise you might get validation errors from [this issue](https://github.com/shader-slang/slang/issues/8902). Look at `examples/build_shaders_slang.bat` for an example of how to build shaders with Slang.
+
+Using Slang with no_gfx_api is easy, you define your structs to match your CPU structs and then use the `GraphicsPipelineData` and `ComputePipelineData` to access your data like so.
+
+```slang
+import shared;
+
+struct Vertex
+{
+    float3 pos;
+    float3 color;
+}
+
+struct VertexData
+{
+    Vertex* verts;
+}
+
+struct VertexOutput
+{
+    float4 pos : SV_Position;
+    float4 color : TEXCOORD0;
+}
+
+[shader("vertex")]
+VertexOutput vertexMain(uint vert_id : SV_VertexID, GraphicsPipelineData<VertexData> data)
+{
+    VertexOutput vert_out;
+    vert_out.pos = float4(data.vert.verts[vert_id].pos, 1.0);
+    vert_out.color = float4(data.vert.verts[vert_id].color, 1.0);
+    return vert_out;
+}
+
+[shader("fragment")]
+float4 fragmentMain(float4 color : TEXCOORD0) : SV_Target
+{
+    return color;
+}
+```
 
 ## Building (Windows)
 
