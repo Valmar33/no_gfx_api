@@ -1,0 +1,313 @@
+
+package main
+
+import "../../gpu"
+import intr "base:intrinsics"
+import "base:runtime"
+import "core:fmt"
+import log "core:log"
+import "core:math"
+import "core:math/linalg"
+import "core:sync"
+import "core:thread"
+
+import sdl "vendor:sdl3"
+
+import shared "../shared"
+import gltf2 "../shared/gltf2"
+
+Start_Window_Size_X :: 1000
+Start_Window_Size_Y :: 1000
+Frames_In_Flight :: 3
+Example_Name :: "3D"
+
+Sponza_Scene :: #load("../shared/assets/sponza.glb")
+
+// Whether to load textures on background thread or preload them in main thread before running the screne
+Load_Textures_Async :: false
+
+main :: proc() {
+	fmt.println("Right-click + WASD for first-person controls.")
+
+	ok_i := sdl.Init({.VIDEO})
+	assert(ok_i)
+
+	console_logger := log.create_console_logger()
+	defer log.destroy_console_logger(console_logger)
+	context.logger = console_logger
+
+	ts_freq := sdl.GetPerformanceFrequency()
+	max_delta_time: f32 = 1.0 / 10.0 // 10fps
+
+	window_flags :: sdl.WindowFlags{.HIGH_PIXEL_DENSITY, .VULKAN, .RESIZABLE}
+	window := sdl.CreateWindow(
+		Example_Name,
+		Start_Window_Size_X,
+		Start_Window_Size_Y,
+		window_flags,
+	)
+	ensure(window != nil)
+
+	window_size_x := i32(Start_Window_Size_X)
+	window_size_y := i32(Start_Window_Size_Y)
+
+	gpu.init()
+	defer gpu.cleanup()
+
+	gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
+
+	depth_desc := gpu.Texture_Desc {
+		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
+		format       = .D32_Float,
+		mip_count    = 1,
+		layer_count  = 1,
+		sample_count = 1,
+		usage        = {.Depth_Stencil_Attachment},
+	}
+	depth_texture := gpu.alloc_and_create_texture(depth_desc)
+	defer gpu.free_and_destroy_texture(&depth_texture)
+
+	vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
+	frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
+	defer {
+		gpu.shader_destroy(&vert_shader)
+		gpu.shader_destroy(&frag_shader)
+	}
+
+	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
+	defer gpu.arena_destroy(&upload_arena)
+
+	queue := gpu.get_queue(.Main)
+
+	upload_cmd_buf := gpu.commands_begin(queue)
+
+	magenta_texture := shared.create_magenta_texture(&upload_arena, upload_cmd_buf)
+
+	// Set up texture heap
+	texture_heap := gpu.mem_alloc(
+		size_of(gpu.Texture_Descriptor) * 65536,
+		alloc_type = .Descriptors,
+	)
+	defer gpu.mem_free(texture_heap)
+	sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
+	defer gpu.mem_free(sampler_heap)
+
+	gpu.set_texture_desc(
+		texture_heap,
+		shared.MISSING_TEXTURE_ID,
+		gpu.texture_view_descriptor(magenta_texture, {format = .RGBA8_Unorm}),
+	)
+
+	scene, texture_infos, gltf_data := shared.load_scene_gltf(
+		Sponza_Scene,
+		&upload_arena,
+		upload_cmd_buf,
+	)
+	defer {
+		shared.destroy_scene(&scene)
+		gltf2.unload(gltf_data)
+		gpu.free_and_destroy_texture(&magenta_texture)
+	}
+
+	loader_data := Texture_Loader_Data {
+		texture_infos = texture_infos,
+		gltf_data     = gltf_data,
+		meshes        = &scene.meshes,
+		texture_heap  = texture_heap,
+		textures      = {},
+		done          = false,
+	}
+
+
+	texture_loader_thread: ^thread.Thread
+	if Load_Textures_Async {
+		texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
+			data := cast(^Texture_Loader_Data)thread.data
+			texture_loader(data)
+		}
+
+		texture_loader_thread := thread.create(texture_loader_thread_proc)
+		texture_loader_thread.data = &loader_data
+		thread.start(texture_loader_thread)
+		defer thread.destroy(texture_loader_thread)
+	} else {
+		texture_loader(&loader_data)
+	}
+
+	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
+
+	gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
+	gpu.queue_submit(queue, {upload_cmd_buf})
+
+	now_ts := sdl.GetPerformanceCounter()
+
+	frame_arenas: [Frames_In_Flight]gpu.Arena
+	for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(10 * 1024 * 1024)
+	defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
+	next_frame := u64(1)
+	frame_sem := gpu.semaphore_create(0)
+	defer gpu.semaphore_destroy(&frame_sem)
+	for true {
+		proceed := shared.handle_window_events(window)
+		if !proceed do break
+
+		old_window_size_x := window_size_x
+		old_window_size_y := window_size_y
+		sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+		if .MINIMIZED in sdl.GetWindowFlags(window) || window_size_x <= 0 || window_size_y <= 0 {
+			sdl.Delay(16)
+			continue
+		}
+
+		if next_frame > Frames_In_Flight {
+			gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
+		}
+		if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
+			gpu.queue_wait_idle(queue)
+			gpu.swapchain_resize()
+			depth_desc.dimensions.x = u32(window_size_x)
+			depth_desc.dimensions.y = u32(window_size_y)
+			gpu.free_and_destroy_texture(&depth_texture)
+			depth_texture = gpu.alloc_and_create_texture(depth_desc)
+		}
+
+		last_ts := now_ts
+		now_ts = sdl.GetPerformanceCounter()
+		delta_time := min(
+			max_delta_time,
+			f32(f64((now_ts - last_ts) * 1000) / f64(ts_freq)) / 1000.0,
+		)
+
+		world_to_view := shared.first_person_camera_view(delta_time)
+		aspect_ratio := f32(window_size_x) / f32(window_size_y)
+		view_to_proj := linalg.matrix4_perspective_f32(
+			math.RAD_PER_DEG * 59.0,
+			aspect_ratio,
+			0.1,
+			1000.0,
+			false,
+		)
+
+		frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
+
+		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
+
+		cmd_buf := gpu.commands_begin(queue)
+		gpu.cmd_begin_render_pass(
+			cmd_buf,
+			{
+				color_attachments = {{texture = swapchain, clear_color = {0.7, 0.7, 0.7, 1.0}}},
+				depth_attachment = gpu.Render_Attachment {
+					texture = depth_texture,
+					clear_color = 1.0,
+				},
+			},
+		)
+		gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
+
+		// Set texture and sampler heaps
+		textures_ptr := gpu.host_to_device_ptr(texture_heap)
+		samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
+		gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, nil, samplers_ptr)
+
+		gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
+
+		for instance in scene.instances {
+			mesh := scene.meshes[instance.mesh_idx]
+
+			Vert_Data :: struct #all_or_none {
+				positions:             rawptr,
+				normals:               rawptr,
+				model_to_world:        [16]f32,
+				model_to_world_normal: [16]f32,
+				world_to_view:         [16]f32,
+				view_to_proj:          [16]f32,
+			}
+			#assert(size_of(Vert_Data) == 8 + 8 + 64 + 64 + 64 + 64)
+			verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
+			verts_data.cpu^ = {
+				positions             = mesh.pos,
+				normals               = mesh.normals,
+				model_to_world        = intr.matrix_flatten(instance.transform),
+				model_to_world_normal = intr.matrix_flatten(
+					linalg.transpose(linalg.inverse(instance.transform)),
+				),
+				world_to_view         = intr.matrix_flatten(world_to_view),
+				view_to_proj          = intr.matrix_flatten(view_to_proj),
+			}
+
+			Frag_Data :: struct #all_or_none {
+				base_color_map:         u32,
+				metallic_roughness_map: u32,
+				normal_map:             u32,
+				sampler:                u32,
+			}
+			frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
+			frag_data.cpu^ = {
+				base_color_map         = mesh.base_color_map,
+				metallic_roughness_map = mesh.metallic_roughness_map,
+				normal_map             = mesh.normal_map,
+				sampler                = 0,
+			}
+
+			gpu.cmd_draw_indexed_instanced(
+				cmd_buf,
+				verts_data.gpu,
+				frag_data.gpu,
+				mesh.indices,
+				mesh.idx_count,
+				1,
+			)
+		}
+
+		gpu.cmd_end_render_pass(cmd_buf)
+		gpu.queue_submit(queue, {cmd_buf}, frame_sem, next_frame)
+
+		gpu.swapchain_present(queue, frame_sem, next_frame)
+		next_frame += 1
+
+		gpu.arena_free_all(frame_arena)
+	}
+
+	if Load_Textures_Async {
+		thread.join(texture_loader_thread)
+	}
+
+	gpu.wait_idle()
+
+	// Clean up loaded textures
+	sync.mutex_lock(&loader_data.mutex)
+	for &tex in loader_data.textures {
+		gpu.free_and_destroy_texture(&tex)
+	}
+	sync.mutex_unlock(&loader_data.mutex)
+}
+
+// Thread data for async texture loading
+Texture_Loader_Data :: struct {
+	texture_infos: []shared.Texture_Upload_Info,
+	gltf_data:     ^gltf2.Data,
+	meshes:        ^[dynamic]shared.Mesh,
+	texture_heap:  rawptr,
+	textures:      [dynamic]gpu.Owned_Texture,
+	mutex:         sync.Mutex,
+	done:          bool,
+}
+
+texture_loader :: proc(data: ^Texture_Loader_Data) {
+	loaded_textures := shared.load_textures_from_info(
+		data.texture_infos,
+		data.gltf_data,
+		data.meshes,
+		data.texture_heap,
+	)
+
+	// Store results - convert slice to dynamic array
+	sync.mutex_lock(&data.mutex)
+	data.textures = {}
+	for tex in loaded_textures {
+		append(&data.textures, tex)
+	}
+	data.done = true
+	sync.mutex_unlock(&data.mutex)
+}

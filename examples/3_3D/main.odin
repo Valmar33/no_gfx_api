@@ -5,7 +5,7 @@ import log "core:log"
 import "../../gpu"
 import "core:math"
 import "core:math/linalg"
-import "gltf2"
+import "../shared/gltf2"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
@@ -18,7 +18,7 @@ Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
 Example_Name :: "3D"
 
-Sponza_Scene :: #load("assets/sponza.glb")
+Sponza_Scene :: #load("../shared/assets/sponza.glb")
 
 main :: proc()
 {
