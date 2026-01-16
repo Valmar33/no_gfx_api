@@ -200,6 +200,7 @@ load_textures_from_info :: proc(
 				data,
 				&upload_arena,
 				upload_cmd_buf,
+				transfer_queue,
 			)
 
 			queue.push(
@@ -218,13 +219,13 @@ load_textures_from_info :: proc(
 
 			texture_idx += 1
 		}
-
+		
 		gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
 
 		gpu.queue_submit(transfer_queue, {upload_cmd_buf})
 
 		gpu.queue_wait_idle(transfer_queue)
-
+		
 		gpu.arena_free_all(&upload_arena)
 
 		for submitted_uploads_queue.len > 0 {
@@ -256,6 +257,9 @@ load_texture_from_gltf :: proc(
 	data: ^gltf2.Data,
 	upload_arena: ^gpu.Arena,
 	cmd_buf: gpu.Command_Buffer,
+	queue: gpu.Queue = nil,
+	upload_semaphore: gpu.Semaphore = {},
+	semaphore_value: u64 = 0,
 ) -> gpu.Owned_Texture {
 	image_bytes: []byte
 
@@ -327,6 +331,9 @@ load_texture_from_gltf :: proc(
 			format = .RGBA8_Unorm,
 			usage = {.Sampled},
 		},
+		queue,
+		upload_semaphore,
+		semaphore_value,
 	)
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
 	return texture

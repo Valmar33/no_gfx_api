@@ -158,7 +158,7 @@ host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr  // Only s
 
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
-texture_create: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
+texture_create: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
 texture_destroy: proc(texture: ^Texture) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
 texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_rw_view_descriptor
@@ -332,11 +332,11 @@ Owned_Texture :: struct
     mem: rawptr,
 }
 
-alloc_and_create_texture :: proc(desc: Texture_Desc, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
+alloc_and_create_texture :: proc(desc: Texture_Desc, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
 {
     size, align := texture_size_and_align(desc)
     ptr := mem_alloc(size, align, .GPU)
-    texture := texture_create(desc, ptr, signal_sem, signal_value)
+    texture := texture_create(desc, ptr, queue, signal_sem, signal_value)
     return Owned_Texture { texture, ptr }
 }
 
