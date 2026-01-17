@@ -596,7 +596,7 @@ _init :: proc()
         vk_dll_path: string
         when ODIN_OS == .Windows {
             vk_dll_path = "vulkan-1.dll"
-        } else when ODIN_OS == .Open_BSD || ODIN_OS == .Net_BSD {
+        } else when ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
             vk_dll_path = "libvulkan.so"
         } else when ODIN_OS == .Linux {
             vk_dll_path = "libvulkan.so.1"
