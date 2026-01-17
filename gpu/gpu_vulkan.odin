@@ -7,8 +7,8 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
+import "core:dynlib"
 
-import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import "vma"
 
@@ -152,7 +152,7 @@ _init :: proc()
     scratch, _ := acquire_scratch()
 
     // Load vulkan function pointers
-    vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
+    vk.load_proc_addresses_global(cast(rawptr) get_instance_proc_address)
 
     vk_logger = context.logger
 
@@ -169,14 +169,20 @@ _init :: proc()
             layers := []cstring {}
         }
 
-        count: u32
-        instance_extensions := sdl.Vulkan_GetInstanceExtensions(&count)
-        extensions := slice.concatenate([][]cstring {
-            instance_extensions[:count],
-            {
-                vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
+        required_extensions := make([dynamic]cstring, allocator = scratch)
+        append(&required_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        append(&required_extensions, vk.KHR_SURFACE_EXTENSION_NAME)
+
+        optional_extensions := make([dynamic]cstring, allocator = scratch)
+        append(&optional_extensions, "VK_KHR_win32_surface")
+        append(&optional_extensions, "VK_KHR_wayland_surface")
+        append(&optional_extensions, "VK_KHR_xlib_surface")
+
+        for opt in optional_extensions {
+            if supports_instance_extension(opt) {
+                append(&required_extensions, opt)
             }
-        }, allocator = scratch)
+        }
 
         debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
             sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -215,8 +221,8 @@ _init :: proc()
             },
             enabledLayerCount = u32(len(layers)),
             ppEnabledLayerNames = raw_data(layers),
-            enabledExtensionCount = u32(len(extensions)),
-            ppEnabledExtensionNames = raw_data(extensions),
+            enabledExtensionCount = u32(len(required_extensions)),
+            ppEnabledExtensionNames = raw_data(required_extensions),
             pNext = next,
         }, nil, &ctx.instance))
 
@@ -581,6 +587,55 @@ _init :: proc()
         vulkan_functions = &vma_vulkan_procs,
     }, &ctx.vma_allocator)
     assert(ok_vma == .SUCCESS)
+
+    // From GLFW: https://github.com/glfw/glfw
+    get_instance_proc_address :: proc "c"(p: rawptr, name: cstring) -> rawptr
+    {
+        context = runtime.default_context()
+
+        vk_dll_path: string
+        when ODIN_OS == .Windows {
+            vk_dll_path = "vulkan-1.dll"
+        } else when ODIN_OS == .Open_BSD || ODIN_OS == .Net_BSD {
+            vk_dll_path = "libvulkan.so"
+        } else when ODIN_OS == .Linux {
+            vk_dll_path = "libvulkan.so.1"
+        } else do #panic("OS not supported!")
+
+        @(static) vk_dll: dynlib.Library
+        if vk_dll == nil
+        {
+            did_load: bool
+            vk_dll, did_load = dynlib.load_library(vk_dll_path, allocator = context.allocator)
+            vk.GetInstanceProcAddr = auto_cast dynlib.symbol_address(vk_dll, "vkGetInstanceProcAddr", allocator = context.allocator)
+            assert(did_load)
+        }
+
+        // NOTE: Vulkan 1.0 and 1.1 vkGetInstanceProcAddr cannot return itself
+        if name == "vkGetInstanceProcAddr" do return auto_cast vk.GetInstanceProcAddr
+
+        addr := vk.GetInstanceProcAddr(auto_cast p, name);
+        if addr == nil {
+            addr = auto_cast dynlib.symbol_address(vk_dll, string(name), allocator = context.allocator)
+        }
+        return auto_cast addr
+    }
+
+    supports_instance_extension :: proc(name: cstring) -> bool
+    {
+        count: u32;
+        vk_check(vk.EnumerateInstanceExtensionProperties(nil, &count, nil))
+
+        available_extensions := make([]vk.ExtensionProperties, count)
+        defer delete(available_extensions)
+        vk_check(vk.EnumerateInstanceExtensionProperties(nil, &count, raw_data(available_extensions)))
+
+        for &available in available_extensions {
+            if name == cstring(&available.extensionName[0]) do return true
+        }
+
+        return false
+    }
 }
 
 _cleanup :: proc()
