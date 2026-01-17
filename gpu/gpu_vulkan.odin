@@ -677,7 +677,12 @@ _swapchain_init :: proc(surface: vk.SurfaceKHR, frames_in_flight: u32)
 {
     ctx.frames_in_flight = frames_in_flight
     ctx.surface = surface
-    recreate_swapchain()
+
+    surface_caps: vk.SurfaceCapabilitiesKHR
+    vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phys_device, ctx.surface, &surface_caps))
+    extent := surface_caps.currentExtent
+
+    ctx.swapchain = create_swapchain(max(extent.width, 1), max(extent.height, 1), ctx.frames_in_flight)
 }
 
 _swapchain_resize :: proc()
