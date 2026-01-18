@@ -145,8 +145,8 @@ Dispatch_Indirect_Command :: struct {
 init: proc() : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
-swapchain_init: proc(surface: vk.SurfaceKHR, frames_in_flight: u32) : _swapchain_init
-swapchain_resize: proc() : _swapchain_resize  // NOTE: Do not call this every frame! Only if the dimensions change.
+swapchain_init: proc(surface: vk.SurfaceKHR, init_size: [2]u32, frames_in_flight: u32) : _swapchain_init
+swapchain_resize: proc(size: [2]u32) : _swapchain_resize  // NOTE: Do not call this every frame! Only if the dimensions change.
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
 // TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
@@ -376,5 +376,8 @@ swapchain_init_from_sdl :: proc(window: ^sdl.Window, frames_in_flight: u32)
     ok := sdl.Vulkan_CreateSurface(window, get_vulkan_instance(), nil, &vk_surface)
     ensure(ok, "Could not create surface.")
 
-    swapchain_init(vk_surface, frames_in_flight)
+    window_size_x: i32
+    window_size_y: i32
+    sdl.GetWindowSize(window, &window_size_x, &window_size_y)
+    swapchain_init(vk_surface, { u32(max(0, window_size_x)), u32(max(0, window_size_y)) }, frames_in_flight)
 }

@@ -673,32 +673,44 @@ _wait_idle :: proc()
     vk.DeviceWaitIdle(ctx.device)
 }
 
-_swapchain_init :: proc(surface: vk.SurfaceKHR, frames_in_flight: u32)
+_swapchain_init :: proc(surface: vk.SurfaceKHR, init_size: [2]u32, frames_in_flight: u32)
 {
     ctx.frames_in_flight = frames_in_flight
     ctx.surface = surface
 
+    // NOTE: surface_caps.currentExtent could be max(u32)!!!
     surface_caps: vk.SurfaceCapabilitiesKHR
     vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phys_device, ctx.surface, &surface_caps))
     extent := surface_caps.currentExtent
+    if extent.width == max(u32) || extent.height == max(u32) {
+        extent.width = init_size[0]
+        extent.height = init_size[1]
+    }
+    assert(extent.width != max(u32) && extent.height != max(u32))
 
     ctx.swapchain = create_swapchain(max(extent.width, 1), max(extent.height, 1), ctx.frames_in_flight)
 }
 
-_swapchain_resize :: proc()
+_swapchain_resize :: proc(size: [2]u32)
 {
     queue_wait_idle(get_queue(.Main))
-    recreate_swapchain()
+    recreate_swapchain(size)
 }
 
 @(private="file")
-recreate_swapchain :: proc()
+recreate_swapchain :: proc(size: [2]u32)
 {
     destroy_swapchain(&ctx.swapchain)
 
+    // NOTE: surface_caps.currentExtent could be max(u32)!!!
     surface_caps: vk.SurfaceCapabilitiesKHR
     vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phys_device, ctx.surface, &surface_caps))
     extent := surface_caps.currentExtent
+    if extent.width == max(u32) || extent.height == max(u32) {
+        extent.width = size[0]
+        extent.height = size[1]
+    }
+    assert(extent.width != max(u32) && extent.height != max(u32))
 
     ctx.swapchain = create_swapchain(max(extent.width, 1), max(extent.height, 1), ctx.frames_in_flight)
 }

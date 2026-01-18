@@ -179,7 +179,7 @@ main :: proc()
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
             gpu.queue_wait_idle(queue)
-            gpu.swapchain_resize()
+            gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
 
             output_desc.dimensions.x = u32(window_size_x)
             output_desc.dimensions.y = u32(window_size_y)
