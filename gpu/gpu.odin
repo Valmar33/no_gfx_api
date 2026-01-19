@@ -48,8 +48,8 @@ Color_Component_Flags :: distinct bit_set[Color_Component_Flag; u8]
 Filter :: enum { Linear = 0, Nearest }
 Address_Mode :: enum { Repeat = 0, Mirrored_Repeat, Clamp_To_Edge }
 BVH_Instance_Flag :: enum { Disable_Culling = 0, Flip_Facing = 1, Force_Opaque = 2, Force_Not_Opaque = 3 }
-BVH_Opacity :: enum { Fully_Opaque = 0, Transparent }
 BVH_Instance_Flags :: distinct bit_set[BVH_Instance_Flag; u32]
+BVH_Opacity :: enum { Fully_Opaque = 0, Transparent }
 BVH_Hint :: enum { Default = 0, Prefer_Fast_Trace, Prefer_Fast_Build, Prefer_Low_Memory }
 BVH_Capability :: enum { Update = 0, Compaction }
 BVH_Capabilities :: distinct bit_set[BVH_Capability; u32]
@@ -153,7 +153,7 @@ Dispatch_Indirect_Command :: struct
 
 BVH_Instance :: struct
 {
-    transform: [3][4]f32,
+    transform: [12]f32,  // Row-major 3x4 matrix!
     using _: bit_field u32 {
         custom_idx: u32 | 24,
         mask:       u32 | 8,
@@ -162,7 +162,7 @@ BVH_Instance :: struct
         _unused: u32 | 24,
         flags:   BVH_Instance_Flag | 8,
     },
-    blas: BVH,
+    blas: rawptr,
 }
 
 BVH_Mesh_Desc :: struct
@@ -180,9 +180,9 @@ BVH_AABB_Desc :: struct
 }
 BVH_Shape_Desc :: union { BVH_Mesh_Desc, BVH_AABB_Desc }
 
-BVH_Mesh :: struct { verts: rawptr, indices: rawptr }
-BVH_AABB :: struct { data: rawptr }
-BVH_Shape :: union { BVH_Mesh, BVH_AABB }
+BVH_Mesh  :: struct { verts: rawptr, indices: rawptr }
+BVH_AABBs :: struct { data: rawptr }
+BVH_Shape :: union { BVH_Mesh, BVH_AABBs }
 
 BLAS_Desc :: struct
 {
@@ -246,7 +246,7 @@ blas_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_si
 blas_create: proc(desc: BLAS_Desc, storage: rawptr) -> BVH : _blas_create
 blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
 //blas_update_scratch_buffer_size_and_align
-//tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
+tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
 //tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
 //tlas_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_scratch_buffer_size_and_align
 bvh_size_and_align :: proc { blas_size_and_align /*, tlas_size_and_align*/ }
@@ -263,7 +263,7 @@ cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i6
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
 cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
-cmd_set_bvh_desc_heap: proc();
+cmd_set_bvh_desc_heap: proc(cmd_buf: Command_Buffer, bvhs: rawptr) : _cmd_set_bvh_desc_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -291,8 +291,8 @@ cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data: 
 cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
                                                  indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr) : _cmd_draw_indexed_instanced_indirect_multi
 
-cmd_build_blas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape);
-cmd_build_tlas: proc(bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr);
+cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape) : _cmd_build_blas
+cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr) : _cmd_build_tlas
 
 /////////////////////////
 // Userland Utilities
@@ -480,8 +480,20 @@ free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
     bvh^ = {}
 }
 
-alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr { return nil }
-alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr { return nil }
+alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
+{
+    size, align := blas_size_and_align(desc)
+    cpu, gpu := arena_alloc_untyped(arena, size, align)
+    return gpu
+}
+
+alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
+{
+    size, align := tlas_size_and_align(desc)
+    cpu, gpu := arena_alloc_untyped(arena, size, align)
+    return gpu
+}
+
 alloc_bvh_build_scratch_buffer :: proc { alloc_blas_build_scratch_buffer, alloc_tlas_build_scratch_buffer }
 
 // Swapchain utils

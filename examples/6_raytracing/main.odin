@@ -5,6 +5,7 @@ import log "core:log"
 import "core:math"
 import "core:math/linalg"
 import "base:runtime"
+import intr "base:intrinsics"
 
 import "../../gpu"
 
@@ -41,7 +42,7 @@ main :: proc()
     window_size_x := i32(Start_Window_Size_X)
     window_size_y := i32(Start_Window_Size_Y)
 
-    gpu.init()
+    gpu.init(features = { .Raytracing })
     defer gpu.cleanup()
 
     gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
@@ -59,7 +60,7 @@ main :: proc()
 
     upload_arena := gpu.arena_init(1024 * 1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
-    bvh_scratch_arena := gpu.arena_init(1024 * 1024 * 1024)
+    bvh_scratch_arena := gpu.arena_init(1024 * 1024 * 1024, .GPU)
     defer gpu.arena_destroy(&bvh_scratch_arena)
 
     // Create a texture for the compute shader to write to
@@ -311,14 +312,14 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
         shapes = {
             gpu.BVH_Mesh_Desc {
                 vertex_stride = 12,
-                max_vertex = tri_count * 3,  // TODO
+                max_vertex = tri_count * 3,
                 tri_count = tri_count,
             }
         }
     }
     bvh := gpu.alloc_and_create_bvh(desc)
     scratch := gpu.alloc_bvh_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_blas(bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions, indices = indices } })
+    gpu.cmd_build_blas(cmd_buf, bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions, indices = indices } })
     return bvh
 }
 
@@ -330,13 +331,26 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     }
     bvh := gpu.alloc_and_create_bvh(desc)
     scratch := gpu.alloc_bvh_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_tlas(bvh, bvh.mem, scratch, instances)
+    gpu.cmd_build_tlas(cmd_buf, bvh, bvh.mem, scratch, instances)
     return {}
 }
 
-upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []Instance) -> rawptr
+upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, scene: Scene) -> rawptr
 {
-    return nil
+    instances_staging := gpu.arena_alloc_array(upload_arena, gpu.BVH_Instance, len(scene.instances))
+    for &instance, i in instances_staging.cpu
+    {
+        transform_row_major := intr.transpose(scene.instances[i].transform)
+        flattened := linalg.matrix_flatten(transform_row_major)
+        gpu_transform := flattened[:12]
+        instance = {
+            transform = {},
+            blas = scene.meshes[scene.instances[i].mesh_idx].bvh.mem,
+        }
+    }
+    instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(scene.instances))
+    gpu.cmd_mem_copy(cmd_buf, instances_staging.gpu, instances_local, len(instances_staging.cpu))
+    return instances_local
 }
 
 /////////////////////////////////////////
@@ -637,18 +651,20 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
     gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
     for &mesh in meshes {
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count / 3)
+        break
     }
 
     gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
 
-    tlas := build_tlas(upload_arena, cmd_buf, {}, u32(len(instances)))  // TODO: Upload instances!
 
-    gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
+    //tlas := build_tlas(upload_arena, cmd_buf, {}, u32(len(instances)))  // TODO: Upload instances!
+
+    //gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
 
     return {
         instances = instances,
         meshes = meshes,
-        bvh = tlas,
+        //bvh = tlas,
     }
 }
 

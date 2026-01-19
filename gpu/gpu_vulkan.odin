@@ -85,6 +85,7 @@ Context :: struct
     cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
     cmd_bufs_timelines: [Queue_Type][10]Timeline,
     samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
+    bvhs: Pool(BVH_Info),
 
     // Swapchain
     swapchain: Swapchain,
@@ -99,6 +100,16 @@ Context :: struct
     // Shader metadata
     current_workgroup_size: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
     cmd_buf_compute_shader: map[Command_Buffer]Shader,  // Tracks current compute shader per command buffer
+}
+
+@(private="file")
+BVH_Info :: struct
+{
+    handle: vk.AccelerationStructureKHR,
+    is_blas: bool,
+    shapes: [dynamic]BVH_Shape_Desc,  // Only used if BLAS.
+    blas_desc: BLAS_Desc,
+    tlas_desc: TLAS_Desc,
 }
 
 @(private="file")
@@ -325,71 +336,84 @@ _init :: proc(features := Features {})
     }
 
     // Device
-    device_extensions := []cstring {
-        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
-        vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
-        vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
-    }
-
-    next: rawptr
-    next = &vk.PhysicalDeviceVulkan12Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        pNext = next,
-        runtimeDescriptorArray = true,
-        shaderSampledImageArrayNonUniformIndexing = true,
-        timelineSemaphore = true,
-        bufferDeviceAddress = true,
-        drawIndirectCount = true,
-        scalarBlockLayout = true,
-    }
-    next = &vk.PhysicalDeviceVulkan11Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-        pNext = next,
-        shaderDrawParameters = true,
-    }
-    next = &vk.PhysicalDeviceVulkan13Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        pNext = next,
-        dynamicRendering = true,
-        synchronization2 = true,
-    }
-    next = &vk.PhysicalDeviceDescriptorBufferFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-        pNext = next,
-        descriptorBuffer = true,
-    }
-    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        pNext = next,
-        shaderObject = true,
-    }
-    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
-        pNext = next,
-        depthClipEnable = true,
-    }
-    next = &vk.PhysicalDeviceFeatures2 {
-        sType = .PHYSICAL_DEVICE_FEATURES_2,
-        pNext = next,
-        features = {
-            shaderInt64 = true,
-            vertexPipelineStoresAndAtomics = true,
+    {
+        required_extensions := make([dynamic]cstring)
+        append(&required_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+        append(&required_extensions, vk.EXT_SHADER_OBJECT_EXTENSION_NAME)
+        append(&required_extensions, vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)
+        append(&required_extensions, vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)
+        if .Raytracing in features
+        {
+            append(&required_extensions, vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+            append(&required_extensions, vk.KHR_RAY_QUERY_EXTENSION_NAME)
+            append(&required_extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
         }
-    }
 
-    device_ci := vk.DeviceCreateInfo {
-        sType = .DEVICE_CREATE_INFO,
-        pNext = next,
-        queueCreateInfoCount = u32(len(queue_create_infos)),
-        pQueueCreateInfos = raw_data(queue_create_infos),
-        enabledExtensionCount = u32(len(device_extensions)),
-        ppEnabledExtensionNames = raw_data(device_extensions),
-    }
-    vk_check(vk.CreateDevice(ctx.phys_device, &device_ci, nil, &ctx.device))
+        next: rawptr
+        next = &vk.PhysicalDeviceVulkan12Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            pNext = next,
+            runtimeDescriptorArray = true,
+            shaderSampledImageArrayNonUniformIndexing = true,
+            timelineSemaphore = true,
+            bufferDeviceAddress = true,
+            drawIndirectCount = true,
+            scalarBlockLayout = true,
+        }
+        next = &vk.PhysicalDeviceVulkan11Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            pNext = next,
+            shaderDrawParameters = true,
+        }
+        next = &vk.PhysicalDeviceVulkan13Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            pNext = next,
+            dynamicRendering = true,
+            synchronization2 = true,
+        }
+        next = &vk.PhysicalDeviceDescriptorBufferFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+            pNext = next,
+            descriptorBuffer = true,
+        }
+        next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+            pNext = next,
+            shaderObject = true,
+        }
+        next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
+            pNext = next,
+            depthClipEnable = true,
+        }
+        next = &vk.PhysicalDeviceFeatures2 {
+            sType = .PHYSICAL_DEVICE_FEATURES_2,
+            pNext = next,
+            features = {
+                shaderInt64 = true,
+                vertexPipelineStoresAndAtomics = true,
+            }
+        }
+        raytracing_features := &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            pNext = next,
+            accelerationStructure = true,
+        }
+        if .Raytracing in features do next = raytracing_features
 
-    vk.load_proc_addresses_device(ctx.device)
-    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+        device_ci := vk.DeviceCreateInfo {
+            sType = .DEVICE_CREATE_INFO,
+            pNext = next,
+            queueCreateInfoCount = u32(len(queue_create_infos)),
+            pQueueCreateInfos = raw_data(queue_create_infos),
+            enabledExtensionCount = u32(len(required_extensions)),
+            ppEnabledExtensionNames = raw_data(required_extensions),
+        }
+        vk_check(vk.CreateDevice(ctx.phys_device, &device_ci, nil, &ctx.device))
+
+        vk.load_proc_addresses_device(ctx.device)
+        if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+    }
 
     // Command buffers
     for type in Queue_Type
@@ -553,6 +577,7 @@ _init :: proc(features := Features {})
     // Resource pools
     // NOTE: Reserve slot 0 for all resources as key 0 is invalid.
     pool_append(&ctx.textures, Texture_Info {})
+    pool_append(&ctx.bvhs, BVH_Info {})
 
     // Tree init
     rbt.init_cmp(&ctx.alloc_tree, proc(range_a: Alloc_Range, range_b: Alloc_Range) -> rbt.Ordering {
@@ -832,7 +857,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
     {
         case .Default:
         {
-            buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER }
+            buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER, .ACCELERATION_STRUCTURE_STORAGE_KHR, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
             if mem_type == .GPU {
                 buf_usage += { .INDEX_BUFFER }
             }
@@ -1396,7 +1421,35 @@ _blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 
 _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
 {
-    return {}
+    storage_buf, storage_offset, ok_s := compute_buf_offset_from_gpu_ptr(storage)
+    if !ok_s
+    {
+        log.error("Alloc not found.")
+        return {}
+    }
+
+    size_info := get_vk_blas_size_info(desc)
+
+    bvh_handle: vk.AccelerationStructureKHR
+    blas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = storage_buf,
+        offset = vk.DeviceSize(storage_offset),
+        size = size_info.accelerationStructureSize,
+        type = .BOTTOM_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &blas_ci, nil, &bvh_handle))
+
+    new_desc := desc
+    cloned_shapes := slice.clone_to_dynamic(new_desc.shapes)
+    new_desc.shapes = cloned_shapes[:]
+    bvh_info := BVH_Info {
+        handle = bvh_handle,
+        is_blas = true,
+        shapes = cloned_shapes,
+        blas_desc = desc,
+    }
+    return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
 }
 
 _blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
@@ -1435,20 +1488,20 @@ get_vk_blas_size_info :: proc(desc: BLAS_Desc) -> vk.AccelerationStructureBuildS
 {
     scratch, _ := acquire_scratch()
 
-    primitive_count := u32(0)
-    for shape in desc.shapes
+    primitive_counts := make([]u32, len(desc.shapes), allocator = scratch)
+    for shape, i in desc.shapes
     {
         switch s in shape
         {
-            case BVH_Mesh_Desc: primitive_count += s.tri_count
-            case BVH_AABB_Desc: primitive_count += s.aabb_count
+            case BVH_Mesh_Desc: primitive_counts[i] = s.tri_count
+            case BVH_AABB_Desc: primitive_counts[i] = s.aabb_count
         }
     }
 
     build_info := to_vk_blas_desc(desc, scratch)
 
     size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
-    vk.GetAccelerationStructureBuildSizesKHR(ctx.device, .DEVICE, &build_info, &primitive_count, &size_info)
+    vk.GetAccelerationStructureBuildSizesKHR(ctx.device, .DEVICE, &build_info, raw_data(primitive_counts), &size_info)
     return size_info
 }
 
@@ -1655,6 +1708,11 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 2, 1, &cursor, &buffer_offsets[2])
         cursor += 1
     }
+}
+
+_cmd_set_bvh_desc_heap :: proc(cmd_buf: Command_Buffer, bvhs: rawptr)
+{
+
 }
 
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {})
@@ -2010,6 +2068,79 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     }
 
     vk.CmdDrawIndexedIndirectCount(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), draw_count_buf, vk.DeviceSize(draw_count_offset), max_draw_count, stride)
+}
+
+_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape)
+{
+    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    if !bvh_info.is_blas
+    {
+        log.error("This BVH is not a BLAS.")
+        return
+    }
+
+    if len(shapes) != len(bvh_info.blas_desc.shapes)
+    {
+        log.error("Length used in the shapes argument and length used in the shapes supplied during the creation of this BVH don't match.")
+        return
+    }
+
+    // TODO: Check for mismatching types.
+    for shape, i in shapes
+    {
+        switch s in shape
+        {
+            case BVH_Mesh: {}
+            case BVH_AABBs: {}
+        }
+    }
+
+    scratch, _ := acquire_scratch()
+
+    build_info := to_vk_blas_desc(bvh_info.blas_desc, arena = scratch)
+    build_info.dstAccelerationStructure = bvh_info.handle
+    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage
+    assert(u32(len(shapes)) == build_info.geometryCount)
+
+    range_infos := make([]vk.AccelerationStructureBuildRangeInfoKHR, len(shapes), allocator = scratch)
+
+    // Fill in actual data in shapes
+    for i in 0..<build_info.geometryCount
+    {
+        range_infos[i] = {
+            // primitiveCount = primitive_count,
+            primitiveOffset = 0,
+            firstVertex = 0,
+            transformOffset = 0,
+        }
+
+        geom := &build_info.pGeometries[i]
+        switch s in shapes[i]
+        {
+            case BVH_Mesh:
+            {
+                geom.geometry.triangles.vertexData.deviceAddress = transmute(vk.DeviceAddress) s.verts
+                geom.geometry.triangles.indexData.deviceAddress = transmute(vk.DeviceAddress) s.indices
+                range_infos[i].primitiveCount = bvh_info.blas_desc.shapes[i].(BVH_Mesh_Desc).tri_count
+            }
+            case BVH_AABBs:
+            {
+                // TODO
+            }
+        }
+    }
+
+    // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
+    // We always build one at a time, so we only need a pointer to an array (double pointer).
+    range_infos_ptr := raw_data(range_infos)
+    vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_infos_ptr)
+}
+
+_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr)
+{
+
 }
 
 @(private="file")
@@ -2575,7 +2706,7 @@ to_vk_address_mode :: proc(addr_mode: Address_Mode) -> vk.SamplerAddressMode
 @(private="file")
 to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.AccelerationStructureBuildGeometryInfoKHR
 {
-    geometries := make([]vk.AccelerationStructureGeometryKHR, len(blas_desc.shapes))
+    geometries := make([]vk.AccelerationStructureGeometryKHR, len(blas_desc.shapes), allocator = arena)
     for &geom, i in geometries
     {
         switch shape in blas_desc.shapes[i]
@@ -2590,9 +2721,12 @@ to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.Ac
                     geometry = { triangles = {
                         sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
                         vertexFormat = .R32G32B32_SFLOAT,
+                        vertexData = {},
                         vertexStride = vk.DeviceSize(shape.vertex_stride),
                         maxVertex = shape.max_vertex,
                         indexType = .UINT32,
+                        indexData = {},
+                        transformData = {},
                     } }
                 }
             }
@@ -2604,7 +2738,9 @@ to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.Ac
                     flags = flags,
                     geometryType = .AABBS,
                     geometry = { aabbs = {
-                        stride = vk.DeviceSize(shape.stride)
+                        sType = .ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+                        stride = vk.DeviceSize(shape.stride),
+                        data = {},
                     } }
                 }
             }
