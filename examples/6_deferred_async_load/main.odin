@@ -4,12 +4,14 @@ package main
 import "../../gpu"
 import intr "base:intrinsics"
 import "base:runtime"
+import "core:container/queue"
 import "core:fmt"
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:sync"
 import "core:thread"
+
 
 import sdl "vendor:sdl3"
 
@@ -19,16 +21,22 @@ import gltf2 "../shared/gltf2"
 Start_Window_Size_X :: 1000
 Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
-Example_Name :: "3D"
+Example_Name :: "Deferred Async Example - Right-click + WASD for first-person controls."
 
 Sponza_Scene :: #load("../shared/assets/sponza.glb")
 
 // Whether to load textures on background thread or preload them in main thread before running the screne
-Load_Textures_Async :: false
+Load_Textures_Async :: true
+
+
+// Textures can be loaded/unloaded on different threads, so we need to synchronize access to the textures array
+textures_mutex: sync.Mutex
+// Every texture from textures array needs to be freed when we are done
+textures: [dynamic]gpu.Owned_Texture
+// Enables asynchronous cancellation of texture loading
+cancel_loading_textures: bool
 
 main :: proc() {
-	fmt.println("Right-click + WASD for first-person controls.")
-
 	ok_i := sdl.Init({.VIDEO})
 	assert(ok_i)
 
@@ -82,6 +90,7 @@ main :: proc() {
 	upload_cmd_buf := gpu.commands_begin(queue)
 
 	magenta_texture := shared.create_magenta_texture(&upload_arena, upload_cmd_buf)
+	defer gpu.free_and_destroy_texture(&magenta_texture)
 
 	// Set up texture heap
 	texture_heap := gpu.mem_alloc(
@@ -106,32 +115,54 @@ main :: proc() {
 	defer {
 		shared.destroy_scene(&scene)
 		gltf2.unload(gltf_data)
-		gpu.free_and_destroy_texture(&magenta_texture)
 	}
 
-	loader_data := Texture_Loader_Data {
-		texture_infos = texture_infos,
-		gltf_data     = gltf_data,
-		meshes        = &scene.meshes,
-		texture_heap  = texture_heap,
-		textures      = {},
-		done          = false,
+	defer {
+		// Clean up loaded textures
+		sync.mutex_lock(&textures_mutex)
+		for &tex in textures {
+			gpu.free_and_destroy_texture(&tex)
+		}
+		sync.mutex_unlock(&textures_mutex)
 	}
 
+	when Load_Textures_Async {
+		Texture_Loader_Data :: struct {
+			texture_infos: []shared.Gltf_Texture_Info,
+			gltf_data:     ^gltf2.Data,
+			scene:         ^shared.Scene,
+			texture_heap:  rawptr,
+			logger:        log.Logger,
+		}
+		loader_data := Texture_Loader_Data {
+			texture_infos = texture_infos,
+			gltf_data     = gltf_data,
+			scene         = &scene,
+			texture_heap  = texture_heap,
+			logger        = console_logger,
+		}
 
-	texture_loader_thread: ^thread.Thread
-	if Load_Textures_Async {
 		texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
 			data := cast(^Texture_Loader_Data)thread.data
-			texture_loader(data)
+			context.logger = data.logger
+			log.info("Loading textures asynchronously")
+			load_scene_textures_from_gltf(
+				data.texture_infos,
+				data.gltf_data,
+				data.scene,
+				data.texture_heap,
+			)
 		}
 
 		texture_loader_thread := thread.create(texture_loader_thread_proc)
 		texture_loader_thread.data = &loader_data
 		thread.start(texture_loader_thread)
-		defer thread.destroy(texture_loader_thread)
+		defer {
+			cancel_loading_textures = true
+			thread.join(texture_loader_thread)
+		}
 	} else {
-		texture_loader(&loader_data)
+		load_scene_textures_from_gltf(texture_infos, gltf_data, &scene, texture_heap)
 	}
 
 	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
@@ -164,7 +195,7 @@ main :: proc() {
 		}
 		if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
 			gpu.queue_wait_idle(queue)
-			gpu.swapchain_resize()
+			gpu.swapchain_resize({u32(max(0, window_size_x)), u32(max(0, window_size_y))})
 			depth_desc.dimensions.x = u32(window_size_x)
 			depth_desc.dimensions.y = u32(window_size_y)
 			gpu.free_and_destroy_texture(&depth_texture)
@@ -269,45 +300,134 @@ main :: proc() {
 		gpu.arena_free_all(frame_arena)
 	}
 
-	if Load_Textures_Async {
-		thread.join(texture_loader_thread)
-	}
-
 	gpu.wait_idle()
-
-	// Clean up loaded textures
-	sync.mutex_lock(&loader_data.mutex)
-	for &tex in loader_data.textures {
-		gpu.free_and_destroy_texture(&tex)
-	}
-	sync.mutex_unlock(&loader_data.mutex)
 }
 
-// Thread data for async texture loading
-Texture_Loader_Data :: struct {
-	texture_infos: []shared.Texture_Upload_Info,
-	gltf_data:     ^gltf2.Data,
-	meshes:        ^[dynamic]shared.Mesh,
-	texture_heap:  rawptr,
-	textures:      [dynamic]gpu.Owned_Texture,
-	mutex:         sync.Mutex,
-	done:          bool,
-}
-
-texture_loader :: proc(data: ^Texture_Loader_Data) {
-	loaded_textures := shared.load_textures_from_info(
-		data.texture_infos,
-		data.gltf_data,
-		data.meshes,
-		data.texture_heap,
-	)
-
-	// Store results - convert slice to dynamic array
-	sync.mutex_lock(&data.mutex)
-	data.textures = {}
-	for tex in loaded_textures {
-		append(&data.textures, tex)
+// Load textures from Texture_Info and update mesh texture IDs
+load_scene_textures_from_gltf :: proc(
+	texture_infos: []shared.Gltf_Texture_Info,
+	data: ^gltf2.Data,
+	scene: ^shared.Scene,
+	texture_heap: rawptr,
+) {
+	submitted_upload :: struct {
+		texture:      gpu.Owned_Texture,
+		texture_idx:  u32,
+		mesh_id:      u32,
+		texture_type: shared.Texture_Type,
 	}
-	data.done = true
-	sync.mutex_unlock(&data.mutex)
+	submitted_uploads_queue: queue.Queue(submitted_upload)
+	queue.init(&submitted_uploads_queue)
+	defer queue.destroy(&submitted_uploads_queue)
+
+	pending_uploads_queue: queue.Queue(shared.Gltf_Texture_Info)
+	queue.init(&pending_uploads_queue)
+	for info in texture_infos {
+		queue.push(&pending_uploads_queue, info)
+	}
+	defer queue.destroy(&pending_uploads_queue)
+
+	image_to_texture: map[int]struct {
+		texture:     gpu.Owned_Texture,
+		texture_idx: u32,
+	}
+	defer delete(image_to_texture)
+
+	transfer_queue := gpu.get_queue(.Transfer)
+
+	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
+	defer gpu.arena_destroy(&upload_arena)
+
+	next_texture_idx := u32(1) // 0 is magenta texture
+
+	for pending_uploads_queue.len > 0 && !cancel_loading_textures {
+		// Create a new command buffer for each batch upload
+		upload_cmd_buf := gpu.commands_begin(transfer_queue)
+
+		// Submit 16 texture uploads at a time
+		for submitted_uploads_queue.len < 16 &&
+		    pending_uploads_queue.len > 0 &&
+		    !cancel_loading_textures {
+			info := queue.pop_front(&pending_uploads_queue)
+
+			if info.mesh_id >= u32(len(scene.meshes)) {
+				log.error(
+					fmt.tprintf(
+						"Invalid mesh_id %v (only %v meshes available)",
+						info.mesh_id,
+						len(scene.meshes),
+					),
+				)
+				continue
+			}
+
+			texture: gpu.Owned_Texture
+			texture_idx: u32
+			if tex, ok := image_to_texture[info.image_index]; ok {
+				texture = tex.texture
+				next_texture_idx = tex.texture_idx
+			} else {
+				mesh := &scene.meshes[info.mesh_id]
+				image_data := data.images[info.image_index]
+				texture_idx = next_texture_idx
+				next_texture_idx += 1
+
+				sync.mutex_lock(&textures_mutex)
+				defer sync.mutex_unlock(&textures_mutex)
+				texture = shared.load_texture_from_gltf(
+					image_data,
+					data,
+					&upload_arena,
+					upload_cmd_buf,
+					transfer_queue,
+				)
+
+				image_to_texture[info.image_index] = {texture, texture_idx}
+
+				append(&textures, texture)
+			}
+
+			queue.push(
+				&submitted_uploads_queue,
+				submitted_upload{texture, texture_idx, info.mesh_id, info.texture_type},
+			)
+
+			log.info(
+				fmt.tprintf(
+					"Loaded texture for mesh %v, type %v, texture_id %v",
+					info.mesh_id,
+					info.texture_type,
+					texture_idx,
+				),
+			)
+		}
+
+		gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
+
+		gpu.queue_submit(transfer_queue, {upload_cmd_buf})
+
+		gpu.queue_wait_idle(transfer_queue)
+
+		gpu.arena_free_all(&upload_arena)
+
+		for submitted_uploads_queue.len > 0 {
+			upload := queue.pop_front(&submitted_uploads_queue)
+			switch upload.texture_type {
+			case .Base_Color:
+				scene.meshes[upload.mesh_id].base_color_map = upload.texture_idx
+			case .Metallic_Roughness:
+				scene.meshes[upload.mesh_id].metallic_roughness_map = upload.texture_idx
+			case .Normal:
+				scene.meshes[upload.mesh_id].normal_map = upload.texture_idx
+			}
+
+			gpu.set_texture_desc(
+				texture_heap,
+				upload.texture_idx,
+				gpu.texture_view_descriptor(upload.texture, {format = .RGBA8_Unorm}),
+			)
+		}
+	}
+
+	log.info("Finished loading textures")
 }

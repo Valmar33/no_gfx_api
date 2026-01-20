@@ -25,11 +25,10 @@ Texture_Type :: enum {
 	Normal,
 }
 
-Texture_Upload_Info :: struct {
+Gltf_Texture_Info :: struct {
 	mesh_id:      u32,
 	texture_type: Texture_Type,
 	image_index:  int,
-	image_data:   ^gltf2.Image,
 }
 
 Mesh :: struct {
@@ -139,117 +138,6 @@ create_magenta_texture :: proc(
 	)
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
 	return texture
-}
-
-// Load textures from Texture_Info and update mesh texture IDs
-load_textures_from_info :: proc(
-	texture_infos: []Texture_Upload_Info,
-	data: ^gltf2.Data,
-	meshes: ^[dynamic]Mesh,
-	texture_heap: rawptr,
-) -> []gpu.Owned_Texture {
-	textures: [dynamic]gpu.Owned_Texture
-
-	submitted_upload :: struct {
-		texture:      gpu.Owned_Texture,
-		texture_idx:  u32,
-		mesh_id:      u32,
-		texture_type: Texture_Type,
-	}
-	submitted_uploads_queue: queue.Queue(submitted_upload)
-	queue.init(&submitted_uploads_queue)
-	defer queue.destroy(&submitted_uploads_queue)
-
-	pending_uploads_queue: queue.Queue(Texture_Upload_Info)
-	queue.init(&pending_uploads_queue)
-	for info in texture_infos {
-		queue.push(&pending_uploads_queue, info)
-	}
-	defer queue.destroy(&pending_uploads_queue)
-
-	transfer_queue := gpu.get_queue(.Transfer)
-
-	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
-	defer gpu.arena_destroy(&upload_arena)
-
-	texture_idx := u32(1) // 0 is magenta texture
-
-	for pending_uploads_queue.len > 0 {
-		// Create a new command buffer for each batch upload
-		upload_cmd_buf := gpu.commands_begin(transfer_queue)
-
-		// Submit 16 texture uploads at a time
-		for submitted_uploads_queue.len < 16 && pending_uploads_queue.len > 0 {
-			info := queue.pop_front(&pending_uploads_queue)
-
-			if info.mesh_id >= u32(len(meshes)) {
-				log.error(
-					fmt.tprintf(
-						"Invalid mesh_id %v (only %v meshes available)",
-						info.mesh_id,
-						len(meshes),
-					),
-				)
-				continue
-			}
-
-			mesh := &meshes[info.mesh_id]
-			image_data := data.images[info.image_index]
-			loaded_texture := load_texture_from_gltf(
-				image_data,
-				data,
-				&upload_arena,
-				upload_cmd_buf,
-				transfer_queue,
-			)
-
-			queue.push(
-				&submitted_uploads_queue,
-				submitted_upload{loaded_texture, texture_idx, info.mesh_id, info.texture_type},
-			)
-
-			log.info(
-				fmt.tprintf(
-					"Loaded texture for mesh %v, type %v, assigned ID %v",
-					info.mesh_id,
-					info.texture_type,
-					texture_idx,
-				),
-			)
-
-			texture_idx += 1
-		}
-		
-		gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-
-		gpu.queue_submit(transfer_queue, {upload_cmd_buf})
-
-		gpu.queue_wait_idle(transfer_queue)
-		
-		gpu.arena_free_all(&upload_arena)
-
-		for submitted_uploads_queue.len > 0 {
-			upload := queue.pop_front(&submitted_uploads_queue)
-			switch upload.texture_type {
-			case .Base_Color:
-				meshes[upload.mesh_id].base_color_map = upload.texture_idx
-			case .Metallic_Roughness:
-				meshes[upload.mesh_id].metallic_roughness_map = upload.texture_idx
-			case .Normal:
-				meshes[upload.mesh_id].normal_map = upload.texture_idx
-			}
-
-			append(&textures, upload.texture)
-
-			gpu.set_texture_desc(
-				texture_heap,
-				upload.texture_idx,
-				gpu.texture_view_descriptor(upload.texture, {format = .RGBA8_Unorm}),
-			)
-		}
-	}
-
-	return textures[:]
 }
 
 load_texture_from_gltf :: proc(
@@ -544,7 +432,7 @@ load_scene_gltf :: proc(
 	cmd_buf: gpu.Command_Buffer,
 ) -> (
 	Scene,
-	[]Texture_Upload_Info,
+	[]Gltf_Texture_Info,
 	^gltf2.Data,
 ) {
 	options := gltf2.Options{}
@@ -559,7 +447,7 @@ load_scene_gltf :: proc(
 	}
 	// Note: data is returned to caller, who should call gltf2.unload(data) when done
 
-	texture_infos: [dynamic]Texture_Upload_Info
+	texture_infos: [dynamic]Gltf_Texture_Info
 
 	log.info(fmt.tprintf("Collecting texture info from %v textures in GLTF", len(data.textures)))
 
@@ -653,14 +541,12 @@ load_scene_gltf :: proc(
 					if base_color_tex := material.metallic_roughness.?.base_color_texture;
 					   base_color_tex != nil {
 						if image_idx, ok := texture_to_image[int(base_color_tex.?.index)]; ok {
-							image_data := data.images[image_idx]
 							append(
 								&texture_infos,
-								Texture_Upload_Info {
+								Gltf_Texture_Info {
 									mesh_id = mesh_idx,
 									texture_type = .Base_Color,
 									image_index = image_idx,
-									image_data = &image_data,
 								},
 							)
 						}
@@ -669,14 +555,12 @@ load_scene_gltf :: proc(
 					if mr_tex := material.metallic_roughness.?.metallic_roughness_texture;
 					   mr_tex != nil {
 						if image_idx, ok := texture_to_image[int(mr_tex.?.index)]; ok {
-							image_data := data.images[image_idx]
 							append(
 								&texture_infos,
-								Texture_Upload_Info {
+								Gltf_Texture_Info {
 									mesh_id = mesh_idx,
 									texture_type = .Metallic_Roughness,
 									image_index = image_idx,
-									image_data = &image_data,
 								},
 							)
 						}
@@ -686,14 +570,12 @@ load_scene_gltf :: proc(
 				// Normal texture
 				if normal_tex := material.normal_texture; normal_tex != nil {
 					if image_idx, ok := texture_to_image[int(normal_tex.?.index)]; ok {
-						image_data := data.images[image_idx]
 						append(
 							&texture_infos,
-							Texture_Upload_Info {
+							Gltf_Texture_Info {
 								mesh_id = mesh_idx,
 								texture_type = .Normal,
 								image_index = image_idx,
-								image_data = &image_data,
 							},
 						)
 					}
