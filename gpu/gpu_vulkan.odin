@@ -1460,7 +1460,7 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
 
 _blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 {
-    return u64(get_vk_blas_size_info(desc).buildScratchSize), 1
+    return u64(get_vk_blas_size_info(desc).buildScratchSize), 256  // TODO
 }
 
 _tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
@@ -1485,7 +1485,12 @@ _get_bvh_descriptor_size :: proc(bvh: BVH) -> u32
 
 _bvh_destroy :: proc(bvh: ^BVH)
 {
-    // TODO!
+    bvh_key := transmute(Key) (bvh^)
+    bvh_info := get_resource(bvh^, ctx.bvhs)
+
+    vk.DestroyAccelerationStructureKHR(ctx.device, bvh_info.handle, nil)
+
+    pool_free_idx(&ctx.bvhs, u32(bvh_key.idx))
     bvh^ = {}
 }
 

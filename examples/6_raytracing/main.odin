@@ -652,7 +652,6 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
 
     for &mesh in meshes {
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count / 3)
-        break
     }
 
     gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})

@@ -3,6 +3,7 @@ package gpu
 
 import "core:slice"
 import "base:runtime"
+import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -354,7 +355,14 @@ arena_init :: proc(storage: u64, mem_type := Memory.Default) -> Arena
 
 arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
 {
-    offset = u64(align_up(offset, align))
+    gpu_addr := uintptr(arena.gpu) + uintptr(arena.offset)
+    offset = align_up(u64(gpu_addr), align) - u64(uintptr(arena.gpu))
+
+    if align == 256
+    {
+        fmt.println(uintptr(arena.gpu), align_up(u64(gpu_addr), align), gpu_addr + uintptr(offset))
+    }
+
     if offset + bytes > size do panic("GPU Arena ran out of space!")
 
     alloc_cpu = nil if cpu == nil else auto_cast(uintptr(cpu) + uintptr(offset))
@@ -482,7 +490,7 @@ free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
 
 alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
 {
-    size, align := blas_size_and_align(desc)
+    size, align := blas_build_scratch_buffer_size_and_align(desc)
     cpu, gpu := arena_alloc_untyped(arena, size, align)
     return gpu
 }
