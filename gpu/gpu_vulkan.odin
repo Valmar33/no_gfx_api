@@ -55,6 +55,7 @@ Timeline :: struct
 @(private="file")
 Context :: struct
 {
+    features: Features,
     instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
     surface: vk.SurfaceKHR,
@@ -161,6 +162,8 @@ _init :: proc(features := Features {})
     init_scratch_arenas()
 
     scratch, _ := acquire_scratch()
+
+    ctx.features = features
 
     // Load vulkan function pointers
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
@@ -857,9 +860,12 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
     {
         case .Default:
         {
-            buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER, .ACCELERATION_STRUCTURE_STORAGE_KHR, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
+            buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER }
             if mem_type == .GPU {
                 buf_usage += { .INDEX_BUFFER }
+            }
+            if .Raytracing in ctx.features {
+                buf_usage += { .ACCELERATION_STRUCTURE_STORAGE_KHR, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
             }
         }
         case .Descriptors:

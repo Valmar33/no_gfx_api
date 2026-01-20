@@ -346,7 +346,7 @@ arena_init :: proc(storage: u64, mem_type := Memory.Default) -> Arena
 {
     res: Arena
     res.size = storage
-    alloc := mem_alloc(storage)
+    alloc := mem_alloc(storage, mem_type = mem_type)
     res.cpu = nil if mem_type == .GPU else alloc
     res.gpu = alloc if mem_type == .GPU else host_to_device_ptr(alloc)
     return res

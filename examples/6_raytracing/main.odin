@@ -648,14 +648,14 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
     }
 
     // Build BVHs
-    gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+
     for &mesh in meshes {
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count / 3)
         break
     }
 
     gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
-
 
     //tlas := build_tlas(upload_arena, cmd_buf, {}, u32(len(instances)))  // TODO: Upload instances!
 
