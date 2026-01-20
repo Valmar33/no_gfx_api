@@ -5,9 +5,7 @@ import intr "base:intrinsics"
 import "base:runtime"
 import "core:container/queue"
 import "core:fmt"
-import "core:image"
-import "core:image/jpeg"
-import "core:image/png"
+
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
@@ -34,6 +32,7 @@ Gltf_Texture_Info :: struct {
 Mesh :: struct {
 	pos:                    rawptr,
 	normals:                rawptr,
+	uvs:                    rawptr,
 	indices:                rawptr,
 	idx_count:              u32,
 	base_color_map:         u32,
@@ -46,23 +45,28 @@ upload_mesh :: proc(
 	cmd_buf: gpu.Command_Buffer,
 	positions: [][4]f32,
 	normals: [][4]f32,
+	uvs: [][2]f32,
 	indices: []u32,
 	base_color_map: u32 = MISSING_TEXTURE_ID,
 	metallic_roughness_map: u32 = MISSING_TEXTURE_ID,
 	normal_map: u32 = MISSING_TEXTURE_ID,
 ) -> Mesh {
 	assert(len(positions) == len(normals))
+	assert(len(positions) == len(uvs))
 
 	positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(positions))
 	normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(normals))
+	uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(uvs))
 	indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(indices))
 	copy(positions_staging.cpu, positions)
 	copy(normals_staging.cpu, normals)
+	copy(uvs_staging.cpu, uvs)
 	copy(indices_staging.cpu, indices)
 
 	res: Mesh
 	res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(positions))
 	res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(normals))
+	res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(uvs))
 	res.indices = gpu.mem_alloc_typed_gpu(u32, len(indices))
 	res.idx_count = u32(len(indices))
 	res.base_color_map = base_color_map
@@ -80,6 +84,7 @@ upload_mesh :: proc(
 		res.normals,
 		u64(len(normals) * size_of(normals[0])),
 	)
+	gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(uvs) * size_of(uvs[0])))
 	gpu.cmd_mem_copy(
 		cmd_buf,
 		indices_staging.gpu,
@@ -92,6 +97,7 @@ upload_mesh :: proc(
 destroy_mesh :: proc(mesh: ^Mesh) {
 	gpu.mem_free(mesh.pos)
 	gpu.mem_free(mesh.normals)
+	gpu.mem_free(mesh.uvs)
 	gpu.mem_free(mesh.indices)
 	mesh^ = {}
 }
@@ -135,93 +141,6 @@ create_magenta_texture :: proc(
 			format = .RGBA8_Unorm,
 			usage = {.Sampled},
 		},
-	)
-	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
-	return texture
-}
-
-load_texture_from_gltf :: proc(
-	image_data: gltf2.Image,
-	data: ^gltf2.Data,
-	upload_arena: ^gpu.Arena,
-	cmd_buf: gpu.Command_Buffer,
-	queue: gpu.Queue = nil,
-	upload_semaphore: gpu.Semaphore = {},
-	semaphore_value: u64 = 0,
-) -> gpu.Owned_Texture {
-	image_bytes: []byte
-
-	if image_data.buffer_view != nil {
-		buffer_view_idx := image_data.buffer_view.?
-		buffer_view := data.buffer_views[buffer_view_idx]
-		buffer := data.buffers[buffer_view.buffer]
-
-		switch v in buffer.uri {
-		case []byte:
-			start_byte := buffer_view.byte_offset
-			end_byte := start_byte + buffer_view.byte_length
-			image_bytes = v[start_byte:end_byte]
-		case string:
-			log.error("String URIs not supported for buffer_view images")
-			assert(false, "String URIs not supported for buffer_view images")
-			return {}
-		case:
-			log.error("Unknown buffer URI type")
-			assert(false, "Unknown buffer URI type")
-			return {}
-		}
-	} else {
-		switch v in image_data.uri {
-		case []byte:
-			image_bytes = v
-		case string:
-			log.error(fmt.tprintf("String URIs not supported for texture loading: %v", v))
-			assert(false, "String URIs not supported for texture loading")
-			return {}
-		case:
-			log.error("Image has neither buffer_view nor valid URI")
-			assert(false, "Image has neither buffer_view nor valid URI")
-			return {}
-		}
-	}
-
-	if len(image_bytes) == 0 {
-		log.error("Image bytes are empty")
-		assert(false, "Image bytes are empty")
-		return {}
-	}
-
-	options := image.Options{.alpha_add_if_missing}
-	img, err := image.load_from_bytes(image_bytes, options)
-	if err != nil {
-		log.error(
-			fmt.tprintf(
-				"Failed to load image from bytes: %v, image size: %v bytes",
-				err,
-				len(image_bytes),
-			),
-		)
-		assert(false, "Could not load texture from GLTF image.")
-		return {}
-	}
-	defer image.destroy(img)
-
-	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
-	runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
-
-	texture := gpu.alloc_and_create_texture(
-		{
-			type = .D2,
-			dimensions = {u32(img.width), u32(img.height), 1},
-			mip_count = 1,
-			layer_count = 1,
-			sample_count = 1,
-			format = .RGBA8_Unorm,
-			usage = {.Sampled},
-		},
-		queue,
-		upload_semaphore,
-		semaphore_value,
 	)
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
 	return texture
@@ -585,11 +504,23 @@ load_scene_gltf :: proc(
 			// Convert vec3 to vec4 (adding w=0 component)
 			pos_final := to_vec4_array(positions, allocator = context.temp_allocator)
 			normals_final := to_vec4_array(normals, allocator = context.temp_allocator)
+			// Use TEXCOORD_0 if available, otherwise create default UVs
+			uvs_final: [][2]f32
+			if len(uvs) > 0 {
+				uvs_final = uvs
+			} else {
+				// Create default UVs if not present
+				uvs_final = make([][2]f32, len(positions), allocator = context.temp_allocator)
+				for &uv, i in uvs_final {
+					uv = {0.0, 0.0}
+				}
+			}
 			loaded := upload_mesh(
 				upload_arena,
 				cmd_buf,
 				pos_final,
 				normals_final,
+				uvs_final,
 				indices_u32[:],
 				base_color_map,
 				metallic_roughness_map,

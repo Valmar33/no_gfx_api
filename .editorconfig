@@ -13,3 +13,7 @@ insert_final_newline = false
 
 [*.odin]
 indent_size = 4
+
+
+[*.musl]
+indent_size = 4

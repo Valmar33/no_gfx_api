@@ -6,6 +6,9 @@ import intr "base:intrinsics"
 import "base:runtime"
 import "core:container/queue"
 import "core:fmt"
+import "core:image"
+import "core:image/jpeg"
+import "core:image/png"
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
@@ -30,11 +33,12 @@ Load_Textures_Async :: true
 
 
 // Textures can be loaded/unloaded on different threads, so we need to synchronize access to the textures array
-textures_mutex: sync.Mutex
-// Every texture from textures array needs to be freed when we are done
-textures: [dynamic]gpu.Owned_Texture
+mutex: sync.Mutex
+// Every texture from loaded_textures array needs to be freed when we are done
+loaded_textures: [dynamic]gpu.Owned_Texture
 // Enables asynchronous cancellation of texture loading
 cancel_loading_textures: bool
+next_texture_idx: u32
 
 main :: proc() {
 	ok_i := sdl.Init({.VIDEO})
@@ -75,22 +79,17 @@ main :: proc() {
 	depth_texture := gpu.alloc_and_create_texture(depth_desc)
 	defer gpu.free_and_destroy_texture(&depth_texture)
 
-	vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
-	frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
+	vert_shader_final := gpu.shader_create(#load("shaders/final_pass.vert.spv", []u32), .Vertex)
+	frag_shader_final := gpu.shader_create(#load("shaders/final_pass.frag.spv", []u32), .Fragment)
 	defer {
-		gpu.shader_destroy(&vert_shader)
-		gpu.shader_destroy(&frag_shader)
+		gpu.shader_destroy(&vert_shader_final)
+		gpu.shader_destroy(&frag_shader_final)
 	}
 
 	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
 	queue := gpu.get_queue(.Main)
-
-	upload_cmd_buf := gpu.commands_begin(queue)
-
-	magenta_texture := shared.create_magenta_texture(&upload_arena, upload_cmd_buf)
-	defer gpu.free_and_destroy_texture(&magenta_texture)
 
 	// Set up texture heap
 	texture_heap := gpu.mem_alloc(
@@ -101,11 +100,16 @@ main :: proc() {
 	sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
 	defer gpu.mem_free(sampler_heap)
 
+	upload_cmd_buf := gpu.commands_begin(queue)
+
+	magenta_texture := shared.create_magenta_texture(&upload_arena, upload_cmd_buf)
+	defer gpu.free_and_destroy_texture(&magenta_texture)
 	gpu.set_texture_desc(
 		texture_heap,
 		shared.MISSING_TEXTURE_ID,
 		gpu.texture_view_descriptor(magenta_texture, {format = .RGBA8_Unorm}),
 	)
+	next_texture_idx = shared.MISSING_TEXTURE_ID + 1
 
 	scene, texture_infos, gltf_data := shared.load_scene_gltf(
 		Sponza_Scene,
@@ -119,11 +123,11 @@ main :: proc() {
 
 	defer {
 		// Clean up loaded textures
-		sync.mutex_lock(&textures_mutex)
-		for &tex in textures {
+		sync.mutex_lock(&mutex)
+		for &tex in loaded_textures {
 			gpu.free_and_destroy_texture(&tex)
 		}
-		sync.mutex_unlock(&textures_mutex)
+		sync.mutex_unlock(&mutex)
 	}
 
 	when Load_Textures_Async {
@@ -223,76 +227,20 @@ main :: proc() {
 
 		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
 
-		cmd_buf := gpu.commands_begin(queue)
-		gpu.cmd_begin_render_pass(
-			cmd_buf,
-			{
-				color_attachments = {{texture = swapchain, clear_color = {0.7, 0.7, 0.7, 1.0}}},
-				depth_attachment = gpu.Render_Attachment {
-					texture = depth_texture,
-					clear_color = 1.0,
-				},
-			},
+		cmd_buf_final := render_pass_final(
+			queue,
+			swapchain,
+			depth_texture,
+			vert_shader_final,
+			frag_shader_final,
+			texture_heap,
+			sampler_heap,
+			frame_arena,
+			&scene,
+			world_to_view,
+			view_to_proj,
 		)
-		gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-
-		// Set texture and sampler heaps
-		textures_ptr := gpu.host_to_device_ptr(texture_heap)
-		samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-		gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, nil, samplers_ptr)
-
-		gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
-
-		for instance in scene.instances {
-			mesh := scene.meshes[instance.mesh_idx]
-
-			Vert_Data :: struct #all_or_none {
-				positions:             rawptr,
-				normals:               rawptr,
-				model_to_world:        [16]f32,
-				model_to_world_normal: [16]f32,
-				world_to_view:         [16]f32,
-				view_to_proj:          [16]f32,
-			}
-			#assert(size_of(Vert_Data) == 8 + 8 + 64 + 64 + 64 + 64)
-			verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-			verts_data.cpu^ = {
-				positions             = mesh.pos,
-				normals               = mesh.normals,
-				model_to_world        = intr.matrix_flatten(instance.transform),
-				model_to_world_normal = intr.matrix_flatten(
-					linalg.transpose(linalg.inverse(instance.transform)),
-				),
-				world_to_view         = intr.matrix_flatten(world_to_view),
-				view_to_proj          = intr.matrix_flatten(view_to_proj),
-			}
-
-			Frag_Data :: struct #all_or_none {
-				base_color_map:         u32,
-				metallic_roughness_map: u32,
-				normal_map:             u32,
-				sampler:                u32,
-			}
-			frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
-			frag_data.cpu^ = {
-				base_color_map         = mesh.base_color_map,
-				metallic_roughness_map = mesh.metallic_roughness_map,
-				normal_map             = mesh.normal_map,
-				sampler                = 0,
-			}
-
-			gpu.cmd_draw_indexed_instanced(
-				cmd_buf,
-				verts_data.gpu,
-				frag_data.gpu,
-				mesh.indices,
-				mesh.idx_count,
-				1,
-			)
-		}
-
-		gpu.cmd_end_render_pass(cmd_buf)
-		gpu.queue_submit(queue, {cmd_buf}, frame_sem, next_frame)
+		gpu.queue_submit(queue, {cmd_buf_final}, frame_sem, next_frame)
 
 		gpu.swapchain_present(queue, frame_sem, next_frame)
 		next_frame += 1
@@ -301,6 +249,94 @@ main :: proc() {
 	}
 
 	gpu.wait_idle()
+}
+
+render_pass_final :: proc(
+	queue: gpu.Queue,
+	swapchain: gpu.Texture,
+	depth_texture: gpu.Texture,
+	vert_shader: gpu.Shader,
+	frag_shader: gpu.Shader,
+	texture_heap: rawptr,
+	sampler_heap: rawptr,
+	frame_arena: ^gpu.Arena,
+	scene: ^shared.Scene,
+	world_to_view: matrix[4, 4]f32,
+	view_to_proj: matrix[4, 4]f32,
+) -> gpu.Command_Buffer {
+	cmd_buf := gpu.commands_begin(queue)
+	gpu.cmd_begin_render_pass(
+		cmd_buf,
+		{
+			color_attachments = {{texture = swapchain, clear_color = {0.7, 0.7, 0.7, 1.0}}},
+			depth_attachment = gpu.Render_Attachment{texture = depth_texture, clear_color = 1.0},
+		},
+	)
+	gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
+
+	// Set texture and sampler heaps
+	textures_ptr := gpu.host_to_device_ptr(texture_heap)
+	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
+	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, nil, samplers_ptr)
+
+	gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
+
+	for instance in scene.instances {
+		mesh := scene.meshes[instance.mesh_idx]
+
+		Vert_Data :: struct #all_or_none {
+			positions:             rawptr,
+			normals:               rawptr,
+			uvs:                   rawptr,
+			model_to_world:        [16]f32,
+			model_to_world_normal: [16]f32,
+			world_to_view:         [16]f32,
+			view_to_proj:          [16]f32,
+		}
+		#assert(size_of(Vert_Data) == 8 + 8 + 8 + 64 + 64 + 64 + 64)
+		verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
+		verts_data.cpu^ = {
+			positions             = mesh.pos,
+			normals               = mesh.normals,
+			uvs                   = mesh.uvs,
+			model_to_world        = intr.matrix_flatten(instance.transform),
+			model_to_world_normal = intr.matrix_flatten(
+				linalg.transpose(linalg.inverse(instance.transform)),
+			),
+			world_to_view         = intr.matrix_flatten(world_to_view),
+			view_to_proj          = intr.matrix_flatten(view_to_proj),
+		}
+
+		Frag_Data :: struct #all_or_none {
+			base_color_map:                 u32,
+			base_color_map_sampler:         u32,
+			metallic_roughness_map:         u32,
+			metallic_roughness_map_sampler: u32,
+			normal_map:                     u32,
+			normal_map_sampler:             u32,
+		}
+		frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
+		frag_data.cpu^ = {
+			base_color_map                 = mesh.base_color_map,
+			base_color_map_sampler         = 0,
+			metallic_roughness_map         = mesh.metallic_roughness_map,
+			metallic_roughness_map_sampler = 0,
+			normal_map                     = mesh.normal_map,
+			normal_map_sampler             = 0,
+		}
+
+		gpu.cmd_draw_indexed_instanced(
+			cmd_buf,
+			verts_data.gpu,
+			frag_data.gpu,
+			mesh.indices,
+			mesh.idx_count,
+			1,
+		)
+	}
+
+	gpu.cmd_end_render_pass(cmd_buf)
+	return cmd_buf
 }
 
 // Load textures from Texture_Info and update mesh texture IDs
@@ -338,8 +374,6 @@ load_scene_textures_from_gltf :: proc(
 	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
-	next_texture_idx := u32(1) // 0 is magenta texture
-
 	for pending_uploads_queue.len > 0 && !cancel_loading_textures {
 		// Create a new command buffer for each batch upload
 		upload_cmd_buf := gpu.commands_begin(transfer_queue)
@@ -365,16 +399,17 @@ load_scene_textures_from_gltf :: proc(
 			texture_idx: u32
 			if tex, ok := image_to_texture[info.image_index]; ok {
 				texture = tex.texture
-				next_texture_idx = tex.texture_idx
+				texture_idx = tex.texture_idx
 			} else {
 				mesh := &scene.meshes[info.mesh_id]
 				image_data := data.images[info.image_index]
+
+				sync.mutex_lock(&mutex)
 				texture_idx = next_texture_idx
 				next_texture_idx += 1
+				sync.mutex_unlock(&mutex)
 
-				sync.mutex_lock(&textures_mutex)
-				defer sync.mutex_unlock(&textures_mutex)
-				texture = shared.load_texture_from_gltf(
+				texture = load_texture_from_gltf(
 					image_data,
 					data,
 					&upload_arena,
@@ -383,8 +418,6 @@ load_scene_textures_from_gltf :: proc(
 				)
 
 				image_to_texture[info.image_index] = {texture, texture_idx}
-
-				append(&textures, texture)
 			}
 
 			queue.push(
@@ -430,4 +463,92 @@ load_scene_textures_from_gltf :: proc(
 	}
 
 	log.info("Finished loading textures")
+}
+
+
+load_texture_from_gltf :: proc(
+	image_data: gltf2.Image,
+	data: ^gltf2.Data,
+	upload_arena: ^gpu.Arena,
+	cmd_buf: gpu.Command_Buffer,
+	queue: gpu.Queue = nil,
+) -> gpu.Owned_Texture {
+	image_bytes: []byte
+
+	if image_data.buffer_view != nil {
+		buffer_view_idx := image_data.buffer_view.?
+		buffer_view := data.buffer_views[buffer_view_idx]
+		buffer := data.buffers[buffer_view.buffer]
+
+		switch v in buffer.uri {
+		case []byte:
+			start_byte := buffer_view.byte_offset
+			end_byte := start_byte + buffer_view.byte_length
+			image_bytes = v[start_byte:end_byte]
+		case string:
+			log.error("String URIs not supported for buffer_view images")
+			assert(false, "String URIs not supported for buffer_view images")
+			return {}
+		case:
+			log.error("Unknown buffer URI type")
+			assert(false, "Unknown buffer URI type")
+			return {}
+		}
+	} else {
+		switch v in image_data.uri {
+		case []byte:
+			image_bytes = v
+		case string:
+			log.error(fmt.tprintf("String URIs not supported for texture loading: %v", v))
+			assert(false, "String URIs not supported for texture loading")
+			return {}
+		case:
+			log.error("Image has neither buffer_view nor valid URI")
+			assert(false, "Image has neither buffer_view nor valid URI")
+			return {}
+		}
+	}
+
+	if len(image_bytes) == 0 {
+		log.error("Image bytes are empty")
+		assert(false, "Image bytes are empty")
+		return {}
+	}
+
+	options := image.Options{.alpha_add_if_missing}
+	img, err := image.load_from_bytes(image_bytes, options)
+	if err != nil {
+		log.error(
+			fmt.tprintf(
+				"Failed to load image from bytes: %v, image size: %v bytes",
+				err,
+				len(image_bytes),
+			),
+		)
+		assert(false, "Could not load texture from GLTF image.")
+		return {}
+	}
+	defer image.destroy(img)
+
+	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
+	runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
+
+	sync.mutex_lock(&mutex)
+	texture := gpu.alloc_and_create_texture(
+		{
+			type = .D2,
+			dimensions = {u32(img.width), u32(img.height), 1},
+			mip_count = 1,
+			layer_count = 1,
+			sample_count = 1,
+			format = .RGBA8_Unorm,
+			usage = {.Sampled},
+		},
+		queue,
+	)
+	append(&loaded_textures, texture)
+	sync.mutex_unlock(&mutex)
+
+	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
+	return texture
 }
