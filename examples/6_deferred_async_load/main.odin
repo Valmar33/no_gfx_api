@@ -31,6 +31,10 @@ Sponza_Scene :: #load("../shared/assets/sponza.glb")
 // Whether to load textures on background thread or preload them in main thread before running the screne
 Load_Textures_Async :: true
 
+// G-buffer texture indices in texture heap
+GBUFFER_ALBEDO_IDX :: 1000
+GBUFFER_NORMAL_IDX :: 1001
+GBUFFER_METALLIC_ROUGHNESS_IDX :: 1002
 
 // Textures can be loaded/unloaded on different threads, so we need to synchronize access to the textures array
 mutex: sync.Mutex
@@ -38,7 +42,7 @@ mutex: sync.Mutex
 loaded_textures: [dynamic]gpu.Owned_Texture
 // Enables asynchronous cancellation of texture loading
 cancel_loading_textures: bool
-next_texture_idx: u32
+next_texture_idx: u32 = shared.MISSING_TEXTURE_ID + 1
 
 main :: proc() {
 	ok_i := sdl.Init({.VIDEO})
@@ -68,16 +72,12 @@ main :: proc() {
 
 	gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
-	depth_desc := gpu.Texture_Desc {
-		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
-		format       = .D32_Float,
-		mip_count    = 1,
-		layer_count  = 1,
-		sample_count = 1,
-		usage        = {.Depth_Stencil_Attachment},
+	vert_shader_gbuffer := gpu.shader_create(#load("shaders/gbuffer.vert.spv", []u32), .Vertex)
+	frag_shader_gbuffer := gpu.shader_create(#load("shaders/gbuffer.frag.spv", []u32), .Fragment)
+	defer {
+		gpu.shader_destroy(&vert_shader_gbuffer)
+		gpu.shader_destroy(&frag_shader_gbuffer)
 	}
-	depth_texture := gpu.alloc_and_create_texture(depth_desc)
-	defer gpu.free_and_destroy_texture(&depth_texture)
 
 	vert_shader_final := gpu.shader_create(#load("shaders/final_pass.vert.spv", []u32), .Vertex)
 	frag_shader_final := gpu.shader_create(#load("shaders/final_pass.frag.spv", []u32), .Fragment)
@@ -90,6 +90,16 @@ main :: proc() {
 	defer gpu.arena_destroy(&upload_arena)
 
 	queue := gpu.get_queue(.Main)
+	upload_cmd_buf := gpu.commands_begin(queue)
+
+	full_screen_quad_verts_gpu, full_screen_quad_indices_gpu := create_fullscreen_quad(
+		&upload_arena,
+		upload_cmd_buf,
+	)
+	defer {
+		gpu.mem_free(full_screen_quad_verts_gpu)
+		gpu.mem_free(full_screen_quad_indices_gpu)
+	}
 
 	// Set up texture heap
 	texture_heap := gpu.mem_alloc(
@@ -100,16 +110,14 @@ main :: proc() {
 	sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
 	defer gpu.mem_free(sampler_heap)
 
-	upload_cmd_buf := gpu.commands_begin(queue)
+	// Set up read-write texture heap for G-buffer textures
+	texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
+	texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size) * 65536, alloc_type = .Descriptors)
+	defer gpu.mem_free(texture_rw_heap)
 
-	magenta_texture := shared.create_magenta_texture(&upload_arena, upload_cmd_buf)
+
+	magenta_texture := create_magenta_texture(&upload_arena, upload_cmd_buf, texture_heap)
 	defer gpu.free_and_destroy_texture(&magenta_texture)
-	gpu.set_texture_desc(
-		texture_heap,
-		shared.MISSING_TEXTURE_ID,
-		gpu.texture_view_descriptor(magenta_texture, {format = .RGBA8_Unorm}),
-	)
-	next_texture_idx = shared.MISSING_TEXTURE_ID + 1
 
 	scene, texture_infos, gltf_data := shared.load_scene_gltf(
 		Sponza_Scene,
@@ -171,6 +179,21 @@ main :: proc() {
 
 	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
 
+
+	gbuffer_albedo, gbuffer_normal, gbuffer_metallic_roughness, depth_texture :=
+		create_gbuffer_textures(
+			u32(window_size_x),
+			u32(window_size_y),
+			texture_heap,
+			texture_rw_heap,
+		)
+	defer {
+		gpu.free_and_destroy_texture(&gbuffer_albedo)
+		gpu.free_and_destroy_texture(&gbuffer_normal)
+		gpu.free_and_destroy_texture(&gbuffer_metallic_roughness)
+		gpu.free_and_destroy_texture(&depth_texture)
+	}
+
 	gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
 	gpu.queue_submit(queue, {upload_cmd_buf})
 
@@ -200,10 +223,18 @@ main :: proc() {
 		if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
 			gpu.queue_wait_idle(queue)
 			gpu.swapchain_resize({u32(max(0, window_size_x)), u32(max(0, window_size_y))})
-			depth_desc.dimensions.x = u32(window_size_x)
-			depth_desc.dimensions.y = u32(window_size_y)
+
+			gpu.free_and_destroy_texture(&gbuffer_albedo)
+			gpu.free_and_destroy_texture(&gbuffer_normal)
+			gpu.free_and_destroy_texture(&gbuffer_metallic_roughness)
 			gpu.free_and_destroy_texture(&depth_texture)
-			depth_texture = gpu.alloc_and_create_texture(depth_desc)
+			gbuffer_albedo, gbuffer_normal, gbuffer_metallic_roughness, depth_texture =
+				create_gbuffer_textures(
+					u32(window_size_x),
+					u32(window_size_y),
+					texture_heap,
+					texture_rw_heap,
+				)
 		}
 
 		last_ts := now_ts
@@ -227,20 +258,44 @@ main :: proc() {
 
 		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
 
-		cmd_buf_final := render_pass_final(
-			queue,
-			swapchain,
+		cmd_buf := gpu.commands_begin(queue)
+
+		// G-buffer pass: render geometry to multiple color attachments
+		render_pass_gbuffer(
+			cmd_buf,
+			gbuffer_albedo,
+			gbuffer_normal,
+			gbuffer_metallic_roughness,
 			depth_texture,
-			vert_shader_final,
-			frag_shader_final,
+			vert_shader_gbuffer,
+			frag_shader_gbuffer,
 			texture_heap,
+			texture_rw_heap,
 			sampler_heap,
 			frame_arena,
 			&scene,
 			world_to_view,
 			view_to_proj,
 		)
-		gpu.queue_submit(queue, {cmd_buf_final}, frame_sem, next_frame)
+
+		// Final pass: composite from G-buffer
+		render_pass_final(
+			cmd_buf,
+			swapchain,
+			gbuffer_albedo,
+			gbuffer_normal,
+			gbuffer_metallic_roughness,
+			vert_shader_final,
+			frag_shader_final,
+			texture_heap,
+			texture_rw_heap,
+			sampler_heap,
+			frame_arena,
+			full_screen_quad_verts_gpu,
+			full_screen_quad_indices_gpu,
+		)
+
+		gpu.queue_submit(queue, {cmd_buf}, frame_sem, next_frame)
 
 		gpu.swapchain_present(queue, frame_sem, next_frame)
 		next_frame += 1
@@ -251,24 +306,30 @@ main :: proc() {
 	gpu.wait_idle()
 }
 
-render_pass_final :: proc(
-	queue: gpu.Queue,
-	swapchain: gpu.Texture,
+render_pass_gbuffer :: proc(
+	cmd_buf: gpu.Command_Buffer,
+	gbuffer_albedo: gpu.Texture,
+	gbuffer_normal: gpu.Texture,
+	gbuffer_metallic_roughness: gpu.Texture,
 	depth_texture: gpu.Texture,
 	vert_shader: gpu.Shader,
 	frag_shader: gpu.Shader,
 	texture_heap: rawptr,
+	texture_rw_heap: rawptr,
 	sampler_heap: rawptr,
 	frame_arena: ^gpu.Arena,
 	scene: ^shared.Scene,
 	world_to_view: matrix[4, 4]f32,
 	view_to_proj: matrix[4, 4]f32,
-) -> gpu.Command_Buffer {
-	cmd_buf := gpu.commands_begin(queue)
+) {
 	gpu.cmd_begin_render_pass(
 		cmd_buf,
 		{
-			color_attachments = {{texture = swapchain, clear_color = {0.7, 0.7, 0.7, 1.0}}},
+			color_attachments = {
+				{texture = gbuffer_albedo, clear_color = {0.0, 0.0, 0.0, 1.0}},
+				{texture = gbuffer_normal, clear_color = {0.5, 0.5, 1.0, 1.0}},
+				{texture = gbuffer_metallic_roughness, clear_color = {0.0, 0.0, 0.0, 1.0}},
+			},
 			depth_attachment = gpu.Render_Attachment{texture = depth_texture, clear_color = 1.0},
 		},
 	)
@@ -276,8 +337,9 @@ render_pass_final :: proc(
 
 	// Set texture and sampler heaps
 	textures_ptr := gpu.host_to_device_ptr(texture_heap)
+	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
 	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, nil, samplers_ptr)
+	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
 
 	gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
 
@@ -336,7 +398,231 @@ render_pass_final :: proc(
 	}
 
 	gpu.cmd_end_render_pass(cmd_buf)
-	return cmd_buf
+	// Barrier to ensure G-buffer textures are ready for sampling in next pass
+	gpu.cmd_barrier(cmd_buf, .Raster_Color_Out, .Fragment_Shader, {})
+}
+
+render_pass_final :: proc(
+	cmd_buf: gpu.Command_Buffer,
+	swapchain: gpu.Texture,
+	gbuffer_albedo: gpu.Texture,
+	gbuffer_normal: gpu.Texture,
+	gbuffer_metallic_roughness: gpu.Texture,
+	vert_shader: gpu.Shader,
+	frag_shader: gpu.Shader,
+	texture_heap: rawptr,
+	texture_rw_heap: rawptr,
+	sampler_heap: rawptr,
+	frame_arena: ^gpu.Arena,
+	fsq_verts_gpu: rawptr,
+	fsq_indices_gpu: rawptr,
+) {
+	gpu.cmd_begin_render_pass(
+		cmd_buf,
+		{color_attachments = {{texture = swapchain, clear_color = {0.7, 0.7, 0.7, 1.0}}}},
+	)
+	gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
+
+	// Set texture and sampler heaps
+	textures_ptr := gpu.host_to_device_ptr(texture_heap)
+	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
+	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
+	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
+
+	// Disable depth testing for fullscreen quad
+	gpu.cmd_set_depth_state(cmd_buf, {mode = {}, compare = .Always})
+
+	// Vertex data for fullscreen quad
+	Vert_Data :: struct #all_or_none {
+		verts: rawptr,
+	}
+	verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
+	verts_data.cpu.verts = fsq_verts_gpu
+
+	// Fragment data with G-buffer albedo texture
+	Frag_Data :: struct #all_or_none {
+		gbuffer_albedo:         u32,
+		gbuffer_albedo_sampler: u32,
+	}
+	frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
+	frag_data.cpu^ = {
+		gbuffer_albedo         = GBUFFER_ALBEDO_IDX,
+		gbuffer_albedo_sampler = 0,
+	}
+
+	// Render fullscreen quad
+	gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, fsq_indices_gpu, 6, 1)
+
+	gpu.cmd_end_render_pass(cmd_buf)
+}
+
+
+create_gbuffer_textures :: proc(
+	window_size_x: u32,
+	window_size_y: u32,
+	texture_heap: rawptr,
+	texture_rw_heap: rawptr,
+) -> (
+	gbuffer_albedo: gpu.Owned_Texture,
+	gbuffer_normal: gpu.Owned_Texture,
+	gbuffer_metallic_roughness: gpu.Owned_Texture,
+	depth_texture: gpu.Owned_Texture,
+) {
+	gbuffer_desc := gpu.Texture_Desc {
+		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
+		format       = .RGBA8_Unorm,
+		mip_count    = 1,
+		layer_count  = 1,
+		sample_count = 1,
+		usage        = {.Color_Attachment, .Sampled, .Storage},
+	}
+
+	depth_desc := gpu.Texture_Desc {
+		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
+		format       = .D32_Float,
+		mip_count    = 1,
+		layer_count  = 1,
+		sample_count = 1,
+		usage        = {.Depth_Stencil_Attachment},
+	}
+
+	// Albedo
+	{
+		new_gbuffer_albedo := gpu.alloc_and_create_texture(gbuffer_desc)
+		gpu.set_texture_desc(
+			texture_heap,
+			GBUFFER_ALBEDO_IDX,
+			gpu.texture_view_descriptor(new_gbuffer_albedo, {format = .RGBA8_Unorm}),
+		)
+		gpu.set_texture_rw_desc(
+			texture_rw_heap,
+			GBUFFER_ALBEDO_IDX,
+			gpu.texture_rw_view_descriptor(new_gbuffer_albedo, {format = .RGBA8_Unorm}),
+		)
+		gbuffer_albedo = new_gbuffer_albedo
+	}
+
+	// Normal
+	{
+		new_gbuffer_normal := gpu.alloc_and_create_texture(gbuffer_desc)
+		gpu.set_texture_rw_desc(
+			texture_rw_heap,
+			GBUFFER_NORMAL_IDX,
+			gpu.texture_rw_view_descriptor(new_gbuffer_normal, {format = .RGBA8_Unorm}),
+		)
+		gpu.set_texture_desc(
+			texture_heap,
+			GBUFFER_NORMAL_IDX,
+			gpu.texture_view_descriptor(new_gbuffer_normal, {format = .RGBA8_Unorm}),
+		)
+		gbuffer_normal = new_gbuffer_normal
+	}
+
+	// Metallic roughness
+	{
+		new_gbuffer_metallic_roughness := gpu.alloc_and_create_texture(gbuffer_desc)
+		gpu.set_texture_desc(
+			texture_heap,
+			GBUFFER_METALLIC_ROUGHNESS_IDX,
+			gpu.texture_view_descriptor(new_gbuffer_metallic_roughness, {format = .RGBA8_Unorm}),
+		)
+		gpu.set_texture_rw_desc(
+			texture_rw_heap,
+			GBUFFER_METALLIC_ROUGHNESS_IDX,
+			gpu.texture_rw_view_descriptor(
+				new_gbuffer_metallic_roughness,
+				{format = .RGBA8_Unorm},
+			),
+		)
+		gbuffer_metallic_roughness = new_gbuffer_metallic_roughness
+	}
+
+	// Depth
+	{
+		new_depth_texture := gpu.alloc_and_create_texture(depth_desc)
+		depth_texture = new_depth_texture
+	}
+
+	return gbuffer_albedo, gbuffer_normal, gbuffer_metallic_roughness, depth_texture
+}
+
+// Create a 1x1 magenta texture (useful as default/missing texture indicator)
+create_magenta_texture :: proc(
+	upload_arena: ^gpu.Arena,
+	cmd_buf: gpu.Command_Buffer,
+	texture_heap: rawptr,
+) -> gpu.Owned_Texture {
+	magenta_pixels := [4]u8{255, 0, 255, 255}
+	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, 4)
+	runtime.mem_copy(staging, raw_data(magenta_pixels[:]), 4)
+
+	texture := gpu.alloc_and_create_texture(
+		{
+			type = .D2,
+			dimensions = {1, 1, 1},
+			mip_count = 1,
+			layer_count = 1,
+			sample_count = 1,
+			format = .RGBA8_Unorm,
+			usage = {.Sampled},
+		},
+	)
+	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
+	gpu.set_texture_desc(
+		texture_heap,
+		shared.MISSING_TEXTURE_ID,
+		gpu.texture_view_descriptor(texture, {format = .RGBA8_Unorm}),
+	)
+	return texture
+}
+
+create_fullscreen_quad :: proc(
+	upload_arena: ^gpu.Arena,
+	cmd_buf: gpu.Command_Buffer,
+) -> (
+	rawptr,
+	rawptr,
+) {
+	Fullscreen_Vertex :: struct {
+		pos: [3]f32,
+		uv:  [2]f32,
+	}
+
+	fsq_verts := gpu.arena_alloc_array(upload_arena, Fullscreen_Vertex, 4)
+	fsq_verts.cpu[0].pos = {-1.0, 1.0, 0.0} // Top-left
+	fsq_verts.cpu[1].pos = {1.0, -1.0, 0.0} // Bottom-right
+	fsq_verts.cpu[2].pos = {1.0, 1.0, 0.0} // Top-right
+	fsq_verts.cpu[3].pos = {-1.0, -1.0, 0.0} // Bottom-left
+	fsq_verts.cpu[0].uv = {0.0, 1.0}
+	fsq_verts.cpu[1].uv = {1.0, 0.0}
+	fsq_verts.cpu[2].uv = {1.0, 1.0}
+	fsq_verts.cpu[3].uv = {0.0, 0.0}
+
+	fsq_indices := gpu.arena_alloc_array(upload_arena, u32, 6)
+	fsq_indices.cpu[0] = 0
+	fsq_indices.cpu[1] = 2
+	fsq_indices.cpu[2] = 1
+	fsq_indices.cpu[3] = 0
+	fsq_indices.cpu[4] = 1
+	fsq_indices.cpu[5] = 3
+
+	full_screen_quad_verts_gpu := gpu.mem_alloc_typed_gpu(Fullscreen_Vertex, 4)
+	full_screen_quad_indices_gpu := gpu.mem_alloc_typed_gpu(u32, 6)
+
+	gpu.cmd_mem_copy(
+		cmd_buf,
+		fsq_verts.gpu,
+		full_screen_quad_verts_gpu,
+		u64(len(fsq_verts.cpu)) * size_of(fsq_verts.cpu[0]),
+	)
+	gpu.cmd_mem_copy(
+		cmd_buf,
+		fsq_indices.gpu,
+		full_screen_quad_indices_gpu,
+		u64(len(fsq_indices.cpu)) * size_of(fsq_indices.cpu[0]),
+	)
+
+	return full_screen_quad_verts_gpu, full_screen_quad_indices_gpu
 }
 
 // Load textures from Texture_Info and update mesh texture IDs

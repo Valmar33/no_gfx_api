@@ -122,30 +122,6 @@ Instance :: struct {
 	mesh_idx:  u32,
 }
 
-// Create a 1x1 magenta texture (useful as default/missing texture indicator)
-create_magenta_texture :: proc(
-	upload_arena: ^gpu.Arena,
-	cmd_buf: gpu.Command_Buffer,
-) -> gpu.Owned_Texture {
-	magenta_pixels := [4]u8{255, 0, 255, 255}
-	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, 4)
-	runtime.mem_copy(staging, raw_data(magenta_pixels[:]), 4)
-
-	texture := gpu.alloc_and_create_texture(
-		{
-			type = .D2,
-			dimensions = {1, 1, 1},
-			mip_count = 1,
-			layer_count = 1,
-			sample_count = 1,
-			format = .RGBA8_Unorm,
-			usage = {.Sampled},
-		},
-	)
-	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
-	return texture
-}
-
 // Input
 
 Key_State :: struct {

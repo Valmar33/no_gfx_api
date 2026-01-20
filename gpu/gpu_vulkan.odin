@@ -1912,10 +1912,23 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
 
     // Blend state
     vk.CmdSetStencilTestEnable(vk_cmd_buf, false)
-    b32_false := b32(false)
-    vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, 1, &b32_false)
-    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
-    vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, 1, &color_mask)
+    color_attachment_count := u32(len(vk_color_attachments))
+    if color_attachment_count > 0 {
+        // Set blend enable for all attachments
+        blend_enables := make([]b32, color_attachment_count, allocator = scratch)
+        for i in 0 ..< color_attachment_count {
+            blend_enables[i] = false
+        }
+        vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(blend_enables))
+        
+        // Set color write mask for all attachments
+        color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+        color_masks := make([]vk.ColorComponentFlags, color_attachment_count, allocator = scratch)
+        for i in 0 ..< color_attachment_count {
+            color_masks[i] = color_mask
+        }
+        vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(color_masks))
+    }
 
     // Depth state
     vk.CmdSetDepthCompareOp(vk_cmd_buf, .LESS)

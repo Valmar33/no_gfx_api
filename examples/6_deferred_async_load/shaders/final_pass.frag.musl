@@ -1,17 +1,12 @@
 Data :: struct
 {
-    base_color_map: textureid,
-    base_color_map_sampler: samplerid,
-
-    metallic_roughness_map: textureid,
-    metallic_roughness_map_sampler: samplerid,
-
-    normal_map: textureid,
-    normal_map_sampler: samplerid,
+    gbuffer_albedo: textureid,
+    gbuffer_albedo_sampler: samplerid,
 }
 
-main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), data: ^Data @data) -> vec4 @out_loc(0)
+main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)
 {
-    base_color := sample(data.base_color_map, data.base_color_map_sampler, uv);
-    return base_color;
+    // Sample albedo from G-buffer
+    albedo := sample(data.gbuffer_albedo, data.gbuffer_albedo_sampler, uv);
+    return albedo;
 }
