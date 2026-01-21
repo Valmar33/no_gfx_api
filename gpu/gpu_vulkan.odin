@@ -983,12 +983,14 @@ _mem_free :: proc(ptr: rawptr, loc := #caller_location)
     if cpu_found
     {
         meta := ctx.gpu_allocs[cpu_alloc]
+        rbt.remove_key(&ctx.alloc_tree, Alloc_Range { u64(meta.device_address), u32(meta.buf_size) })
         vma.destroy_buffer(ctx.vma_allocator, meta.buf_handle, meta.allocation)
         delete_key(&ctx.cpu_ptr_to_alloc, ptr)
     }
     else if gpu_found
     {
         meta := ctx.gpu_allocs[gpu_alloc]
+        rbt.remove_key(&ctx.alloc_tree, Alloc_Range { u64(meta.device_address), u32(meta.buf_size) })
         vma.destroy_buffer(ctx.vma_allocator, meta.buf_handle, meta.allocation)
         delete_key(&ctx.gpu_ptr_to_alloc, ptr)
     }
