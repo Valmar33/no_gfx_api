@@ -248,11 +248,11 @@ blas_create: proc(desc: BLAS_Desc, storage: rawptr) -> BVH : _blas_create
 blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
 //blas_update_scratch_buffer_size_and_align
 tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
-//tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
-//tlas_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_scratch_buffer_size_and_align
-bvh_size_and_align :: proc { blas_size_and_align /*, tlas_size_and_align*/ }
-bvh_create :: proc { blas_create /*, tlas_create*/ }
-bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align /*, tlas_scratch_buffer_size_and_align*/ }
+tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
+tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
+bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
+bvh_create :: proc { blas_create, tlas_create }
+bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
 //get_bvh_descriptor_size: proc(bvh: BVH) -> u32 : _get_bvh_descriptor_size
 bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
 
@@ -355,13 +355,10 @@ arena_init :: proc(storage: u64, mem_type := Memory.Default) -> Arena
 
 arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
 {
+    assert(bytes > 0 && align > 0)
+
     gpu_addr := uintptr(arena.gpu) + uintptr(arena.offset)
     offset = align_up(u64(gpu_addr), align) - u64(uintptr(arena.gpu))
-
-    if align == 256
-    {
-        fmt.println(uintptr(arena.gpu), align_up(u64(gpu_addr), align), gpu_addr + uintptr(offset))
-    }
 
     if offset + bytes > size do panic("GPU Arena ran out of space!")
 
@@ -470,13 +467,10 @@ alloc_and_create_blas :: proc(desc: BLAS_Desc) -> Owned_BVH
 
 alloc_and_create_tlas :: proc(desc: TLAS_Desc) -> Owned_BVH
 {
-    return {}
-    /*
     size, align := bvh_size_and_align(desc)
     ptr := mem_alloc(size, align, .GPU)
     bvh := bvh_create(desc, ptr)
     return Owned_BVH { bvh, ptr }
-    */
 }
 
 alloc_and_create_bvh :: proc { alloc_and_create_blas, alloc_and_create_tlas }
@@ -497,7 +491,7 @@ alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawpt
 
 alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
 {
-    size, align := tlas_size_and_align(desc)
+    size, align := tlas_build_scratch_buffer_size_and_align(desc)
     cpu, gpu := arena_alloc_untyped(arena, size, align)
     return gpu
 }

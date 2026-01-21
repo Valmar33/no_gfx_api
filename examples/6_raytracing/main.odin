@@ -332,23 +332,24 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     bvh := gpu.alloc_and_create_bvh(desc)
     scratch := gpu.alloc_bvh_build_scratch_buffer(bvh_scratch_arena, desc)
     gpu.cmd_build_tlas(cmd_buf, bvh, bvh.mem, scratch, instances)
-    return {}
+    return bvh
 }
 
-upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, scene: Scene) -> rawptr
+upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []Instance, meshes: []Mesh) -> rawptr
 {
-    instances_staging := gpu.arena_alloc_array(upload_arena, gpu.BVH_Instance, len(scene.instances))
+    instances_staging := gpu.arena_alloc_array(upload_arena, gpu.BVH_Instance, len(instances))
     for &instance, i in instances_staging.cpu
     {
-        transform_row_major := intr.transpose(scene.instances[i].transform)
+        transform_row_major := intr.transpose(instances[i].transform)
         flattened := linalg.matrix_flatten(transform_row_major)
-        gpu_transform := flattened[:12]
+        // Better way to do this???
+        gpu_transform := [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
         instance = {
-            transform = {},
-            blas = scene.meshes[scene.instances[i].mesh_idx].bvh.mem,
+            transform = gpu_transform,
+            blas = meshes[instances[i].mesh_idx].bvh.mem,
         }
     }
-    instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(scene.instances))
+    instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(instances))
     gpu.cmd_mem_copy(cmd_buf, instances_staging.gpu, instances_local, len(instances_staging.cpu))
     return instances_local
 }
@@ -654,11 +655,13 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count / 3)
     }
 
-    gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    //tlas := build_tlas(upload_arena, cmd_buf, {}, u32(len(instances)))  // TODO: Upload instances!
+    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(instances)))  // TODO: Upload instances!
 
-    //gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     return {
         instances = instances,
