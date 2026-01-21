@@ -1,3 +1,8 @@
+// This example demonstrates:
+// - Using multiple render targets to render the G-buffer and passing them to the final pass shader as textures
+// - Using multiple render passes
+// - glTF texture loading and using textures for rendering
+// - Asynchronous texture loading by rendering a default texture and swapping it out for the actual textures once loaded
 
 package main
 
@@ -12,6 +17,7 @@ import "core:image/png"
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
+import "core:strings"
 import "core:sync"
 import "core:thread"
 
@@ -24,7 +30,7 @@ import gltf2 "../shared/gltf2"
 Start_Window_Size_X :: 1000
 Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
-Example_Name :: "Deferred Async Example - Right-click + WASD for first-person controls."
+Example_Name_Format :: "Right-click + WASD for first-person controls. Left click to toggle texture type. Current: %v"
 
 Sponza_Scene :: #load("../shared/assets/sponza.glb")
 
@@ -35,6 +41,16 @@ Load_Textures_Async :: true
 GBUFFER_ALBEDO_IDX :: 1000
 GBUFFER_NORMAL_IDX :: 1001
 GBUFFER_METALLIC_ROUGHNESS_IDX :: 1002
+
+// G-buffer texture type for toggling display
+GBuffer_Texture_Type :: enum u32 {
+	Albedo             = 0,
+	Normal             = 1,
+	Metallic_Roughness = 2,
+}
+
+// Currently selected gbuffer texture type to display
+selected_texture_type: GBuffer_Texture_Type = .Albedo
 
 // Textures can be loaded/unloaded on different threads, so we need to synchronize access to the textures array
 mutex: sync.Mutex
@@ -56,8 +72,12 @@ main :: proc() {
 	max_delta_time: f32 = 1.0 / 10.0 // 10fps
 
 	window_flags :: sdl.WindowFlags{.HIGH_PIXEL_DENSITY, .VULKAN, .RESIZABLE}
+	window_title := strings.clone_to_cstring(
+		fmt.tprintf(Example_Name_Format, selected_texture_type),
+	)
+	defer delete(window_title)
 	window := sdl.CreateWindow(
-		Example_Name,
+		window_title,
 		Start_Window_Size_X,
 		Start_Window_Size_Y,
 		window_flags,
@@ -208,6 +228,16 @@ main :: proc() {
 	for true {
 		proceed := shared.handle_window_events(window)
 		if !proceed do break
+
+		// Toggle gbuffer texture type on left mouse button click
+		if shared.INPUT.left_click_pressed {
+			selected_texture_type = GBuffer_Texture_Type((u32(selected_texture_type) + 1) % 3)
+			title := strings.clone_to_cstring(
+				fmt.tprintf(Example_Name_Format, selected_texture_type),
+			)
+			sdl.SetWindowTitle(window, title)
+			delete(title)
+		}
 
 		old_window_size_x := window_size_x
 		old_window_size_y := window_size_y
@@ -439,15 +469,25 @@ render_pass_final :: proc(
 	verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
 	verts_data.cpu.verts = fsq_verts_gpu
 
-	// Fragment data with G-buffer albedo texture
+	// Fragment data with all G-buffer textures and selected texture type
 	Frag_Data :: struct #all_or_none {
-		gbuffer_albedo:         u32,
-		gbuffer_albedo_sampler: u32,
+		gbuffer_albedo:                     u32,
+		gbuffer_albedo_sampler:             u32,
+		gbuffer_normal:                     u32,
+		gbuffer_normal_sampler:             u32,
+		gbuffer_metallic_roughness:         u32,
+		gbuffer_metallic_roughness_sampler: u32,
+		selected_texture_type:              i32,
 	}
 	frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
 	frag_data.cpu^ = {
-		gbuffer_albedo         = GBUFFER_ALBEDO_IDX,
-		gbuffer_albedo_sampler = 0,
+		gbuffer_albedo                     = GBUFFER_ALBEDO_IDX,
+		gbuffer_albedo_sampler             = 0,
+		gbuffer_normal                     = GBUFFER_NORMAL_IDX,
+		gbuffer_normal_sampler             = 0,
+		gbuffer_metallic_roughness         = GBUFFER_METALLIC_ROUGHNESS_IDX,
+		gbuffer_metallic_roughness_sampler = 0,
+		selected_texture_type              = i32(selected_texture_type),
 	}
 
 	// Render fullscreen quad
@@ -455,7 +495,6 @@ render_pass_final :: proc(
 
 	gpu.cmd_end_render_pass(cmd_buf)
 }
-
 
 create_gbuffer_textures :: proc(
 	window_size_x: u32,

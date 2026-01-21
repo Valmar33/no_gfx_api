@@ -132,6 +132,7 @@ Key_State :: struct {
 
 Input :: struct {
 	pressing_right_click: bool,
+	left_click_pressed:   bool, // One-shot flag for left mouse button press
 	keys:                 #sparse[sdl.Scancode]Key_State,
 	mouse_dx:             f32, // pixels/dpi (inches), right is positive
 	mouse_dy:             f32, // pixels/dpi (inches), up is positive
@@ -147,6 +148,7 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool) {
 	}
 	INPUT.mouse_dx = 0
 	INPUT.mouse_dy = 0
+	INPUT.left_click_pressed = false
 
 	event: sdl.Event
 	proceed = true
@@ -167,6 +169,8 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool) {
 				if event.type == .MOUSE_BUTTON_DOWN {
 					if event.button == sdl.BUTTON_RIGHT {
 						INPUT.pressing_right_click = true
+					} else if event.button == sdl.BUTTON_LEFT {
+						INPUT.left_click_pressed = true
 					}
 				} else if event.type == .MOUSE_BUTTON_UP {
 					if event.button == sdl.BUTTON_RIGHT {
