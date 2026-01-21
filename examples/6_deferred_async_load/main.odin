@@ -3,6 +3,7 @@
 // - Using multiple render passes
 // - glTF texture loading and using textures for rendering
 // - Asynchronous texture loading by rendering a default texture and swapping it out for the actual textures once loaded
+// - Multithreaded texture loading
 
 package main
 
@@ -34,7 +35,7 @@ Example_Name_Format :: "Right-click + WASD for first-person controls. Left click
 
 Sponza_Scene :: #load("../shared/assets/sponza.glb")
 
-// Whether to load textures on background thread or preload them in main thread before running the screne
+// Whether to load textures in parallel in the background or preload them in main thread before running the screne
 Load_Textures_Async :: true
 
 // G-buffer texture indices in texture heap
@@ -52,13 +53,19 @@ GBuffer_Texture_Type :: enum u32 {
 // Currently selected gbuffer texture type to display
 selected_texture_type: GBuffer_Texture_Type = .Albedo
 
-// Textures can be loaded/unloaded on different threads, so we need to synchronize access to the textures array
+// Textures can be loaded/unloaded on different threads, so we need to synchronize access to loaded_textures, image_to_texture and image_uploaded
 mutex: sync.Mutex
 // Every texture from loaded_textures array needs to be freed when we are done
 loaded_textures: [dynamic]gpu.Owned_Texture
 // Enables asynchronous cancellation of texture loading
 cancel_loading_textures: bool
 next_texture_idx: u32 = shared.MISSING_TEXTURE_ID + 1
+// Cache for image_index -> texture mapping, reused across texture loading chunks
+image_to_texture: map[int]struct {
+	texture:     gpu.Owned_Texture,
+	texture_idx: u32,
+}
+image_uploaded: map[int]^sync.One_Shot_Event
 
 main :: proc() {
 	ok_i := sdl.Init({.VIDEO})
@@ -151,50 +158,65 @@ main :: proc() {
 
 	defer {
 		// Clean up loaded textures
-		sync.mutex_lock(&mutex)
+		sync.guard(&mutex)
 		for &tex in loaded_textures {
 			gpu.free_and_destroy_texture(&tex)
 		}
-		sync.mutex_unlock(&mutex)
 	}
 
-	when Load_Textures_Async {
-		Texture_Loader_Data :: struct {
-			texture_infos: []shared.Gltf_Texture_Info,
-			gltf_data:     ^gltf2.Data,
-			scene:         ^shared.Scene,
-			texture_heap:  rawptr,
-			logger:        log.Logger,
+	loading_threads: [dynamic]^thread.Thread
+	defer {
+		cancel_loading_textures = true
+		for t in loading_threads {
+			thread.terminate(t, 0)
 		}
-		loader_data := Texture_Loader_Data {
-			texture_infos = texture_infos,
-			gltf_data     = gltf_data,
-			scene         = &scene,
-			texture_heap  = texture_heap,
-			logger        = console_logger,
-		}
+	}
 
-		texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
-			data := cast(^Texture_Loader_Data)thread.data
-			context.logger = data.logger
-			log.info("Loading textures asynchronously")
-			load_scene_textures_from_gltf(
-				data.texture_infos,
-				data.gltf_data,
-				data.scene,
-				data.texture_heap,
-			)
-		}
+	Texture_Loader_Data :: struct {
+		texture_infos: []shared.Gltf_Texture_Info,
+		gltf_data:     ^gltf2.Data,
+		scene:         ^shared.Scene,
+		texture_heap:  rawptr,
+		logger:        log.Logger,
+	}
+	loader_data: [dynamic]Texture_Loader_Data
 
-		texture_loader_thread := thread.create(texture_loader_thread_proc)
-		texture_loader_thread.data = &loader_data
-		thread.start(texture_loader_thread)
-		defer {
-			cancel_loading_textures = true
-			thread.join(texture_loader_thread)
+	chunk_size :: 16
+	for i := 0; i < len(texture_infos); i += chunk_size {
+		end := min(i + chunk_size, len(texture_infos))
+		chunk := texture_infos[i:end]
+
+		log.debug(fmt.tprintf("Creating texture loader for chunk %v of %v", i, len(texture_infos)))
+
+		when Load_Textures_Async {
+			loader_data_item := Texture_Loader_Data {
+				texture_infos = chunk,
+				gltf_data     = gltf_data,
+				scene         = &scene,
+				texture_heap  = texture_heap,
+				logger        = console_logger,
+			}
+
+			append(&loader_data, loader_data_item)
+
+			texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
+				data := cast(^Texture_Loader_Data)thread.data
+				context.logger = data.logger
+				load_scene_textures_from_gltf(
+					data.texture_infos,
+					data.gltf_data,
+					data.scene,
+					data.texture_heap,
+				)
+			}
+
+			texture_loader_thread := thread.create(texture_loader_thread_proc)
+			texture_loader_thread.data = &loader_data[len(loader_data) - 1]
+			thread.start(texture_loader_thread)
+			append(&loading_threads, texture_loader_thread)
+		} else {
+			load_scene_textures_from_gltf(chunk, gltf_data, &scene, texture_heap)
 		}
-	} else {
-		load_scene_textures_from_gltf(texture_infos, gltf_data, &scene, texture_heap)
 	}
 
 	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
@@ -671,84 +693,54 @@ load_scene_textures_from_gltf :: proc(
 	scene: ^shared.Scene,
 	texture_heap: rawptr,
 ) {
-	submitted_upload :: struct {
-		texture:      gpu.Owned_Texture,
-		texture_idx:  u32,
-		mesh_id:      u32,
-		texture_type: shared.Texture_Type,
-	}
-	submitted_uploads_queue: queue.Queue(submitted_upload)
-	queue.init(&submitted_uploads_queue)
-	defer queue.destroy(&submitted_uploads_queue)
-
-	pending_uploads_queue: queue.Queue(shared.Gltf_Texture_Info)
-	queue.init(&pending_uploads_queue)
-	for info in texture_infos {
-		queue.push(&pending_uploads_queue, info)
-	}
-	defer queue.destroy(&pending_uploads_queue)
-
-	image_to_texture: map[int]struct {
-		texture:     gpu.Owned_Texture,
-		texture_idx: u32,
-	}
-	defer delete(image_to_texture)
-
 	transfer_queue := gpu.get_queue(.Transfer)
 
 	upload_arena := gpu.arena_init(1024 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
-	for pending_uploads_queue.len > 0 && !cancel_loading_textures {
-		// Create a new command buffer for each batch upload
-		upload_cmd_buf := gpu.commands_begin(transfer_queue)
+	for info in texture_infos {
+		if cancel_loading_textures {
+			return
+		}
 
-		// Submit 16 texture uploads at a time
-		for submitted_uploads_queue.len < 16 &&
-		    pending_uploads_queue.len > 0 &&
-		    !cancel_loading_textures {
-			info := queue.pop_front(&pending_uploads_queue)
-
-			if info.mesh_id >= u32(len(scene.meshes)) {
-				log.error(
-					fmt.tprintf(
-						"Invalid mesh_id %v (only %v meshes available)",
-						info.mesh_id,
-						len(scene.meshes),
-					),
-				)
-				continue
-			}
-
-			texture: gpu.Owned_Texture
-			texture_idx: u32
-			if tex, ok := image_to_texture[info.image_index]; ok {
-				texture = tex.texture
-				texture_idx = tex.texture_idx
-			} else {
-				mesh := &scene.meshes[info.mesh_id]
-				image_data := data.images[info.image_index]
-
-				sync.mutex_lock(&mutex)
-				texture_idx = next_texture_idx
-				next_texture_idx += 1
-				sync.mutex_unlock(&mutex)
-
-				texture = load_texture_from_gltf(
-					image_data,
-					data,
-					&upload_arena,
-					upload_cmd_buf,
-					transfer_queue,
-				)
-
-				image_to_texture[info.image_index] = {texture, texture_idx}
-			}
-
-			queue.push(
-				&submitted_uploads_queue,
-				submitted_upload{texture, texture_idx, info.mesh_id, info.texture_type},
+		if info.mesh_id >= u32(len(scene.meshes)) {
+			log.error(
+				fmt.tprintf(
+					"Invalid mesh_id %v (only %v meshes available)",
+					info.mesh_id,
+					len(scene.meshes),
+				),
 			)
+			continue
+		}
+
+		sync.mutex_lock(&mutex)
+		if event, ok := image_uploaded[info.image_index]; ok {
+			sync.mutex_unlock(&mutex)
+			sync.one_shot_event_wait(event)
+		} else {
+			texture_idx := next_texture_idx
+			next_texture_idx += 1
+			event := new(sync.One_Shot_Event)
+			image_uploaded[info.image_index] = event
+			sync.mutex_unlock(&mutex)
+
+			upload_cmd_buf := gpu.commands_begin(transfer_queue)
+
+			texture := load_texture_from_gltf(
+				data.images[info.image_index],
+				data,
+				&upload_arena,
+				upload_cmd_buf,
+				transfer_queue,
+			)
+
+			gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
+			gpu.queue_submit(transfer_queue, {upload_cmd_buf})
+
+			if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
+
+			sync.one_shot_event_signal(event)
 
 			log.info(
 				fmt.tprintf(
@@ -759,35 +751,29 @@ load_scene_textures_from_gltf :: proc(
 				),
 			)
 		}
-
-		gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-
-		gpu.queue_submit(transfer_queue, {upload_cmd_buf})
-
-		gpu.queue_wait_idle(transfer_queue)
-
-		gpu.arena_free_all(&upload_arena)
-
-		for submitted_uploads_queue.len > 0 {
-			upload := queue.pop_front(&submitted_uploads_queue)
-			switch upload.texture_type {
-			case .Base_Color:
-				scene.meshes[upload.mesh_id].base_color_map = upload.texture_idx
-			case .Metallic_Roughness:
-				scene.meshes[upload.mesh_id].metallic_roughness_map = upload.texture_idx
-			case .Normal:
-				scene.meshes[upload.mesh_id].normal_map = upload.texture_idx
-			}
-
-			gpu.set_texture_desc(
-				texture_heap,
-				upload.texture_idx,
-				gpu.texture_view_descriptor(upload.texture, {format = .RGBA8_Unorm}),
-			)
-		}
 	}
 
-	log.info("Finished loading textures")
+	gpu.queue_wait_idle(transfer_queue)
+
+	for info in texture_infos {
+		sync.guard(&mutex)
+		texture := image_to_texture[info.image_index]
+
+		switch info.texture_type {
+		case .Base_Color:
+			scene.meshes[info.mesh_id].base_color_map = texture.texture_idx
+		case .Metallic_Roughness:
+			scene.meshes[info.mesh_id].metallic_roughness_map = texture.texture_idx
+		case .Normal:
+			scene.meshes[info.mesh_id].normal_map = texture.texture_idx
+		}
+
+		gpu.set_texture_desc(
+			texture_heap,
+			texture.texture_idx,
+			gpu.texture_view_descriptor(texture.texture, {format = .RGBA8_Unorm}),
+		)
+	}
 }
 
 
@@ -858,7 +844,6 @@ load_texture_from_gltf :: proc(
 	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
 	runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
 
-	sync.mutex_lock(&mutex)
 	texture := gpu.alloc_and_create_texture(
 		{
 			type = .D2,
@@ -871,8 +856,7 @@ load_texture_from_gltf :: proc(
 		},
 		queue,
 	)
-	append(&loaded_textures, texture)
-	sync.mutex_unlock(&mutex)
+	if sync.guard(&mutex) do append(&loaded_textures, texture)
 
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
 	return texture
