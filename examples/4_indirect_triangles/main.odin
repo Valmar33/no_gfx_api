@@ -188,7 +188,7 @@ main :: proc()
         shared_vert_data := gpu.arena_alloc(frame_arena, Vert_Data)
         shared_vert_data.cpu.verts = verts_local
 
-        if Use_Indirect_Multi {
+        when Use_Indirect_Multi {
             // Draw multiple indexed triangles using indirect rendering
             // Arguments:
             //   cmd_buf: Command buffer to record the draw command

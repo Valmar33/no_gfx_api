@@ -6,6 +6,7 @@ import "core:log"
 import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
+import "core:sync"
 import rbt "core:container/rbtree"
 import "core:dynlib"
 
@@ -81,9 +82,6 @@ Context :: struct
     // Resource pools
     queues: [len(Queue_Type) + 1]Queue_Info,  // Reserve slot 0 for invalid queue.
     textures: Pool(Texture_Info),
-    cmd_pools: [Queue_Type]vk.CommandPool,
-    cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
-    cmd_bufs_timelines: [Queue_Type][10]Timeline,
     samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
 
     // Swapchain
@@ -99,6 +97,17 @@ Context :: struct
     // Shader metadata
     current_workgroup_size: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
     cmd_buf_compute_shader: map[Command_Buffer]Shader,  // Tracks current compute shader per command buffer
+
+    lock: sync.Benaphore, // Ensures thread-safe access to ctx and VK operations
+    tls_contexts: [dynamic]^Thread_Local_Context,
+}
+
+@(private="file")
+Thread_Local_Context :: struct
+{
+    cmd_pools: [Queue_Type]vk.CommandPool,
+    cmd_bufs: [Queue_Type][10]vk.CommandBuffer,
+    cmd_bufs_timelines: [Queue_Type][10]Timeline,
 }
 
 @(private="file")
@@ -142,6 +151,10 @@ Queue_Info :: struct
 
 @(private="file")
 ctx: Context
+
+@(private="file") @(thread_local)
+tls_ctx: ^Thread_Local_Context
+
 @(private="file")
 vk_logger: log.Logger
 
@@ -397,47 +410,6 @@ _init :: proc()
     vk.load_proc_addresses_device(ctx.device)
     if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
 
-    // Command buffers
-    for type in Queue_Type
-    {
-        cmd_pool_ci := vk.CommandPoolCreateInfo {
-            sType = .COMMAND_POOL_CREATE_INFO,
-            queueFamilyIndex = ctx.queues[type].family_idx,
-            flags = { .TRANSIENT, .RESET_COMMAND_BUFFER }
-        }
-        vk_check(vk.CreateCommandPool(ctx.device, &cmd_pool_ci, nil, &ctx.cmd_pools[type]))
-    }
-
-    for type in Queue_Type
-    {
-        cmd_buf_ai := vk.CommandBufferAllocateInfo {
-            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = ctx.cmd_pools[type],
-            level = .PRIMARY,
-            commandBufferCount = len(ctx.cmd_bufs[type]),
-        }
-        vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &ctx.cmd_bufs[type][0]))
-    }
-
-    for type in Queue_Type
-    {
-        for &timeline in ctx.cmd_bufs_timelines[type]
-        {
-            next_sem: rawptr
-            next_sem = &vk.SemaphoreTypeCreateInfo {
-                sType = .SEMAPHORE_TYPE_CREATE_INFO,
-                pNext = next_sem,
-                semaphoreType = .TIMELINE,
-                initialValue = 0,
-            }
-            sem_ci := vk.SemaphoreCreateInfo {
-                sType = .SEMAPHORE_CREATE_INFO,
-                pNext = next_sem
-            }
-            vk_check(vk.CreateSemaphore(ctx.device, &sem_ci, nil, &timeline.sem))
-        }
-    }
-
     // Common resources
     {
         {
@@ -638,22 +610,86 @@ _init :: proc()
     }
 }
 
+@(private="file")
+tls_init :: proc()
+{
+    // Only initialize if not already initialized
+    if tls_ctx != nil do return
+
+    tls_ctx = new(Thread_Local_Context)
+    
+    
+    for type in Queue_Type
+    {
+        queue := get_queue(type)
+        cmd_pool_ci := vk.CommandPoolCreateInfo {
+            sType = .COMMAND_POOL_CREATE_INFO,
+            queueFamilyIndex = get_resource(queue, &ctx.queues).family_idx,
+            flags = { .TRANSIENT, .RESET_COMMAND_BUFFER }
+        }
+        vk_check(vk.CreateCommandPool(ctx.device, &cmd_pool_ci, nil, &tls_ctx.cmd_pools[type]))
+    }
+
+    for type in Queue_Type
+    {
+        cmd_buf_ai := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool = tls_ctx.cmd_pools[type],
+            level = .PRIMARY,
+            commandBufferCount = len(tls_ctx.cmd_bufs[type]),
+        }
+        vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &tls_ctx.cmd_bufs[type][0]))
+
+    }
+
+    for type in Queue_Type
+    {
+        for &timeline in tls_ctx.cmd_bufs_timelines[type]
+        {
+            next_sem: rawptr
+            next_sem = &vk.SemaphoreTypeCreateInfo {
+                sType = .SEMAPHORE_TYPE_CREATE_INFO,
+                pNext = next_sem,
+                semaphoreType = .TIMELINE,
+                initialValue = 0,
+            }
+            sem_ci := vk.SemaphoreCreateInfo {
+                sType = .SEMAPHORE_CREATE_INFO,
+                pNext = next_sem
+            }
+            vk_check(vk.CreateSemaphore(ctx.device, &sem_ci, nil, &timeline.sem))
+        }
+    }
+
+    if sync.guard(&ctx.lock) do append(&ctx.tls_contexts, tls_ctx)
+}
+
 _cleanup :: proc()
 {
-    for type in Queue_Type {
-        vk.DestroyCommandPool(ctx.device, ctx.cmd_pools[type], nil)
+    sync.guard(&ctx.lock)
+
+    // Cleanup all TLS contexts
+    for tls_context in ctx.tls_contexts {
+        if tls_context != nil {
+            for type in Queue_Type {
+                vk.DestroyCommandPool(ctx.device, tls_context.cmd_pools[type], nil)
+            }
+            for type in Queue_Type {
+                for timeline in tls_context.cmd_bufs_timelines[type] {
+                    vk.DestroySemaphore(ctx.device, timeline.sem, nil)
+                }
+            }
+            free(tls_context)
+        }
     }
+    delete(ctx.tls_contexts)
+    ctx.tls_contexts = {}
 
     for &sampler in ctx.samplers {
         vk.DestroySampler(ctx.device, sampler.sampler, nil)
     }
 
     destroy_swapchain(&ctx.swapchain)
-    for type in Queue_Type {
-        for timeline in ctx.cmd_bufs_timelines[type] {
-            vk.DestroySemaphore(ctx.device, timeline.sem, nil)
-        }
-    }
 
     vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_desc_layout, nil)
     vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_rw_desc_layout, nil)
@@ -670,13 +706,16 @@ _cleanup :: proc()
 
 _wait_idle :: proc()
 {
+    sync.guard(&ctx.lock)
     vk.DeviceWaitIdle(ctx.device)
 }
 
 _swapchain_init :: proc(surface: vk.SurfaceKHR, init_size: [2]u32, frames_in_flight: u32)
 {
-    ctx.frames_in_flight = frames_in_flight
-    ctx.surface = surface
+    if sync.guard(&ctx.lock) {
+        ctx.frames_in_flight = frames_in_flight
+        ctx.surface = surface
+    }
 
     // NOTE: surface_caps.currentExtent could be max(u32)!!!
     surface_caps: vk.SurfaceCapabilitiesKHR
@@ -700,6 +739,7 @@ _swapchain_resize :: proc(size: [2]u32)
 @(private="file")
 recreate_swapchain :: proc(size: [2]u32)
 {
+    sync.guard(&ctx.lock)
     destroy_swapchain(&ctx.swapchain)
 
     // NOTE: surface_caps.currentExtent could be max(u32)!!!
@@ -722,10 +762,12 @@ _swapchain_acquire_next :: proc() -> Texture
     vk_check(vk.CreateFence(ctx.device, &fence_ci, nil, &fence))
     defer vk.DestroyFence(ctx.device, fence, nil)
 
-    res := vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx)
-    if res == .SUBOPTIMAL_KHR do log.warn("Suboptimal swapchain acquire!")
-    if res != .SUCCESS && res != .SUBOPTIMAL_KHR {
-        vk_check(res)
+    if sync.guard(&ctx.lock) {
+        res := vk.AcquireNextImageKHR(ctx.device, ctx.swapchain.handle, max(u64), {}, fence, &ctx.swapchain_image_idx)
+        if res == .SUBOPTIMAL_KHR do log.warn("Suboptimal swapchain acquire!")
+        if res != .SUCCESS && res != .SUBOPTIMAL_KHR {
+            vk_check(res)
+        }
     }
 
     vk_check(vk.WaitForFences(ctx.device, 1, &fence, true, max(u64)))
@@ -855,11 +897,13 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
                 timeline.sem,
             }),
         }
-        vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
+
+        if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 
         timeline.recording = false
     }
 
+    sync.guard(&ctx.lock)
     res := vk.QueuePresentKHR(vk_queue, &{
         sType = .PRESENT_INFO_KHR,
         swapchainCount = 1,
@@ -948,6 +992,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
     addr := vk.GetBufferDeviceAddress(ctx.device, &info)
     addr_ptr := cast(rawptr) cast(uintptr) addr
 
+    sync.guard(&ctx.lock)
     append(&ctx.gpu_allocs, GPU_Alloc_Meta {
         allocation = alloc,
         buf_handle = buf,
@@ -972,6 +1017,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
 
 _mem_free :: proc(ptr: rawptr, loc := #caller_location)
 {
+    sync.guard(&ctx.lock)
     cpu_alloc, cpu_found := ctx.cpu_ptr_to_alloc[ptr]
     gpu_alloc, gpu_found := ctx.gpu_ptr_to_alloc[ptr]
     if !cpu_found && !gpu_found
@@ -1012,9 +1058,14 @@ _host_to_device_ptr :: proc(ptr: rawptr) -> rawptr
 }
 
 // Textures
-_texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
+_texture_create :: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
 {
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
+
+    queue_to_use := queue
+    if queue == nil {
+        queue_to_use = get_queue(.Main)
+    }
 
     alloc_idx, ok_s := search_alloc_from_gpu_ptr(storage)
     if !ok_s
@@ -1042,9 +1093,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
 
     // Transition layout from UNDEFINED to GENERAL
     {
-        queue := get_queue(.Main)
-
-        cmd_buf := vk_acquire_cmd_buf(queue)
+        cmd_buf := vk_acquire_cmd_buf(queue_to_use)
 
         cmd_buf_bi := vk.CommandBufferBeginInfo {
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -1074,10 +1123,11 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
         })
 
         vk_check(vk.EndCommandBuffer(cmd_buf))
-        vk_submit_cmd_buf(get_queue(.Main), cmd_buf, vk_signal_sem, signal_value)
+        vk_submit_cmd_buf(queue_to_use, cmd_buf, vk_signal_sem, signal_value)
     }
 
     tex_info := Texture_Info { image, {} }
+    sync.guard(&ctx.lock)
     return {
         dimensions = desc.dimensions,
         format = desc.format,
@@ -1088,6 +1138,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, signal_sem: Semapho
 _texture_destroy :: proc(texture: ^Texture)
 {
     tex_key := transmute(Key) texture.handle
+    sync.guard(&ctx.lock)
     tex_info := get_resource(texture.handle, ctx.textures)
     vk_image := tex_info.handle
 
@@ -1134,6 +1185,7 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 @(private="file")
 get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateInfo) -> vk.ImageView
 {
+    sync.guard(&ctx.lock)
     tex_info := get_resource(texture, ctx.textures)
 
     for view in tex_info.views
@@ -1244,6 +1296,7 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
 
     get_or_add_sampler :: proc(info: vk.SamplerCreateInfo) -> vk.Sampler
     {
+        sync.guard(&ctx.lock)
         for sampler in ctx.samplers
         {
             if sampler.info == info {
@@ -1385,6 +1438,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     // Store work group size for compute shaders
     if is_compute
     {
+        sync.guard(&ctx.lock)
         ctx.current_workgroup_size[shader_handle] = { group_size_x, group_size_y, group_size_z }
     }
 
@@ -1407,6 +1461,7 @@ _shader_destroy :: proc(shader: ^Shader)
     vk_shader := transmute(vk.ShaderEXT) (shader^)
     vk.DestroyShaderEXT(ctx.device, vk_shader, nil)
 
+    sync.guard(&ctx.lock)
     // Remove from workgroup size map
     delete_key(&ctx.current_workgroup_size, shader^)
 
@@ -1466,6 +1521,8 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 
 _get_queue :: proc(queue_type: Queue_Type) -> Queue
 {
+    sync.guard(&ctx.lock)
+
     queue_info := &ctx.queues[cast(u32) queue_type + 1]
     if queue_info.handle == nil
     {
@@ -1479,6 +1536,7 @@ _get_queue :: proc(queue_type: Queue_Type) -> Queue
 
 _queue_wait_idle :: proc(queue: Queue)
 {
+    sync.guard(&ctx.lock)
     vk.QueueWaitIdle(get_resource(queue, &ctx.queues).handle)
 }
 
@@ -1509,6 +1567,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_submit_cmd_buf(queue, vk_cmd_buf, vk_signal_sem, signal_value)
 
         // Clear compute shader tracking for this command buffer
+        sync.guard(&ctx.lock)
         delete_key(&ctx.cmd_buf_compute_shader, cmd_buf)
     }
 }
@@ -1773,6 +1832,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     assert(len(shader_stages) == len(to_bind))
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
+    sync.guard(&ctx.lock)
     ctx.cmd_buf_compute_shader[cmd_buf] = compute_shader
 }
 
@@ -1870,10 +1930,23 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
 
     // Blend state
     vk.CmdSetStencilTestEnable(vk_cmd_buf, false)
-    b32_false := b32(false)
-    vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, 1, &b32_false)
-    color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
-    vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, 1, &color_mask)
+    color_attachment_count := u32(len(vk_color_attachments))
+    if color_attachment_count > 0 {
+        // Set blend enable for all attachments
+        blend_enables := make([]b32, color_attachment_count, allocator = scratch)
+        for i in 0 ..< color_attachment_count {
+            blend_enables[i] = false
+        }
+        vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(blend_enables))
+        
+        // Set color write mask for all attachments
+        color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+        color_masks := make([]vk.ColorComponentFlags, color_attachment_count, allocator = scratch)
+        for i in 0 ..< color_attachment_count {
+            color_masks[i] = color_mask
+        }
+        vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(color_masks))
+    }
 
     // Depth state
     vk.CmdSetDepthCompareOp(vk_cmd_buf, .LESS)
@@ -2204,6 +2277,7 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
 
         tex_info := Texture_Info { handle = image }
         append(&tex_info.views, Image_View_Info { info = image_view_ci, view = res.image_views[i] })
+        sync.guard(&ctx.lock)
         idx := pool_append(&ctx.textures, tex_info)
         res.texture_keys[i] = { idx = u64(idx) }
     }
@@ -2283,42 +2357,44 @@ get_buf_size_from_gpu_ptr :: proc(ptr: rawptr) -> (size: vk.DeviceSize, ok: bool
 @(private="file")
 vk_acquire_cmd_buf :: proc(queue: Queue) -> vk.CommandBuffer
 {
+    tls_init()
     queue_info := get_resource(queue, &ctx.queues)
     queue_type := queue_info.queue_type
 
     // Poll semaphores
     found_free := -1
-    for _, i in ctx.cmd_bufs[queue_type]
+    for _, i in tls_ctx.cmd_bufs[queue_type]
     {
-        if ctx.cmd_bufs_timelines[queue_type][i].recording do continue
+        if tls_ctx.cmd_bufs_timelines[queue_type][i].recording do continue
 
-        sem := ctx.cmd_bufs_timelines[queue_type][i].sem
-        des_val := ctx.cmd_bufs_timelines[queue_type][i].val
+        sem := tls_ctx.cmd_bufs_timelines[queue_type][i].sem
+        des_val := tls_ctx.cmd_bufs_timelines[queue_type][i].val
         val: u64
         vk.GetSemaphoreCounterValue(ctx.device, sem, &val)
         if val >= des_val
         {
             found_free = i
-            ctx.cmd_bufs_timelines[queue_type][i].recording = true
+            tls_ctx.cmd_bufs_timelines[queue_type][i].recording = true
             break
         }
     }
 
     ensure(found_free != -1)  // TODO
 
-    return ctx.cmd_bufs[queue_type][found_free]
+    return tls_ctx.cmd_bufs[queue_type][found_free]
 }
 
 @(private="file")
 vk_submit_cmd_buf :: proc(queue: Queue, cmd_buf: vk.CommandBuffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
+    tls_init()
     queue_info := get_resource(queue, &ctx.queues)
     vk_queue := queue_info.handle
     queue_type := queue_info.queue_type
 
     // Find command buffer in array
     found_idx := -1
-    for buf, i in ctx.cmd_bufs[queue_type]
+    for buf, i in tls_ctx.cmd_bufs[queue_type]
     {
         if buf == cmd_buf
         {
@@ -2329,10 +2405,10 @@ vk_submit_cmd_buf :: proc(queue: Queue, cmd_buf: vk.CommandBuffer, signal_sem: v
 
     assert(found_idx != -1)
 
-    ctx.cmd_bufs_timelines[queue_type][found_idx].val += 1
+    tls_ctx.cmd_bufs_timelines[queue_type][found_idx].val += 1
 
-    cmd_buf_sem := ctx.cmd_bufs_timelines[queue_type][found_idx].sem
-    cmd_buf_sem_value := ctx.cmd_bufs_timelines[queue_type][found_idx].val
+    cmd_buf_sem := tls_ctx.cmd_bufs_timelines[queue_type][found_idx].sem
+    cmd_buf_sem_value := tls_ctx.cmd_bufs_timelines[queue_type][found_idx].val
 
     signal_sems: []vk.Semaphore = { cmd_buf_sem, signal_sem } if signal_sem != {} else { cmd_buf_sem }
     signal_values: []u64 = { cmd_buf_sem_value, signal_value } if signal_sem != {} else { cmd_buf_sem_value }
@@ -2353,20 +2429,22 @@ vk_submit_cmd_buf :: proc(queue: Queue, cmd_buf: vk.CommandBuffer, signal_sem: v
         signalSemaphoreCount = u32(len(signal_sems)),
         pSignalSemaphores = raw_data(signal_sems)
     }
-    vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
+    
+    if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 
-    ctx.cmd_bufs_timelines[queue_type][found_idx].recording = false
+    tls_ctx.cmd_bufs_timelines[queue_type][found_idx].recording = false
 }
 
 @(private="file")
 vk_get_cmd_buf_timeline :: proc(queue: Queue, cmd_buf: vk.CommandBuffer) -> ^Timeline
 {
+    tls_init()
     queue_info := get_resource(queue, &ctx.queues)
     queue_type := queue_info.queue_type
 
     // Find command buffer in array
     found_idx := -1
-    for buf, i in ctx.cmd_bufs[queue_type]
+    for buf, i in tls_ctx.cmd_bufs[queue_type]
     {
         if buf == cmd_buf
         {
@@ -2376,7 +2454,7 @@ vk_get_cmd_buf_timeline :: proc(queue: Queue, cmd_buf: vk.CommandBuffer) -> ^Tim
     }
 
     assert(found_idx != -1)
-    return &ctx.cmd_bufs_timelines[queue_type][found_idx]
+    return &tls_ctx.cmd_bufs_timelines[queue_type][found_idx]
 }
 
 // Enum conversion
