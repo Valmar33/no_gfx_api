@@ -13,9 +13,9 @@ import vk "vendor:vulkan"
 // Handles
 Handle :: rawptr
 Texture_Handle :: distinct Handle
+Command_Buffer :: distinct Handle
 Queue :: distinct Handle
 Semaphore :: distinct Handle
-Command_Buffer :: distinct Handle
 Shader :: distinct Handle
 Texture_Descriptor :: struct { bytes: [4]u64 }
 Sampler_Descriptor :: struct { bytes: [2]u64 }
@@ -168,8 +168,8 @@ get_texture_rw_view_descriptor_size: proc() -> u32 : _get_texture_rw_view_descri
 get_sampler_descriptor_size: proc() -> u32 : _get_sampler_descriptor_size
 
 // Shaders
-shader_create: proc(code: []u32, type: Shader_Type_Graphics) ->Shader : _shader_create
-shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) ->Shader : _shader_create_compute
+shader_create: proc(code: []u32, type: Shader_Type_Graphics) -> Shader : _shader_create
+shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader : _shader_create_compute
 shader_destroy: proc(shader: Shader) : _shader_destroy
 
 // Semaphores
