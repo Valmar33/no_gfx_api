@@ -320,7 +320,7 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
             gpu.BVH_Mesh_Desc {
                 vertex_stride = 16,
                 max_vertex = vert_count - 1,
-                tri_count = 1,
+                tri_count = idx_count / 3,
             }
         }
     }
