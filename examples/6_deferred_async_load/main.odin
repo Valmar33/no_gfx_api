@@ -107,15 +107,15 @@ main :: proc() {
 	vert_shader_gbuffer := gpu.shader_create(#load("shaders/gbuffer.vert.spv", []u32), .Vertex)
 	frag_shader_gbuffer := gpu.shader_create(#load("shaders/gbuffer.frag.spv", []u32), .Fragment)
 	defer {
-		gpu.shader_destroy(&vert_shader_gbuffer)
-		gpu.shader_destroy(&frag_shader_gbuffer)
+		gpu.shader_destroy(vert_shader_gbuffer)
+		gpu.shader_destroy(frag_shader_gbuffer)
 	}
 
 	vert_shader_final := gpu.shader_create(#load("shaders/final_pass.vert.spv", []u32), .Vertex)
 	frag_shader_final := gpu.shader_create(#load("shaders/final_pass.frag.spv", []u32), .Fragment)
 	defer {
-		gpu.shader_destroy(&vert_shader_final)
-		gpu.shader_destroy(&frag_shader_final)
+		gpu.shader_destroy(vert_shader_final)
+		gpu.shader_destroy(frag_shader_final)
 	}
 
 	upload_arena := gpu.arena_init(128 * 1024 * 1024)

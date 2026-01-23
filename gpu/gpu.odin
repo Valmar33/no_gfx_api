@@ -170,7 +170,7 @@ get_sampler_descriptor_size: proc() -> u32 : _get_sampler_descriptor_size
 // Shaders
 shader_create: proc(code: []u32, type: Shader_Type_Graphics) -> Shader : _shader_create
 shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader : _shader_create_compute
-shader_destroy: proc(shader: ^Shader) : _shader_destroy
+shader_destroy: proc(shader: Shader) : _shader_destroy
 
 // Semaphores
 semaphore_create: proc(init_value: u64 = 0) -> Semaphore : _semaphore_create

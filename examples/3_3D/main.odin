@@ -64,8 +64,8 @@ main :: proc()
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     defer {
-        gpu.shader_destroy(&vert_shader)
-        gpu.shader_destroy(&frag_shader)
+        gpu.shader_destroy(vert_shader)
+        gpu.shader_destroy(frag_shader)
     }
 
     upload_arena := gpu.arena_init(1024 * 1024 * 1024)
