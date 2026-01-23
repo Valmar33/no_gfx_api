@@ -11,6 +11,7 @@ import "core:fmt"
 import "../../gpu"
 
 import sdl "vendor:sdl3"
+import vk "vendor:vulkan"
 import "gltf2"
 
 Start_Window_Size_X :: 1000
@@ -110,7 +111,6 @@ main :: proc()
     Compute_Data :: struct {
         output_texture_id: u32,
         resolution: [2]f32,
-        time: f32,
         camera_to_world: [16]f32,
     }
 
@@ -207,18 +207,20 @@ main :: proc()
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
 
+        camera_to_world := first_person_camera_view(delta_time)
+
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
 
         // Allocate compute data for this frame with current time and resolution
         compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
         compute_data.cpu.output_texture_id = texture_id
         compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
-        compute_data.cpu.time = total_time
+        compute_data.cpu.camera_to_world = intr.matrix_flatten(camera_to_world)
 
         cmd_buf := gpu.commands_begin(queue)
 
         // Dispatch compute shader to write to texture
-        gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, gpu.host_to_device_ptr(bvh_heap))
+        gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil, gpu.host_to_device_ptr(bvh_heap))
         gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
 
         num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
@@ -354,6 +356,8 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
         instance = {
             transform = gpu_transform,
             blas = gpu._test(meshes[instances[i].mesh_idx].bvh),
+            flags = auto_cast(vk.GeometryInstanceFlagsKHR { .TRIANGLE_FACING_CULL_DISABLE }),
+            mask = 1,
         }
     }
     instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(instances))
@@ -482,6 +486,8 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32
     @(static) cam_pos: [3]f32 = { -7.581631, 1.1906259, 0.25928685 }
 
     @(static) angle: [2]f32 = { 1.570796, 0.3665192 }
+
+    fmt.println(cam_pos, angle)
 
     cam_rot: quaternion128 = 1
 
@@ -670,12 +676,11 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
 
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    test_instances := instances[:1]
-    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, test_instances[:], meshes[:])
+    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
 
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(test_instances)))
+    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(instances)))
 
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 

@@ -55,7 +55,7 @@ bool ray_hit(Ray ray)
         1e30               // tMax
     );
 
-    rayQueryProceedEXT(rq);
+    while(rayQueryProceedEXT(rq));
 
     return rayQueryGetIntersectionTypeEXT(rq, true)
            != gl_RayQueryCommittedIntersectionNoneEXT;
@@ -71,18 +71,16 @@ void main()
 
     vec2 uv = global_invocation_id.xy / resolution;
     vec2 coord = 2.0f * uv - 1.0f;
-    coord *= tan((90.0f * 3.1415926 / 180.0f) / 2.0f);
+
+    coord *= tan((90.0f * 3.1415926f / 180.0f) / 2.0f);
     coord.y *= resolution.y / resolution.x;
 
     vec3 world_camera_pos = (data._res_.camera_to_world * vec4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
     vec3 camera_lookat = normalize(vec3(coord, 1.0f));
-    vec3 world_camera_lookat = normalize(data._res_.camera_to_world * vec4(camera_lookat, 1.0f)).xyz;
+    vec3 world_camera_lookat = normalize(data._res_.camera_to_world * vec4(camera_lookat, 0.0f)).xyz;
 
-    if(global_invocation_id == vec3(0.0f))
-    {
-        Ray cameraRay = Ray(world_camera_pos, world_camera_lookat);
-        if(ray_hit(cameraRay)) color = vec4(0.0, 1.0, 0.0, 1.0);
-    }
+    Ray camera_ray = Ray(world_camera_pos, world_camera_lookat);
+    if(ray_hit(camera_ray)) color = vec4(0.0, 1.0, 0.0, 1.0);
 
     if(global_invocation_id.x < data._res_.resolution.x)
     {
