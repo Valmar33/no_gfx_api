@@ -555,6 +555,8 @@ _init :: proc()
     // Resource pools
     // NOTE: Reserve slot 0 for all resources as key 0 is invalid.
     pool_append(&ctx.textures, Texture_Info {})
+    pool_append(&ctx.shaders, Shader_Info {})
+    pool_append(&ctx.command_buffers, Command_Buffer_Info {})
 
     // Tree init
     rbt.init_cmp(&ctx.alloc_tree, proc(range_a: Alloc_Range, range_b: Alloc_Range) -> rbt.Ordering {
@@ -1608,27 +1610,33 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
     return cmd_buf.pool_handle
 }
 
-_queue_submit :: proc(cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
+_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
 {
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
+
+    sync.lock(&ctx.lock)
+    provided_queue_info := get_resource(queue, &ctx.queues)
+    sync.unlock(&ctx.lock)
 
     for cmd_buf in cmd_bufs
     {
         sync.lock(&ctx.lock)
-        cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
-        queue_info := get_resource(cmd_buf.queue, &ctx.queues)
+        cmd_buf_info := get_resource(cmd_buf, ctx.command_buffers)
+        cmd_buf_queue_info := get_resource(cmd_buf_info.queue, &ctx.queues)
         sync.unlock(&ctx.lock)
 
-        vk_queue := queue_info.handle
+        // Validate that the provided queue matches the command buffer's associated queue
+        ensure(cmd_buf_info.queue == queue, "queue_submit: provided queue does not match the queue associated with command buffer")
+        ensure(cmd_buf_queue_info.queue_type == provided_queue_info.queue_type, "queue_submit: queue type mismatch")
 
-        vk_cmd_buf := cmd_buf.handle
+        vk_cmd_buf := cmd_buf_info.handle
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
 
-        vk_submit_cmd_buf(cmd_buf, vk_signal_sem, signal_value)
+        vk_submit_cmd_buf(cmd_buf_info, vk_signal_sem, signal_value)
 
         // Clear compute shader tracking for this command buffer
         sync.guard(&ctx.lock)
-        cmd_buf.compute_shader = {}
+        cmd_buf_info.compute_shader = {}
     }
 }
 

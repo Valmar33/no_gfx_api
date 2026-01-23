@@ -136,7 +136,7 @@ main :: proc()
     gpu.cmd_mem_copy(upload_cmd_buf, count.gpu, count_local, 1 * size_of(u32))
     gpu.cmd_mem_copy(upload_cmd_buf, indirect_command, indirect_data_local, Num_Triangles * size_of(IndirectData))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit({ upload_cmd_buf })
+    gpu.queue_submit(queue, { upload_cmd_buf })
 
     now_ts := sdl.GetPerformanceCounter()
 
@@ -205,7 +205,7 @@ main :: proc()
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit({ cmd_buf }, frame_sem, next_frame)
+        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
 
         gpu.swapchain_present(queue, frame_sem, next_frame)
         next_frame += 1

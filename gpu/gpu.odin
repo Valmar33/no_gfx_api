@@ -180,7 +180,7 @@ semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
 // Queues
 get_queue: proc(queue_type: Queue_Type) -> Queue : _get_queue
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
-queue_submit: proc(cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
+queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
 // Command buffer
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
