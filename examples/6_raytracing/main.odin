@@ -6,6 +6,7 @@ import "core:math"
 import "core:math/linalg"
 import "base:runtime"
 import intr "base:intrinsics"
+import "core:fmt"
 
 import "../../gpu"
 
@@ -51,7 +52,7 @@ main :: proc()
     group_size_y := u32(8)
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
-    pathtrace_shader := gpu.shader_create_compute(#load("shaders/pathtracer.comp.spv", []u32), group_size_x, group_size_y, 1)
+    pathtrace_shader := gpu.shader_create_compute(#load("shaders/test.comp.spv", []u32), group_size_x, group_size_y, 1)
     defer {
         gpu.shader_destroy(&vert_shader)
         gpu.shader_destroy(&frag_shader)
@@ -102,17 +103,15 @@ main :: proc()
     defer gpu.mem_free(sampler_heap)
     gpu.set_sampler_desc(sampler_heap, sampler_id, gpu.sampler_descriptor({}))
 
-    // Indirect dispatch command (group counts)
-    indirect_dispatch_command_ptr: rawptr
-    indirect_dispatch_command_cpu_mem: []gpu.Dispatch_Indirect_Command
-    indirect_dispatch_command_cpu_mem = gpu.mem_alloc_typed(gpu.Dispatch_Indirect_Command, 1)
-    indirect_dispatch_command_ptr = gpu.host_to_device_ptr(raw_data(indirect_dispatch_command_cpu_mem))
-    defer gpu.mem_free_typed(indirect_dispatch_command_cpu_mem)
+    // BVH descriptor heap
+    bvh_heap := gpu.mem_alloc(size_of(gpu.BVH_Descriptor) * 10, alloc_type = .Descriptors)
+    defer gpu.mem_free(bvh_heap)
 
     Compute_Data :: struct {
         output_texture_id: u32,
         resolution: [2]f32,
         time: f32,
+        camera_to_world: [16]f32,
     }
 
     Vertex :: struct { pos: [3]f32, uv: [2]f32 }
@@ -149,10 +148,14 @@ main :: proc()
     queue := gpu.get_queue(.Main)
 
     upload_cmd_buf := gpu.commands_begin(queue)
+    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
     scene := load_scene_gltf(Sponza_Scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer destroy_scene(&scene)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
+
+    gpu.set_bvh_desc(bvh_heap, 0, gpu.bvh_descriptor(scene.bvh))
 
     now_ts := sdl.GetPerformanceCounter()
     total_time: f32 = 0.0
@@ -215,7 +218,7 @@ main :: proc()
         cmd_buf := gpu.commands_begin(queue)
 
         // Dispatch compute shader to write to texture
-        gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
+        gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, gpu.host_to_device_ptr(bvh_heap))
         gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
 
         num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
@@ -271,6 +274,7 @@ Mesh :: struct
     normals: rawptr,
     indices: rawptr,
     idx_count: u32,
+    vert_count: u32,
     bvh: gpu.Owned_BVH,
 }
 
@@ -290,6 +294,7 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, posit
     res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(normals))
     res.indices = gpu.mem_alloc_typed_gpu(u32, len(indices))
     res.idx_count = u32(len(indices))
+    res.vert_count = u32(len(positions))
     gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(positions) * size_of(positions[0])))
     gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(normals) * size_of(normals[0])))
     gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(indices) * size_of(indices[0])))
@@ -305,15 +310,17 @@ destroy_mesh :: proc(mesh: ^Mesh)
     mesh^ = {}
 }
 
-build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: rawptr, indices: rawptr, tri_count: u32) -> gpu.Owned_BVH
+build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: rawptr, indices: rawptr, idx_count: u32, vert_count: u32) -> gpu.Owned_BVH
 {
+    assert(idx_count % 3 == 0)
+
     desc := gpu.BLAS_Desc {
         hint = .Prefer_Fast_Trace,
         shapes = {
             gpu.BVH_Mesh_Desc {
-                vertex_stride = 12,
-                max_vertex = tri_count * 3,
-                tri_count = tri_count,
+                vertex_stride = 16,
+                max_vertex = vert_count - 1,
+                tri_count = 1,
             }
         }
     }
@@ -346,11 +353,11 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
         gpu_transform := [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
         instance = {
             transform = gpu_transform,
-            blas = meshes[instances[i].mesh_idx].bvh.mem,
+            blas = gpu._test(meshes[instances[i].mesh_idx].bvh),
         }
     }
     instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(instances))
-    gpu.cmd_mem_copy(cmd_buf, instances_staging.gpu, instances_local, len(instances_staging.cpu))
+    gpu.cmd_mem_copy(cmd_buf, instances_staging.gpu, instances_local, len(instances_staging.cpu) * size_of(gpu.BVH_Instance))
     return instances_local
 }
 
@@ -529,7 +536,7 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32
     cur_vel = approach_linear(cur_vel, target_vel, move_accel * delta_time)
     cam_pos += cur_vel * delta_time
 
-    return world_to_view_mat(cam_pos, cam_rot)
+    return view_to_world_mat(cam_pos, cam_rot)
 
     approach_linear :: proc(cur: [3]f32, target: [3]f32, delta: f32) -> [3]f32
     {
@@ -547,6 +554,12 @@ world_to_view_mat :: proc(cam_pos: [3]f32, cam_rot: quaternion128) -> matrix[4, 
     view_pos := -cam_pos
     return #force_inline linalg.matrix4_from_quaternion(view_rot) *
            #force_inline linalg.matrix4_translate(view_pos)
+}
+
+view_to_world_mat :: proc(cam_pos: [3]f32, cam_rot: quaternion128) -> matrix[4, 4]f32
+{
+    return #force_inline linalg.matrix4_from_quaternion(cam_rot) *
+           #force_inline linalg.matrix4_translate(cam_pos)
 }
 
 // I/O
@@ -652,21 +665,24 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     for &mesh in meshes {
-        mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count / 3)
+        mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
 
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
-    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
+
+    test_instances := instances[:1]
+    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, test_instances[:], meshes[:])
+
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(instances)))  // TODO: Upload instances!
+    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(test_instances)))
 
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     return {
         instances = instances,
         meshes = meshes,
-        //bvh = tlas,
+        bvh = tlas,
     }
 }
 

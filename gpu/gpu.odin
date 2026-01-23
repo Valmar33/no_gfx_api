@@ -21,7 +21,7 @@ Shader :: distinct Handle
 BVH :: struct { _: Handle }
 Texture_Descriptor :: struct { bytes: [4]u64 }
 Sampler_Descriptor :: struct { bytes: [2]u64 }
-BVH_Descriptor :: struct { bytes: [4]u64 }
+BVH_Descriptor :: struct { bytes: [2]u64 }
 
 // Enums
 Feature :: enum { Raytracing = 0 }
@@ -253,7 +253,8 @@ tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, a
 bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
 bvh_create :: proc { blas_create, tlas_create }
 bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
-//get_bvh_descriptor_size: proc(bvh: BVH) -> u32 : _get_bvh_descriptor_size
+bvh_descriptor: proc(bvh: BVH) -> BVH_Descriptor : _bvh_descriptor
+get_bvh_descriptor_size: proc() -> u32 : _get_bvh_descriptor_size
 bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
 
 // Command buffer
@@ -263,8 +264,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
-cmd_set_bvh_desc_heap: proc(cmd_buf: Command_Buffer, bvhs: rawptr) : _cmd_set_bvh_desc_heap
+cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr, bvhs: rawptr) : _cmd_set_texture_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -451,6 +451,13 @@ set_sampler_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Sample
     runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
+set_bvh_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: BVH_Descriptor)
+{
+    desc_size := #force_inline get_bvh_descriptor_size()
+    tmp := desc
+    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+}
+
 Owned_BVH :: struct
 {
     using handle: BVH,
@@ -485,14 +492,16 @@ free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
 alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
 {
     size, align := blas_build_scratch_buffer_size_and_align(desc)
-    cpu, gpu := arena_alloc_untyped(arena, size, align)
+    // cpu, gpu := arena_alloc_untyped(arena, size, align)
+    gpu := mem_alloc(size, align, mem_type = .GPU)
     return gpu
 }
 
 alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
 {
     size, align := tlas_build_scratch_buffer_size_and_align(desc)
-    cpu, gpu := arena_alloc_untyped(arena, size, align)
+    //cpu, gpu := arena_alloc_untyped(arena, size, align)
+    gpu := mem_alloc(size, align, mem_type = .GPU)
     return gpu
 }
 

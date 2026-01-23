@@ -7,12 +7,14 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
+import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 import "vma"
 
 Max_Textures :: 65535
+Max_BVHs :: 65535
 
 @(private="file")
 Graphics_Shader_Push_Constants :: struct #packed {
@@ -75,8 +77,7 @@ Context :: struct
     textures_desc_layout: vk.DescriptorSetLayout,
     textures_rw_desc_layout: vk.DescriptorSetLayout,
     samplers_desc_layout: vk.DescriptorSetLayout,
-    data_desc_layout: vk.DescriptorSetLayout,
-    indirect_data_desc_layout: vk.DescriptorSetLayout,
+    bvhs_desc_layout: vk.DescriptorSetLayout,
     common_pipeline_layout_graphics: vk.PipelineLayout,
     common_pipeline_layout_compute: vk.PipelineLayout,
 
@@ -98,6 +99,7 @@ Context :: struct
     texture_desc_size: u32,
     texture_rw_desc_size: u32,
     sampler_desc_size: u32,
+    bvh_desc_size: u32,
 
     // Shader metadata
     current_workgroup_size: map[Shader][3]u32,  // Maps shader to [x, y, z] work group size
@@ -115,6 +117,7 @@ Physical_Properties :: struct
 BVH_Info :: struct
 {
     handle: vk.AccelerationStructureKHR,
+    mem: rawptr,
     is_blas: bool,
     shapes: [dynamic]BVH_Shape_Desc,  // Only used if BLAS.
     blas_desc: BLAS_Desc,
@@ -305,9 +308,13 @@ _init :: proc(features := Features {})
     ensure(desc_buf_props.storageImageDescriptorSize <= 32, "Unexpected storage image descriptor size.")
     ensure(desc_buf_props.sampledImageDescriptorSize <= 32, "Unexpected sampled texture descriptor size.")
     ensure(desc_buf_props.samplerDescriptorSize <= 16, "Unexpected sampler descriptor size.")
+    if .Raytracing in features {
+        ensure(desc_buf_props.accelerationStructureDescriptorSize <= 32, "Unexpected BVH descriptor size.")
+    }
     ctx.texture_desc_size = u32(desc_buf_props.sampledImageDescriptorSize)
     ctx.texture_rw_desc_size = u32(desc_buf_props.storageImageDescriptorSize)
     ctx.sampler_desc_size = u32(desc_buf_props.samplerDescriptorSize)
+    ctx.bvh_desc_size = u32(desc_buf_props.accelerationStructureDescriptorSize)
 
     // Queues create info
     queue_create_infos: [dynamic]vk.DeviceQueueCreateInfo
@@ -420,6 +427,12 @@ _init :: proc(features := Features {})
             accelerationStructure = true,
         }
         if .Raytracing in features do next = raytracing_features
+        rayquery_features := &vk.PhysicalDeviceRayQueryFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+            pNext = next,
+            rayQuery = true,
+        }
+        if .Raytracing in features do next = rayquery_features
 
         device_ci := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
@@ -527,34 +540,19 @@ _init :: proc(features := Features {})
                 bindingCount = 1,
                 pBindings = &vk.DescriptorSetLayoutBinding {
                     binding = 0,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = Max_BVHs,
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.data_desc_layout))
-        }
-        {
-            layout_ci := vk.DescriptorSetLayoutCreateInfo {
-                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                flags = { .DESCRIPTOR_BUFFER_EXT },
-                bindingCount = 1,
-                pBindings = &vk.DescriptorSetLayoutBinding {
-                    binding = 0,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
-                    stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
-                },
-            }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.indirect_data_desc_layout))
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.bvhs_desc_layout))
         }
 
         desc_layouts := []vk.DescriptorSetLayout {
             ctx.textures_desc_layout,
             ctx.textures_rw_desc_layout,
             ctx.samplers_desc_layout,
-            ctx.data_desc_layout,
-            ctx.indirect_data_desc_layout,
+            ctx.bvhs_desc_layout,
         }
 
         // Graphics pipeline layout
@@ -648,8 +646,7 @@ _cleanup :: proc()
     vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_desc_layout, nil)
     vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_rw_desc_layout, nil)
     vk.DestroyDescriptorSetLayout(ctx.device, ctx.samplers_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.data_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.indirect_data_desc_layout, nil)
+    vk.DestroyDescriptorSetLayout(ctx.device, ctx.bvhs_desc_layout, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_graphics, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_compute, nil)
 
@@ -1273,8 +1270,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         ctx.textures_desc_layout,
         ctx.textures_rw_desc_layout,
         ctx.samplers_desc_layout,
-        ctx.data_desc_layout,
-        ctx.indirect_data_desc_layout,
+        ctx.bvhs_desc_layout,
     }
 
     // Setup specialization constants for compute shader workgroup size
@@ -1461,6 +1457,7 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
         size = size_info.accelerationStructureSize,
         type = .BOTTOM_LEVEL,
     }
+    fmt.println(blas_ci)
     vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &blas_ci, nil, &bvh_handle))
 
     new_desc := desc
@@ -1468,11 +1465,22 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
     new_desc.shapes = cloned_shapes[:]
     bvh_info := BVH_Info {
         handle = bvh_handle,
+        mem = storage,
         is_blas = true,
         shapes = cloned_shapes,
         blas_desc = desc,
     }
     return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
+}
+
+_test :: proc(bvh: BVH) -> rawptr
+{
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    return transmute(rawptr) vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, & {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = bvh_info.handle
+    })
 }
 
 _blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
@@ -1504,10 +1512,12 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
         size = size_info.accelerationStructureSize,
         type = .TOP_LEVEL,
     }
+    fmt.println(tlas_ci)
     vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &tlas_ci, nil, &bvh_handle))
 
     bvh_info := BVH_Info {
         handle = bvh_handle,
+        mem = storage,
         is_blas = false,
         tlas_desc = desc
     }
@@ -1519,9 +1529,28 @@ _tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64
     return u64(get_vk_tlas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
 }
 
-_get_bvh_descriptor_size :: proc(bvh: BVH) -> u32
+_bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
 {
-    return {}
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    bvh_addr := vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, &{
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = bvh_info.handle,
+    })
+
+    desc: BVH_Descriptor
+    info := vk.DescriptorGetInfoEXT {
+        sType = .DESCRIPTOR_GET_INFO_EXT,
+        type = .ACCELERATION_STRUCTURE_KHR,
+        data = { accelerationStructure = transmute(vk.DeviceAddress) bvh_addr }
+    }
+    vk.GetDescriptorEXT(ctx.device, &info, int(ctx.bvh_desc_size), &desc)
+    return desc
+}
+
+_get_bvh_descriptor_size :: proc() -> u32
+{
+    return ctx.bvh_desc_size
 }
 
 _bvh_destroy :: proc(bvh: ^BVH)
@@ -1563,6 +1592,7 @@ get_vk_tlas_size_info :: proc(desc: TLAS_Desc) -> vk.AccelerationStructureBuildS
     scratch, _ := acquire_scratch()
 
     build_info := to_vk_tlas_desc(desc, scratch)
+    fmt.println("When getting size:", build_info, build_info.pGeometries[0].geometry.instances)
 
     size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
     primitive_count := desc.instance_count
@@ -1675,11 +1705,11 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
     })
 }
 
-_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr)
+_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr, bvhs: rawptr = nil)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
-    if textures == nil && textures_rw == nil && samplers == nil do return
+    if textures == nil && textures_rw == nil && samplers == nil && bvhs != nil do return
 
     // Check pointers. Drivers are currently not very good at recovering from situations
     // like this (e.g. on my setup, the whole desktop freezes for 10 seconds) so we try
@@ -1721,9 +1751,21 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
                 return
             }
         }
+        if bvhs != nil
+        {
+            alloc, ok_s := search_alloc_from_gpu_ptr(bvhs)
+            if !ok_s {
+                log.error("Alloc not found.")
+                return
+            }
+            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
+                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
+                return
+            }
+        }
     }
 
-    infos: [3]vk.DescriptorBufferBindingInfoEXT
+    infos: [4]vk.DescriptorBufferBindingInfoEXT
     // Fill in infos with the subset of valid pointers
     cursor := u32(0)
     if textures != nil
@@ -1731,7 +1773,7 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
@@ -1740,7 +1782,7 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures_rw,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
@@ -1749,14 +1791,23 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) samplers,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+        }
+        cursor += 1
+    }
+    if bvhs != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) bvhs,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
 
     vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, cursor, &infos[0])
 
-    buffer_offsets := []vk.DeviceSize { 0, 0, 0 }
+    buffer_offsets := []vk.DeviceSize { 0, 0, 0, 0 }
     cursor = 0
     if textures != nil {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 0, 1, &cursor, &buffer_offsets[0])
@@ -1771,6 +1822,11 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
     if samplers != nil {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 2, 1, &cursor, &buffer_offsets[2])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 2, 1, &cursor, &buffer_offsets[2])
+        cursor += 1
+    }
+    if bvhs != nil {
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 3, 1, &cursor, &buffer_offsets[3])
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 3, 1, &cursor, &buffer_offsets[3])
         cursor += 1
     }
 }
@@ -2189,6 +2245,8 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
                 geom.geometry.triangles.vertexData.deviceAddress = transmute(vk.DeviceAddress) s.verts
                 geom.geometry.triangles.indexData.deviceAddress = transmute(vk.DeviceAddress) s.indices
                 range_infos[i].primitiveCount = bvh_info.blas_desc.shapes[i].(BVH_Mesh_Desc).tri_count
+                fmt.println("When calling vkCmdBuildAccelerationStructuresKHR:", geom, geom.geometry.triangles, "triangles.vertexData:", geom.geometry.triangles.vertexData.deviceAddress, "triangles.indexData", geom.geometry.triangles.indexData.deviceAddress)
+                fmt.println("When calling vkCmdBuildAccelerationStructuresKHR (range info):", range_infos[i])
             }
             case BVH_AABBs:
             {
@@ -2223,6 +2281,7 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 
     // Fill in actual data
     build_info.pGeometries[0].geometry.instances.data.deviceAddress = transmute(vk.DeviceAddress) instances
+    fmt.println("When calling vkCmdBuildAccelerationStructuresKHR:", build_info.pGeometries[0].geometry, build_info.pGeometries[0].geometry.instances, "addr:", build_info.pGeometries[0].geometry.instances.data.deviceAddress)
 
     // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
     // We always build one at a time, and a TLAS always has only one geometry.
@@ -2231,6 +2290,7 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
             primitiveCount = bvh_info.tlas_desc.instance_count
         }
     }
+    fmt.println("When calling vkCmdBuildAccelerationStructuresKHR (range info):", range_info[0])
     range_info_ptr := raw_data(range_info)
     vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_info_ptr)
 }
@@ -2812,7 +2872,7 @@ to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.Ac
                     geometryType = .TRIANGLES,
                     geometry = { triangles = {
                         sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-                        vertexFormat = .R32G32B32_SFLOAT,
+                        vertexFormat = .R32G32B32A32_SFLOAT,
                         vertexData = {},
                         vertexStride = vk.DeviceSize(shape.vertex_stride),
                         maxVertex = shape.max_vertex,
@@ -2821,6 +2881,7 @@ to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.Ac
                         transformData = {},
                     } }
                 }
+                fmt.println("To get size: ", geom)
             }
             case BVH_AABB_Desc:
             {
