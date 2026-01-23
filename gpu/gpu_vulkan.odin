@@ -1389,7 +1389,7 @@ _get_sampler_descriptor_size :: proc() -> u32
 
 // Shaders
 @(private="file")
-_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, entry_point_name: cstring = "main", group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
 {
     push_constant_ranges: []vk.PushConstantRange
     if is_compute {
@@ -1481,7 +1481,7 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         codeType = .SPIRV,
         codeSize = len(code) * size_of(code[0]),
         pCode = raw_data(code),
-        pName = "main",
+        pName = entry_point_name,
         stage = vk_stage,
         nextStage = next_stage,
         pushConstantRangeCount = u32(len(push_constant_ranges)),
@@ -1503,15 +1503,15 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     return transmute(Shader) Key { idx = cast(u64) pool_append(&ctx.shaders, shader) }
 }
 
-_shader_create :: proc(code: []u32, type: Shader_Type_Graphics) -> Shader
+_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: cstring = "main") -> Shader
 {
     vk_stage := to_vk_shader_stage(type)
-    return _shader_create_internal(code, false, vk_stage)
+    return _shader_create_internal(code, false, vk_stage, entry_point_name)
 }
 
-_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: cstring = "main") -> Shader
 {
-    return _shader_create_internal(code, true, { .COMPUTE }, group_size_x, group_size_y, group_size_z)
+    return _shader_create_internal(code, true, { .COMPUTE }, entry_point_name, group_size_x, group_size_y, group_size_z)
 }
 
 _shader_destroy :: proc(shader: Shader)
