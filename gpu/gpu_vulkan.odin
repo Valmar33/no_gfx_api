@@ -98,7 +98,7 @@ Context :: struct
     texture_rw_desc_size: u32,
     sampler_desc_size: u32,
 
-    lock: sync.Benaphore, // Ensures thread-safe access to ctx and VK operations
+    lock: sync.Atomic_Mutex, // Ensures thread-safe access to ctx and VK operations
     tls_contexts: [dynamic]^Thread_Local_Context,
 }
 
@@ -1948,7 +1948,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
     
     vk_cmd_buf := cmd_buf.handle
 
-    if cmd_buf.compute_shader == nil
+    if _, ok := cmd_buf.compute_shader.?; !ok
     {
         log.error("cmd_dispatch called without a compute shader set. Call cmd_set_compute_shader first.")
         return
@@ -1971,7 +1971,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
     
     vk_cmd_buf := cmd_buf.handle
 
-    if cmd_buf.compute_shader == nil
+    if _, ok := cmd_buf.compute_shader.?; !ok
     {
         log.error("cmd_dispatch_indirect called without a compute shader set. Call cmd_set_compute_shader first.")
         return
