@@ -322,50 +322,38 @@ _init :: proc()
     ctx.sampler_desc_size = u32(props.samplerDescriptorSize)
 
     // Queues create info
-    queue_create_infos: [dynamic]vk.DeviceQueueCreateInfo
-    defer delete(queue_create_infos)
+    priority: f32 = 1.0
+    queue_create_infos: [dynamic]vk.DeviceQueueCreateInfo = make([dynamic]vk.DeviceQueueCreateInfo, allocator = scratch)
     {
-        queue_families: [3]u32  // Main, Compute, Transfer
-        queue_indices: [3]u32
-        queue_count: [3]u32 = { 1, 1, 1 }
-        is_subsumed: [3]bool
-        queue_families[0] = find_queue_family(true, true, true)
-        queue_families[1] = find_queue_family(graphics = false, compute = true, transfer = true)
-        queue_families[2] = find_queue_family(graphics = false, compute = false, transfer = true)
-        for i := 1; i < len(queue_families); i += 1
-        {
-            for j := 0; j < i; j += 1
-            {
-                if queue_families[i] == queue_families[j]
-                {
-                    assert(!is_subsumed[j])
-                    queue_indices[i] = queue_indices[j] + 1
-                    is_subsumed[i] = true
-                    queue_count[j] += 1
-                    break
+        families: [Queue_Type]u32
+        families[.Main] = find_queue_family(graphics = true, compute = true, transfer = true)
+        families[.Compute] = find_queue_family(graphics = false, compute = true, transfer = true)
+        families[.Transfer] = find_queue_family(graphics = false, compute = false, transfer = true)
+
+        main: for &queue, i in ctx.queues[1:] {
+            type := Queue_Type(i)
+
+            for &queue2 in ctx.queues[1:i + 1] {
+                if queue2.family_idx == families[type] {
+                    queue = queue2
+                    continue main
                 }
             }
-        }
 
-        max_queue_count := max(queue_count[0], queue_count[1], queue_count[2])
-        queue_priorities := make([]f32, max_queue_count, allocator = scratch)  // Filled in with zeros
-
-        for i in 0..<len(queue_families)
-        {
-            if is_subsumed[i] do continue
+            queue.queue_type = type
+            queue.family_idx = families[type]
+            queue.queue_idx = 0
 
             append(&queue_create_infos, vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
-                queueFamilyIndex = queue_families[i],
-                queueCount = queue_count[i],
-                pQueuePriorities = raw_data(queue_priorities)
+                queueFamilyIndex = families[type],
+                queueCount = 1,
+                pQueuePriorities = &priority,
             })
         }
-
-        for i in 0..<3 {
-            ctx.queues[i+1] = { handle = nil, family_idx = queue_families[i], queue_idx = queue_indices[i], queue_type = cast(Queue_Type) i }
-        }
     }
+
+    log.debug("queue_create_infos:", queue_create_infos) 
 
     // Device
     device_extensions := []cstring {
@@ -433,6 +421,12 @@ _init :: proc()
 
     vk.load_proc_addresses_device(ctx.device)
     if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+
+    for &queue in ctx.queues[1:] {
+        vk.GetDeviceQueue(ctx.device, queue.family_idx, queue.queue_idx, &queue.handle)
+    }
+
+    log.debug("queues:", ctx.queues)
 
     // Common resources
     {
@@ -1577,16 +1571,6 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 
 _get_queue :: proc(queue_type: Queue_Type) -> Queue
 {
-    sync.guard(&ctx.lock)
-
-    queue_info := &ctx.queues[cast(u32) queue_type + 1]
-    if queue_info.handle == nil
-    {
-        queue: vk.Queue
-        vk.GetDeviceQueue(ctx.device, queue_info.family_idx, queue_info.queue_idx, &queue)
-        queue_info.handle = queue
-    }
-
     return transmute(Queue) Key { idx = cast(u64) queue_type + 1 }
 }
 
@@ -2825,6 +2809,8 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
 
         for props, i in family_properties
         {
+            if props.queueCount == 0 do continue
+            
             // NOTE: If a queue family supports graphics, it is required
             // to also support transfer, but it's NOT required
             // to report .TRANSFER in its queueFlags, as stated in
@@ -2844,6 +2830,8 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
         // Ideal queue family Not found. Be a little less strict now in your search.
         for props, i in family_properties
         {
+            if props.queueCount == 0 do continue
+
             supports_graphics := .GRAPHICS in props.queueFlags
             supports_compute  := .COMPUTE in props.queueFlags
             supports_transfer := .TRANSFER in props.queueFlags || supports_graphics || supports_compute
