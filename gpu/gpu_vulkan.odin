@@ -353,8 +353,6 @@ _init :: proc()
         }
     }
 
-    log.debug("queue_create_infos:", queue_create_infos) 
-
     // Device
     device_extensions := []cstring {
         vk.KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -425,8 +423,6 @@ _init :: proc()
     for &queue in ctx.queues[1:] {
         vk.GetDeviceQueue(ctx.device, queue.family_idx, queue.queue_idx, &queue.handle)
     }
-
-    log.debug("queues:", ctx.queues)
 
     // Common resources
     {
