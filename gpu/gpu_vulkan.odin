@@ -10,6 +10,7 @@ import "core:sync"
 import rbt "core:container/rbtree"
 import "core:dynlib"
 import "core:container/priority_queue"
+import "core:strings"
 
 import vk "vendor:vulkan"
 import "vma"
@@ -1379,7 +1380,7 @@ _get_sampler_descriptor_size :: proc() -> u32
 
 // Shaders
 @(private="file")
-_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, entry_point_name: string = "main", group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
 {
     push_constant_ranges: []vk.PushConstantRange
     if is_compute {
@@ -1466,12 +1467,15 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         next_stage = {}
     }
 
+    entry_point_name_cstr := strings.clone_to_cstring(entry_point_name)
+    defer delete(entry_point_name_cstr)
+
     shader_cis := vk.ShaderCreateInfoEXT {
         sType = .SHADER_CREATE_INFO_EXT,
         codeType = .SPIRV,
         codeSize = len(code) * size_of(code[0]),
         pCode = raw_data(code),
-        pName = "main",
+        pName = entry_point_name_cstr,
         stage = vk_stage,
         nextStage = next_stage,
         pushConstantRangeCount = u32(len(push_constant_ranges)),
@@ -1493,15 +1497,15 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     return transmute(Shader) Key { idx = cast(u64) pool_append(&ctx.shaders, shader) }
 }
 
-_shader_create :: proc(code: []u32, type: Shader_Type_Graphics) -> Shader
+_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main") -> Shader
 {
     vk_stage := to_vk_shader_stage(type)
-    return _shader_create_internal(code, false, vk_stage)
+    return _shader_create_internal(code, false, vk_stage, entry_point_name)
 }
 
-_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main") -> Shader
 {
-    return _shader_create_internal(code, true, { .COMPUTE }, group_size_x, group_size_y, group_size_z)
+    return _shader_create_internal(code, true, { .COMPUTE }, entry_point_name, group_size_x, group_size_y, group_size_z)
 }
 
 _shader_destroy :: proc(shader: Shader)
