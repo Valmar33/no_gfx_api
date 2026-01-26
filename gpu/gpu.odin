@@ -168,8 +168,8 @@ get_texture_rw_view_descriptor_size: proc() -> u32 : _get_texture_rw_view_descri
 get_sampler_descriptor_size: proc() -> u32 : _get_sampler_descriptor_size
 
 // Shaders
-shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: cstring = "main") -> Shader : _shader_create
-shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: cstring = "main") -> Shader : _shader_create_compute
+shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main") -> Shader : _shader_create
+shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main") -> Shader : _shader_create_compute
 shader_destroy: proc(shader: Shader) : _shader_destroy
 
 // Semaphores
