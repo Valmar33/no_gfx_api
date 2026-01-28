@@ -363,7 +363,7 @@ _init :: proc(features := Features {})
 
     // Device
     {
-        required_extensions := make([dynamic]cstring)
+        required_extensions := make([dynamic]cstring, allocator = scratch)
         append(&required_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
         append(&required_extensions, vk.EXT_SHADER_OBJECT_EXTENSION_NAME)
         append(&required_extensions, vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)
@@ -1456,7 +1456,6 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
         size = size_info.accelerationStructureSize,
         type = .BOTTOM_LEVEL,
     }
-    //fmt.println(blas_ci)
     vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &blas_ci, nil, &bvh_handle))
 
     new_desc := desc
@@ -1511,7 +1510,6 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
         size = size_info.accelerationStructureSize,
         type = .TOP_LEVEL,
     }
-    //fmt.println(tlas_ci)
     vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &tlas_ci, nil, &bvh_handle))
 
     bvh_info := BVH_Info {
@@ -1591,7 +1589,6 @@ get_vk_tlas_size_info :: proc(desc: TLAS_Desc) -> vk.AccelerationStructureBuildS
     scratch, _ := acquire_scratch()
 
     build_info := to_vk_tlas_desc(desc, scratch)
-    //fmt.println("When getting size:", build_info, build_info.pGeometries[0].geometry.instances)
 
     size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
     primitive_count := desc.instance_count
@@ -2244,8 +2241,6 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
                 geom.geometry.triangles.vertexData.deviceAddress = transmute(vk.DeviceAddress) s.verts
                 geom.geometry.triangles.indexData.deviceAddress = transmute(vk.DeviceAddress) s.indices
                 range_infos[i].primitiveCount = bvh_info.blas_desc.shapes[i].(BVH_Mesh_Desc).tri_count
-                //fmt.println("When calling vkCmdBuildAccelerationStructuresKHR:", geom, geom.geometry.triangles, "triangles.vertexData:", geom.geometry.triangles.vertexData.deviceAddress, "triangles.indexData", geom.geometry.triangles.indexData.deviceAddress)
-                //fmt.println("When calling vkCmdBuildAccelerationStructuresKHR (range info):", range_infos[i])
             }
             case BVH_AABBs:
             {
@@ -2280,7 +2275,6 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 
     // Fill in actual data
     build_info.pGeometries[0].geometry.instances.data.deviceAddress = transmute(vk.DeviceAddress) instances
-    //fmt.println("When calling vkCmdBuildAccelerationStructuresKHR:", build_info.pGeometries[0].geometry, build_info.pGeometries[0].geometry.instances, "addr:", build_info.pGeometries[0].geometry.instances.data.deviceAddress)
 
     // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
     // We always build one at a time, and a TLAS always has only one geometry.
@@ -2289,7 +2283,6 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
             primitiveCount = bvh_info.tlas_desc.instance_count
         }
     }
-    //fmt.println("When calling vkCmdBuildAccelerationStructuresKHR (range info):", range_info[0])
     range_info_ptr := raw_data(range_info)
     vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_info_ptr)
 }
@@ -2880,7 +2873,6 @@ to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.Ac
                         transformData = {},
                     } }
                 }
-                //fmt.println("To get size: ", geom)
             }
             case BVH_AABB_Desc:
             {

@@ -491,16 +491,14 @@ free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
 alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
 {
     size, align := blas_build_scratch_buffer_size_and_align(desc)
-    // cpu, gpu := arena_alloc_untyped(arena, size, align)
-    gpu := mem_alloc(size, align, mem_type = .GPU)
+    _, gpu := arena_alloc_untyped(arena, size, align)
     return gpu
 }
 
 alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
 {
     size, align := tlas_build_scratch_buffer_size_and_align(desc)
-    //cpu, gpu := arena_alloc_untyped(arena, size, align)
-    gpu := mem_alloc(size, align, mem_type = .GPU)
+    _, gpu := arena_alloc_untyped(arena, size, align)
     return gpu
 }
 
