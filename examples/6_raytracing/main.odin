@@ -53,7 +53,7 @@ main :: proc()
     group_size_y := u32(8)
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
-    pathtrace_shader := gpu.shader_create_compute(#load("shaders/test.comp.spv", []u32), group_size_x, group_size_y, 1)
+    pathtrace_shader := gpu.shader_create_compute(#load("shaders/pathtracer.comp.spv", []u32), group_size_x, group_size_y, 1)
     defer {
         gpu.shader_destroy(&vert_shader)
         gpu.shader_destroy(&frag_shader)
@@ -111,6 +111,7 @@ main :: proc()
     Compute_Data :: struct {
         output_texture_id: u32,
         resolution: [2]f32,
+        accum_counter: u32,
         camera_to_world: [16]f32,
     }
 
@@ -160,6 +161,8 @@ main :: proc()
     now_ts := sdl.GetPerformanceCounter()
     total_time: f32 = 0.0
 
+    camera_to_world: matrix[4, 4]f32 = 1
+
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
@@ -207,6 +210,7 @@ main :: proc()
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
 
+        old_camera_to_world := camera_to_world
         camera_to_world := first_person_camera_view(delta_time)
 
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
@@ -542,7 +546,7 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32
     cur_vel = approach_linear(cur_vel, target_vel, move_accel * delta_time)
     cam_pos += cur_vel * delta_time
 
-    return view_to_world_mat(cam_pos, cam_rot)
+    return xform_to_mat(cam_pos, cam_rot, [3]f32 { 1, 1, 1 })
 
     approach_linear :: proc(cur: [3]f32, target: [3]f32, delta: f32) -> [3]f32
     {

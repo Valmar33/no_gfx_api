@@ -7,7 +7,6 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import rbt "core:container/rbtree"
-import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -260,7 +259,7 @@ _init :: proc(features := Features {})
 
     found := false
     best_score: u32
-    device_loop: for candidate, i in phys_devices
+    device_loop: for candidate in phys_devices
     {
         score: u32
 
@@ -1542,7 +1541,7 @@ _bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
     info := vk.DescriptorGetInfoEXT {
         sType = .DESCRIPTOR_GET_INFO_EXT,
         type = .ACCELERATION_STRUCTURE_KHR,
-        data = { accelerationStructure = transmute(vk.DeviceAddress) bvh_addr }
+        data = { accelerationStructure = bvh_addr }
     }
     vk.GetDescriptorEXT(ctx.device, &info, int(ctx.bvh_desc_size), &desc)
     return desc
@@ -1635,8 +1634,6 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
 
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
 {
-    queue_info := get_resource(queue, &ctx.queues)
-    vk_queue := queue_info.handle
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
     for cmd_buf in cmd_bufs
@@ -1949,7 +1946,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
-    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
+    _, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
     if !has_shader
     {
         log.error("cmd_dispatch called without a compute shader set. Call cmd_set_compute_shader first.")
@@ -1969,7 +1966,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
-    compute_shader, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
+    _, has_shader := ctx.cmd_buf_compute_shader[cmd_buf]
     if !has_shader
     {
         log.error("cmd_dispatch_indirect called without a compute shader set. Call cmd_set_compute_shader first.")
@@ -2209,6 +2206,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
     }
 
     // TODO: Check for mismatching types.
+    /*
     for shape, i in shapes
     {
         switch s in shape
@@ -2217,6 +2215,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
             case BVH_AABBs: {}
         }
     }
+    */
 
     scratch, _ := acquire_scratch()
 

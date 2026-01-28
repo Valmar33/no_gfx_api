@@ -2,5 +2,5 @@
 *.pdb
 *.rdi
 *.raddbg_project
-# *.glsl
+*.glsl
 imgui.ini

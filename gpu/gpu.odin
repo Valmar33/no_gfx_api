@@ -3,7 +3,6 @@ package gpu
 
 import "core:slice"
 import "base:runtime"
-import "core:fmt"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"

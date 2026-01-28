@@ -1,18 +1,115 @@
 
+Scene :: struct
+{
+    instances: []Instance,
+    instance_count: uint,
+    meshes: []Mesh,
+    mesh_count: uint,
+}
+
+Mesh :: struct
+{
+    pos: []vec3,
+    normal: []vec3,
+    uv: []vec2,
+}
+
+Instance :: struct
+{
+    transform: mat4,
+    mesh_idx: uint,
+}
+
 Data :: struct
 {
     output_texture_id: textureid,
+    //scene: Scene,
     resolution: vec2,
+    accum_counter: uint,
+    camera_to_world: mat4,
 }
 
 main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 {
+    color := vec4(1, 0, 0, 1);
+
+    uv := global_invocation_id.xy / data.resolution;
+    coord := 2.0 * uv - 1.0;
+
+    coord = coord * tan((90.0 * 3.1415926 / 180.0) / 2.0);
+    coord.y = coord.y * data.resolution.y / data.resolution.x;
+
+    world_camera_pos := (data.camera_to_world * vec4(0, 0, 0, 1)).xyz;
+    camera_lookat := normalize(vec3(coord, 1));
+    world_camera_lookat := normalize(data.camera_to_world * vec4(camera_lookat, 0.0)).xyz;
+
+    camera_ray: Ray;
+    camera_ray.ori = world_camera_pos;
+    camera_ray.dir = world_camera_lookat;
+    if ray_scene_intersection(camera_ray).hit { color = vec4(0, 1, 0, 1); }
+
     if global_invocation_id.x < data.resolution.x
     {
         if global_invocation_id.y < data.resolution.y
         {
-            color := vec4(1.0, 1.0, 1.0, 1.0);
             imageStore(data.output_texture_id, global_invocation_id.xy, color);
         }
     }
+}
+
+Ray :: struct
+{
+    ori: vec3,
+    dir: vec3,
+}
+
+Hit_Info :: struct
+{
+    hit: bool,
+    t: float,
+    normal: vec3,
+    uv: vec2,
+}
+
+ray_scene_intersection :: (ray: Ray) -> Hit_Info
+{
+    // @tmp: These constants will be implicit (They may even be an enum)
+    Ray_Flags_Opaque: uint = 1;
+    Ray_Flags_Terminate_On_First_Hit: uint = 4;  // For occlusion checking (shadow rays)
+    Ray_Flags_Skip_Closest_Hit_Shader: uint = 8;
+    Ray_Result_Kind_Miss: uint = 0;
+    Ray_Result_Kind_Hit_Mesh: uint = 1;
+    Ray_Result_Kind_Hit_AABB: uint = 2;
+
+    hit_info: Hit_Info;
+
+    desc: Ray_Desc;
+    desc.flags = Ray_Flags_Opaque;
+    desc.cull_mask = 0xFF;
+    desc.t_min = 0.001;
+    desc.t_max = 1000000000.0;
+    desc.origin = ray.ori;
+    desc.dir = ray.dir;
+    rq := rayquery_init(desc, 0);
+
+    rayquery_proceed(rq);
+
+    // For scenes which may contain non-opaque geometry:
+    /*
+    for ; rayquery_proceed(rq);
+    {
+        rayquery_accept(rq);
+    }
+    */
+
+    hit := rayquery_result(rq);
+
+    if hit.kind != Ray_Result_Kind_Hit_Mesh {
+        hit_info.hit = false;
+        return hit_info;
+    }
+
+    hit_info.hit = true;
+    hit_info.t = hit.t;
+    return hit_info;
 }

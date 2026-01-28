@@ -64,7 +64,7 @@ void main()
     _res_ptr_Data data = _res_vert_data_;
     IndirectData indirect_data = _res_indirect_data_._res_[gl_DrawID];
     Output vert_out;
-    vert_out.pos = vec4(data._res_.verts._res_[vert_id].pos * indirect_data.size + indirect_data.pos, 1.0);
+    vert_out.pos = vec4(((data._res_.verts._res_[vert_id].pos * indirect_data.size) + indirect_data.pos), 1.0);
     vert_out.color = vec4(indirect_data.color, 1.0);
     gl_Position = vert_out.pos; _res_out_loc0_ = vert_out.color; 
 }

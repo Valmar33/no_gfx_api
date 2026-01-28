@@ -8,6 +8,8 @@ import "core:slice"
 import intr "base:intrinsics"
 import str "core:strings"
 
+import "../gpu"
+
 Any_Node :: union
 {
     Any_Statement,
@@ -24,6 +26,9 @@ Ast :: struct
     used_indirect_data_type: ^Ast_Type,
     scope: ^Ast_Scope,
     procs: [dynamic]^Ast_Proc_Def,
+
+    // Filled in by typechecker
+    used_features: gpu.Features,
 }
 
 Ast_Node :: struct
@@ -104,6 +109,16 @@ Ast_Binary_Op :: enum
     Minus,
     Mul,
     Div,
+
+    // Bitwise
+    Bitwise_And,
+    Bitwise_Or,
+    Bitwise_Xor,
+
+    And,
+    Or,
+
+    // Comparison
     Greater,
     Less,
     LE,
@@ -245,6 +260,8 @@ Ast_Type_Kind :: enum
 Ast_Type_Primitive_Kind :: enum
 {
     None = 0,
+    Untyped_Int,
+    Untyped_Float,
     Bool,
     Float,
     Uint,
@@ -255,6 +272,9 @@ Ast_Type_Primitive_Kind :: enum
     Vec3,
     Vec4,
     Mat4,
+
+    Ray_Query,
+    BVH_ID,
 }
 
 Ast_Type :: struct
@@ -664,7 +684,7 @@ parse_expr :: proc(using p: ^Parser, prec: int = max(int)) -> ^Ast_Expr
         bin_op.op = op.op
         bin_op.lhs = lhs
         at += 1
-        bin_op.rhs = parse_expr(p)
+        bin_op.rhs = parse_expr(p, op.prec)
         lhs = bin_op
     }
 
@@ -685,7 +705,12 @@ parse_primary_expr :: proc(using p: ^Parser) -> ^Ast_Expr
         expr = make_expr(p, Ast_Ident_Expr)
         at += 1
     }
-    else if tokens[at].type == .NumLit
+    else if tokens[at].type == .IntLit || tokens[at].type == .FloatLit
+    {
+        expr = make_expr(p, Ast_Lit_Expr)
+        at += 1
+    }
+    else if tokens[at].type == .True || tokens[at].type == .False
     {
         expr = make_expr(p, Ast_Lit_Expr)
         at += 1
@@ -840,9 +865,12 @@ parse_type :: proc(using p: ^Parser) -> ^Ast_Type
         case "vec2": prim_type = .Vec2
         case "vec3": prim_type = .Vec3
         case "vec4": prim_type = .Vec4
+        case "bool": prim_type = .Bool
         case "textureid": prim_type = .Texture_ID
         case "samplerid": prim_type = .Sampler_ID
         case "mat4": prim_type = .Mat4
+        case "Ray_Query": prim_type = .Ray_Query
+        case "bvh_id": prim_type = .BVH_ID
         case: prim_type = .None
     }
 
@@ -873,25 +901,23 @@ parse_attribute :: proc(using p: ^Parser) -> Maybe(Ast_Attribute)
 
     switch token.text
     {
-        case "vert_id": attr.type = .Vert_ID
-        case "position": attr.type = .Position
-        case "data": attr.type = .Data
-        case "instance_id": attr.type = .Instance_ID
-        case "draw_id": attr.type = .Draw_ID
-        case "indirect_data": attr.type = .Indirect_Data
-        case "workgroup_id": attr.type = .Workgroup_ID
-        case "local_invocation_id": attr.type = .Local_Invocation_ID
-        case "group_size": attr.type = .Group_Size
+        case "vert_id":              attr.type = .Vert_ID
+        case "position":             attr.type = .Position
+        case "data":                 attr.type = .Data
+        case "instance_id":          attr.type = .Instance_ID
+        case "draw_id":              attr.type = .Draw_ID
+        case "indirect_data":        attr.type = .Indirect_Data
+        case "workgroup_id":         attr.type = .Workgroup_ID
+        case "local_invocation_id":  attr.type = .Local_Invocation_ID
+        case "group_size":           attr.type = .Group_Size
         case "global_invocation_id": attr.type = .Global_Invocation_ID
         case "in_loc":
         {
             // ??? Why is the compiler making me do this?
             attr.type, _ = .In_Loc,
             required_token(p, .LParen)
-            num_token := required_token(p, .NumLit)
-            val, ok := num_token.value.(u64)
-            if !ok do parse_error_on_token(p, num_token, "Expecting integer value on attribute arguments.")
-            attr.arg = u32(val)
+            num_token := required_token(p, .IntLit)
+            attr.arg = u32(get_token_lit_int_value(num_token))
             required_token(p, .RParen)
         }
         case "out_loc":
@@ -899,10 +925,8 @@ parse_attribute :: proc(using p: ^Parser) -> Maybe(Ast_Attribute)
             // ??? Why is the compiler making me do this?
             attr.type, _ = .Out_Loc,
             required_token(p, .LParen)
-            num_token := required_token(p, .NumLit)
-            val, ok := num_token.value.(u64)
-            if !ok do parse_error_on_token(p, num_token, "Expecting integer value on attribute arguments.")
-            attr.arg = u32(val)
+            num_token := required_token(p, .IntLit)
+            attr.arg = u32(get_token_lit_int_value(num_token))
             required_token(p, .RParen)
         }
         case:
@@ -986,12 +1010,19 @@ Op_Precedence := map[Token_Type]Op_Info {
     .Plus  = { 4, .Add },
     .Minus = { 4, .Minus },
 
-    .Greater = { 5, .Greater },
-    .Less    = { 5, .Less },
-    .EQ      = { 5, .EQ },
-    .GE      = { 5, .GE },
-    .LE      = { 5, .LE },
-    .NEQ     = { 5, .NEQ },
+    .Bitwise_And = { 5, .Bitwise_And },
+    .Bitwise_Or  = { 5, .Bitwise_Or },
+    .Bitwise_Xor = { 5, .Bitwise_Xor },
+
+    .And = { 6, .And },
+    .Or  = { 6, .Or },
+
+    .Greater = { 7, .Greater },
+    .Less    = { 7, .Less },
+    .EQ      = { 7, .EQ },
+    .GE      = { 7, .GE },
+    .LE      = { 7, .LE },
+    .NEQ     = { 7, .NEQ },
 }
 
 add_type_if_not_present :: proc(using p: ^Parser, type: ^Ast_Type)

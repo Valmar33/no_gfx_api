@@ -117,7 +117,6 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
     writeln("layout(set = 0, binding = 0) uniform texture2D _res_textures_[];")
     writeln("layout(set = 1, binding = 0) uniform image2D _res_textures_rw_[];")
     writeln("layout(set = 2, binding = 0) uniform sampler _res_samplers_[];")
-
     writeln("")
 
     indirect_data_type_glsl := "_res_ptr_void"
@@ -180,7 +179,7 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
                     }
                     if is_param do continue
                 }
-                
+
                 if var_decl.attr == nil
                 {
                     writefln("%v %v;", type_to_glsl(var_decl.type), var_decl.name)
@@ -227,6 +226,32 @@ codegen_statement :: proc(statement: ^Ast_Statement, insert_semi := true)
         }
         case ^Ast_Assign:
         {
+            // NOTE: In musl we do rq := rayquery_init(...) but in GLSL we can't set the rayquery object.
+            if stmt.lhs.type.primitive_kind == .Ray_Query
+            {
+                call, is_call := stmt.rhs.derived_expr.(^Ast_Call)
+                if is_call
+                {
+                    call_ident, is_ident := call.target.derived_expr.(^Ast_Ident_Expr)
+                    if is_ident
+                    {
+                        text := call_ident.token.text
+                        if text == "rayquery_init"
+                        {
+                            write("rayquery(")
+                            codegen_expr(stmt.lhs)
+                            write(", ")
+                            codegen_expr(call.args[0])
+                            write(", ")
+                            codegen_expr(call.args[1])
+                            write(")")
+                            if insert_semi do write(";")
+                            break
+                        }
+                    }
+                }
+            }
+
             codegen_expr(stmt.lhs)
             write(" = ")
             codegen_expr(stmt.rhs)
@@ -234,6 +259,30 @@ codegen_statement :: proc(statement: ^Ast_Statement, insert_semi := true)
         }
         case ^Ast_Define_Var:
         {
+            // NOTE: In .musl we do rq := rayquery_init(...) but in GLSL we can't set the rayquery object.
+            if stmt.decl.type.primitive_kind == .Ray_Query
+            {
+                call, is_call := stmt.expr.derived_expr.(^Ast_Call)
+                if is_call
+                {
+                    call_ident, is_ident := call.target.derived_expr.(^Ast_Ident_Expr)
+                    if is_ident
+                    {
+                        text := call_ident.token.text
+                        if text == "rayquery_init"
+                        {
+                            writef("rayquery_init(%v, ", stmt.decl.name)
+                            codegen_expr(call.args[0])
+                            write(", ")
+                            codegen_expr(call.args[1])
+                            write(")")
+                            if insert_semi do write(";")
+                            break
+                        }
+                    }
+                }
+            }
+
             write(stmt.decl.name)
             write(" = ")
             codegen_expr(stmt.expr)
@@ -371,9 +420,11 @@ codegen_expr :: proc(expression: ^Ast_Expr)
     {
         case ^Ast_Binary_Expr:
         {
+            write("(")
             codegen_expr(expr.lhs)
             writef(" %v ", expr.token.text)
             codegen_expr(expr.rhs)
+            write(")")
         }
         case ^Ast_Ident_Expr:
         {
@@ -466,13 +517,15 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
         case .Label: return type.name.text
         case .Pointer: return strings.concatenate({ "_res_ptr_", type_to_glsl(type.base) })
         case .Slice: return strings.concatenate({ "_res_slice_", type_to_glsl(type.base) })
-        case .Proc: assert(false, "Not implemented.")
-        case .Struct: assert(false, "Not implemented.")
+        case .Proc: panic("Translating proc type is not implemented.")
+        case .Struct: panic("Translating struct type is not implemented.")
         case .Primitive:
         {
             switch type.primitive_kind
             {
                 case .None: return "NONE"
+                case .Untyped_Int: panic("Untyped int is not supposed to reach this stage.")
+                case .Untyped_Float: panic("Untyped float is not supposed to reach this stage.")
                 case .Bool: return "bool"
                 case .Float: return "float"
                 case .Uint: return "uint"
@@ -483,6 +536,8 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
                 case .Texture_ID: return "uint"
                 case .Sampler_ID: return "uint"
                 case .Mat4: return "mat4"
+                case .Ray_Query: return "rayQueryEXT"
+                case .BVH_ID: return "uint"
             }
         }
     }
@@ -567,11 +622,20 @@ write_preamble :: proc()
     writeln("#extension GL_EXT_nonuniform_qualifier : require")
     writeln("#extension GL_EXT_scalar_block_layout : require")
     writeln("#extension GL_EXT_shader_image_load_formatted : require")
+    if .Raytracing in writer.ast.used_features {
+        writeln("#extension GL_EXT_ray_query : require")
+    }
 
     if writer.shader_type == .Compute {
         writeln("layout(local_size_x_id = 13370, local_size_y_id = 13371, local_size_z_id = 13372) in;")
     }
-    
+
+    // Utility functions used for codegen
+    if .Raytracing in writer.ast.used_features
+    {
+        writeln(RT_Intrinsics_Code)
+    }
+
     writeln("")
 }
 
@@ -622,3 +686,89 @@ writer_output_to_file :: proc(path: string)
     err := os2.write_entire_file_from_string(path, strings.to_string(writer.builder))
     ensure(err == nil)
 }
+
+RT_Intrinsics_Code :: `
+// Raytracing intrinsics:
+
+layout(set = 3, binding = 0) uniform accelerationStructureEXT _res_bvhs_[];
+
+mat4 _res_mat4_from_mat4x3(mat4x3 m)
+{
+    // GLSL is column-major: m[col][row]
+    return mat4(
+        vec4(m[0], 0.0),
+        vec4(m[1], 0.0),
+        vec4(m[2], 0.0),
+        vec4(m[3], 1.0)
+    );
+}
+
+struct Ray_Desc
+{
+    uint flags;
+    uint cull_mask;
+    float t_min;
+    float t_max;
+    vec3 origin;
+    vec3 dir;
+};
+
+struct Ray_Result
+{
+    uint kind;
+    float t;
+    uint instance_idx;
+    uint primitive_idx;
+    vec2 barycentrics;
+    bool front_face;
+    mat4 object_to_world;
+    mat4 world_to_object;
+};
+
+Ray_Result rayquery_result(rayQueryEXT rq)
+{
+    Ray_Result res;
+    res.kind = rayQueryGetIntersectionTypeEXT(rq, true);
+    res.t = rayQueryGetIntersectionTEXT(rq, true);
+    res.instance_idx  = rayQueryGetIntersectionInstanceIdEXT(rq, true);
+    res.primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    res.front_face    = rayQueryGetIntersectionFrontFaceEXT(rq, true);
+    res.object_to_world = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, true));
+    res.world_to_object = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, true));
+    res.barycentrics    = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+    return res;
+}
+
+Ray_Result rayquery_candidate(rayQueryEXT rq)
+{
+    Ray_Result res;
+    res.kind = rayQueryGetIntersectionTypeEXT(rq, false);
+    res.t = rayQueryGetIntersectionTEXT(rq, false);
+    res.instance_idx  = rayQueryGetIntersectionInstanceIdEXT(rq, false);
+    res.primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+    res.front_face    = rayQueryGetIntersectionFrontFaceEXT(rq, false);
+    res.object_to_world = _res_mat4_from_mat4x3(rayQueryGetIntersectionObjectToWorldEXT(rq, false));
+    res.world_to_object = _res_mat4_from_mat4x3(rayQueryGetIntersectionWorldToObjectEXT(rq, false));
+    res.barycentrics    = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+    return res;
+}
+
+void rayquery_init(rayQueryEXT rq, Ray_Desc desc, uint bvh)
+{
+    rayQueryInitializeEXT(rq,
+                          _res_bvhs_[nonuniformEXT(bvh)],
+                          desc.flags,
+                          desc.cull_mask,
+                          desc.origin,
+                          desc.t_min,
+                          desc.dir,
+                          desc.t_max);
+}
+
+bool rayquery_proceed(rayQueryEXT rq)
+{
+    return rayQueryProceedEXT(rq);
+}
+
+// Raytracing intrinsics end.
+`

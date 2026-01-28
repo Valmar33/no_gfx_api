@@ -3,6 +3,7 @@ setlocal
 
 set glsl_flags=
 
+goto comment
 for /D %%F in (*) do (
     if exist "%%F\shaders\" (
         for %%S in ("%%F\shaders\*.glsl") do (
@@ -10,8 +11,8 @@ for /D %%F in (*) do (
         )
     )
 )
+:comment
 
-goto comment
 for /D %%F in (*) do (
     if exist "%%F\shaders\" (
         for %%S in ("%%F\shaders\*.musl") do (
@@ -20,4 +21,3 @@ for /D %%F in (*) do (
         )
     )
 )
-:comment

@@ -29,6 +29,6 @@ void main()
     vec4 normal_vert = _res_in_loc0_;
     vec3 normal;
     normal = normalize(normal_vert.xyz);
-    _res_out_loc0_ = vec4(normal * 0.5 + 0.5, 1.0);
+    _res_out_loc0_ = vec4(((normal * 0.5) + 0.5), 1.0);
 }
 

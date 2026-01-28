@@ -40,7 +40,7 @@ vec4 mat2_from_vec4(vec4 v)
 
 vec2 mat2_mul(vec4 m, vec2 v)
 {
-    return vec2(m.x * v.x + m.z * v.y, m.y * v.x + m.w * v.y);
+    return vec2(((m.x * v.x) + (m.z * v.y)), ((m.y * v.x) + (m.w * v.y)));
 }
 
 vec4 raymarch(_res_ptr_Data data, vec3 global_invocation_id)
@@ -53,7 +53,7 @@ vec4 raymarch(_res_ptr_Data data, vec3 global_invocation_id)
     vec2 r;
     vec4 O;
     C = global_invocation_id.xy;
-    z = fract(dot(C, sin(C))) - 0.5;
+    z = (fract(dot(C, sin(C))) - 0.5);
     o = vec4(0.0, 0.0, 0.0, 0.0);
     r = data._res_.resolution;
     // for construct
@@ -64,37 +64,37 @@ vec4 raymarch(_res_ptr_Data data, vec3 global_invocation_id)
         vec4 rot2;
         vec4 numerator;
         float denominator;
-        for(i = 1.0; i < 77.0; i = i + 1.0)
+        for(i = 1.0; (i < 77.0); i = (i + 1.0))
         {
-            p = vec4(z * normalize(vec3(C - 0.5 * r, r.y)), 0.1 * data._res_.time);
-            p = vec4(p.x, p.y, p.z + data._res_.time, p.w);
+            p = vec4((z * normalize(vec3((C - (0.5 * r)), r.y))), (0.1 * data._res_.time));
+            p = vec4(p.x, p.y, (p.z + data._res_.time), p.w);
             O = p;
-            rot1 = mat2_from_vec4(cos(2.0 + O.z + vec4(0.0, 11.0, 33.0, 0.0)));
+            rot1 = mat2_from_vec4(cos((2.0 + (O.z + vec4(0.0, 11.0, 33.0, 0.0)))));
             p_xy = mat2_mul(rot1, vec2(p.x, p.y));
             p = vec4(p_xy.x, p_xy.y, p.z, p.w);
-            rot2 = mat2_from_vec4(cos(O + vec4(0.0, 11.0, 33.0, 0.0)));
+            rot2 = mat2_from_vec4(cos((O + vec4(0.0, 11.0, 33.0, 0.0))));
             p_xy = mat2_mul(rot2, vec2(p.x, p.y));
             p = vec4(p_xy.x, p_xy.y, p.z, p.w);
-            numerator = 1.0 + sin(0.5 * O.z + length(p - O) + vec4(0.0, 4.0, 3.0, 6.0));
-            denominator = 0.5 + 2.0 * dot(O.xy, O.xy);
-            O = numerator / denominator;
-            p = abs(fract(p) - 0.5);
-            d = abs(min(length(p.xy) - 0.125, min(p.x, p.y) + 0.001)) + 0.001;
-            o = o + O.w / d * O;
-            z = z + 0.6 * d;
+            numerator = (1.0 + sin(((0.5 * O.z) + (length((p - O)) + vec4(0.0, 4.0, 3.0, 6.0)))));
+            denominator = (0.5 + (2.0 * dot(O.xy, O.xy)));
+            O = (numerator / denominator);
+            p = abs((fract(p) - 0.5));
+            d = (abs(min((length(p.xy) - 0.125), (min(p.x, p.y) + 0.001))) + 0.001);
+            o = (o + (O.w / (d * O)));
+            z = (z + (0.6 * d));
         }
     }
 
-    return tanh(o / 20000.0);
+    return tanh((o / 20000.0));
 }
 
 void main()
 {
     _res_ptr_Data data = _res_compute_data_;
     vec3 global_invocation_id = gl_GlobalInvocationID;
-    if(global_invocation_id.x < data._res_.resolution.x)
+    if((global_invocation_id.x < data._res_.resolution.x))
     {
-        if(global_invocation_id.y < data._res_.resolution.y)
+        if((global_invocation_id.y < data._res_.resolution.y))
         {
             vec4 color;
             color = raymarch(data, global_invocation_id);

@@ -51,11 +51,11 @@ void main()
     vec4 world_normal;
     Output vert_out;
     clip_pos = vec4(data._res_.positions._res_[vert_id].xyz, 1.0);
-    clip_pos = data._res_.model_to_world * clip_pos;
-    clip_pos = data._res_.world_to_view * clip_pos;
-    clip_pos = data._res_.view_to_proj * clip_pos;
-    clip_pos.y = 0.0 - clip_pos.y;
-    world_normal = data._res_.model_to_world_normal * data._res_.normals._res_[vert_id];
+    clip_pos = (data._res_.model_to_world * clip_pos);
+    clip_pos = (data._res_.world_to_view * clip_pos);
+    clip_pos = (data._res_.view_to_proj * clip_pos);
+    clip_pos.y = (0.0 - clip_pos.y);
+    world_normal = (data._res_.model_to_world_normal * data._res_.normals._res_[vert_id]);
     vert_out.pos = clip_pos;
     vert_out.color = world_normal;
     gl_Position = vert_out.pos; _res_out_loc0_ = vert_out.color; 
