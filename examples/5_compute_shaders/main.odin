@@ -211,7 +211,7 @@ main :: proc()
         cmd_buf := gpu.commands_begin(queue)
 
         // Dispatch compute shader to write to texture
-        gpu.cmd_set_texture_heap(cmd_buf, nil, texture_rw_heap_gpu, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, nil, texture_rw_heap_gpu, nil, nil)
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
 
         num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
@@ -242,7 +242,7 @@ main :: proc()
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
         textures := gpu.host_to_device_ptr(texture_heap)
         samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_texture_heap(cmd_buf, textures, nil, samplers)
+        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
 
         Vert_Data :: struct {
             verts: rawptr,

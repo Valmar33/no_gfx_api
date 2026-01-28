@@ -1744,7 +1744,7 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
     })
 }
 
-_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr, bvhs: rawptr = nil)
+_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr)
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
 
@@ -1830,15 +1830,6 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) samplers,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
-        }
-        cursor += 1
-    }
-    if bvhs != nil
-    {
-        infos[cursor] = {
-            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-            address = transmute(vk.DeviceAddress) bvhs,
             usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1

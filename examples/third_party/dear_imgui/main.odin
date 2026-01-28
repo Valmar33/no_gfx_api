@@ -161,7 +161,7 @@ main :: proc()
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
         textures := gpu.host_to_device_ptr(texture_heap)
         samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_texture_heap(cmd_buf, textures, nil, samplers)
+        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
         Vert_Data :: struct {
             verts: rawptr,
         }

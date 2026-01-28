@@ -264,7 +264,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr, bvhs: rawptr) : _cmd_set_texture_heap
+cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr) : _cmd_set_desc_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
