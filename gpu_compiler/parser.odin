@@ -678,6 +678,7 @@ parse_expr :: proc(using p: ^Parser, prec: int = max(int)) -> ^Ast_Expr
         undo_recurse := false
         undo_recurse |= !found
         undo_recurse |= op.prec > prec  // If it's less important (=greater priority) don't recurse.
+        undo_recurse |= op.prec == prec && op.is_left_to_right  // Handle left-to-right vs right-to-left operators
         if undo_recurse do return lhs
 
         // Recurse
@@ -999,31 +1000,32 @@ optional_token :: proc(using p: ^Parser, type: Token_Type) -> bool
 }
 
 // Operator precedence
-Op_Info :: struct
+Op_Info :: struct #all_or_none
 {
     prec: int,
     op: Ast_Binary_Op,
+    is_left_to_right: bool,
 }
 Op_Precedence := map[Token_Type]Op_Info {
-    .Mul = { 3, .Mul },
-    .Div = { 3, .Div },
+    .Mul = { 3, .Mul, true },
+    .Div = { 3, .Div, true },
 
-    .Plus  = { 4, .Add },
-    .Minus = { 4, .Minus },
+    .Plus  = { 4, .Add, true },
+    .Minus = { 4, .Minus, true },
 
-    .Bitwise_And = { 5, .Bitwise_And },
-    .Bitwise_Or  = { 5, .Bitwise_Or },
-    .Bitwise_Xor = { 5, .Bitwise_Xor },
+    .Bitwise_And = { 5, .Bitwise_And, true },
+    .Bitwise_Or  = { 5, .Bitwise_Or, true },
+    .Bitwise_Xor = { 5, .Bitwise_Xor, true },
 
-    .And = { 6, .And },
-    .Or  = { 6, .Or },
+    .And = { 6, .And, true },
+    .Or  = { 6, .Or, true },
 
-    .Greater = { 7, .Greater },
-    .Less    = { 7, .Less },
-    .EQ      = { 7, .EQ },
-    .GE      = { 7, .GE },
-    .LE      = { 7, .LE },
-    .NEQ     = { 7, .NEQ },
+    .Greater = { 7, .Greater, true },
+    .Less    = { 7, .Less, true },
+    .EQ      = { 7, .EQ, true },
+    .GE      = { 7, .GE, true },
+    .LE      = { 7, .LE, true },
+    .NEQ     = { 7, .NEQ, true },
 }
 
 add_type_if_not_present :: proc(using p: ^Parser, type: ^Ast_Type)
