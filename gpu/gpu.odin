@@ -40,9 +40,9 @@ Blend_Op :: enum { Add, Subtract, Rev_Subtract, Min, Max }
 Blend_Factor :: enum { Zero, One, Src_Color, Dst_Color, Src_Alpha }
 Depth_Mode :: enum { Read = 0, Write }
 Depth_Flags :: bit_set[Depth_Mode; u32]
-Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil }
+Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil, BVHs }
 Hazard_Flags :: bit_set[Hazard; u32]
-Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, All }
+Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, Build_BVH, All }
 Color_Component_Flag :: enum { R = 0, G = 1, B = 2, A = 3 }
 Color_Component_Flags :: distinct bit_set[Color_Component_Flag; u8]
 Filter :: enum { Linear = 0, Nearest }

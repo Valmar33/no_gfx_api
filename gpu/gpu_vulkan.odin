@@ -1834,6 +1834,15 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         }
         cursor += 1
     }
+    if bvhs != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) bvhs,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+        }
+        cursor += 1
+    }
 
     vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, cursor, &infos[0])
 
@@ -1861,11 +1870,6 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
     }
 }
 
-_cmd_set_bvh_desc_heap :: proc(cmd_buf: Command_Buffer, bvhs: rawptr)
-{
-
-}
-
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {})
 {
     vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
@@ -1885,19 +1889,22 @@ _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazar
         // Destination: indirect command read (for draw/dispatch indirect)
         dst_access += { .INDIRECT_COMMAND_READ }
     }
-
     if .Descriptors in hazards
     {
         // When descriptors are updated, ensure visibility
         src_access += { .SHADER_WRITE }
         dst_access += { .SHADER_READ }
     }
-
     if .Depth_Stencil in hazards
     {
         // Depth/stencil attachment synchronization
         src_access += { .DEPTH_STENCIL_ATTACHMENT_WRITE }
         dst_access += { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }
+    }
+    if .BVHs in hazards
+    {
+        src_access += { .ACCELERATION_STRUCTURE_WRITE_KHR }
+        dst_access += { .ACCELERATION_STRUCTURE_READ_KHR }
     }
 
     // If no specific hazards, use generic memory barrier
@@ -2703,6 +2710,7 @@ to_vk_stage :: #force_inline proc(stage: Stage) -> vk.PipelineStageFlags
         case .Raster_Color_Out: return { .COLOR_ATTACHMENT_OUTPUT }
         case .Fragment_Shader: return { .FRAGMENT_SHADER }
         case .Vertex_Shader: return { .VERTEX_SHADER }
+        case .Build_BVH: return { .ACCELERATION_STRUCTURE_BUILD_KHR }
         case .All: return { .ALL_COMMANDS }
     }
     return {}

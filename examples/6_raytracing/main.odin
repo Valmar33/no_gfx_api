@@ -157,7 +157,6 @@ main :: proc()
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
     scene := load_scene_gltf(Sponza_Scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer destroy_scene(&scene)
-    gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
     gpu.set_bvh_desc(bvh_heap, 0, gpu.bvh_descriptor(scene.bvh))
@@ -674,21 +673,16 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
     }
 
     // Build BVHs
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
-
+    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
     for &mesh in meshes {
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
 
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
-
     instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
-
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
 
     tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(instances)))
-
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+    gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
     return {
         instances = instances,
