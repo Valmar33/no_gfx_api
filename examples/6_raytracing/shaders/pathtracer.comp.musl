@@ -2,28 +2,24 @@
 Scene :: struct
 {
     instances: []Instance,
-    instance_count: uint,
     meshes: []Mesh,
-    mesh_count: uint,
 }
 
 Mesh :: struct
 {
     pos: []vec3,
     normal: []vec3,
-    uv: []vec2,
 }
 
 Instance :: struct
 {
-    transform: mat4,
     mesh_idx: uint,
 }
 
 Data :: struct
 {
     output_texture_id: textureid,
-    //scene: Scene,
+    scene: Scene,
     resolution: vec2,
     accum_counter: uint,
     camera_to_world: mat4,
@@ -109,7 +105,9 @@ ray_scene_intersection :: (ray: Ray) -> Hit_Info
         return hit_info;
     }
 
+    bary := hit.barycentrics;
     hit_info.hit = true;
     hit_info.t = hit.t;
+    hit_info.normal = 
     return hit_info;
 }

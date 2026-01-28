@@ -114,6 +114,7 @@ main :: proc()
 
     Compute_Data :: struct {
         output_texture_id: u32,
+        scene: Scene_GPU,
         resolution: [2]f32,
         accum_counter: u32,
         camera_to_world: [16]f32,
@@ -157,6 +158,7 @@ main :: proc()
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
     scene := load_scene_gltf(Sponza_Scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer destroy_scene(&scene)
+    gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
     gpu.set_bvh_desc(bvh_heap, 0, gpu.bvh_descriptor(scene.bvh))
@@ -221,6 +223,10 @@ main :: proc()
         // Allocate compute data for this frame with current time and resolution
         compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
         compute_data.cpu.output_texture_id = texture_id
+        compute_data.cpu.scene = {
+            instances = scene.instances_gpu,
+            meshes = scene.meshes_gpu,
+        }
         compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
         compute_data.cpu.camera_to_world = intr.matrix_flatten(camera_to_world)
 
@@ -375,11 +381,31 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
 /////////////////////////////////////////
 // Miscellaneous (Can be ignored)
 
-Scene :: struct
+Scene :: struct #all_or_none
 {
     meshes: [dynamic]Mesh,
     instances: [dynamic]Instance,
     bvh: gpu.Owned_BVH,
+
+    instances_gpu: rawptr,
+    meshes_gpu: rawptr,
+}
+
+Scene_GPU :: struct
+{
+    instances: rawptr,
+    meshes: rawptr,
+}
+
+Instance_GPU :: struct
+{
+    mesh_idx: u32,
+}
+
+Mesh_GPU :: struct
+{
+    pos: rawptr,
+    normal: rawptr,
 }
 
 destroy_scene :: proc(scene: ^Scene)
@@ -672,22 +698,43 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
         }
     }
 
+    // Construct GPU scene
+    instances_gpu := gpu.arena_alloc_array(upload_arena, Instance_GPU, len(instances))
+    for &instance, i in instances_gpu.cpu {
+        instance = { mesh_idx = instances[i].mesh_idx }
+    }
+    instances_local := gpu.mem_alloc_typed_gpu(Instance_GPU, len(instances))
+    gpu.cmd_mem_copy(cmd_buf, instances_gpu.gpu, instances_local, size_of(Instance_GPU) * len(instances))
+
+    meshes_gpu := gpu.arena_alloc_array(upload_arena, Mesh_GPU, len(meshes))
+    for &mesh, i in meshes_gpu.cpu {
+        mesh = {
+            pos = meshes[i].pos,
+            normal = meshes[i].normals,
+        }
+    }
+    meshes_local := gpu.mem_alloc_typed_gpu(Mesh_GPU, len(meshes))
+    gpu.cmd_mem_copy(cmd_buf, meshes_gpu.gpu, meshes_local, size_of(Mesh_GPU) * len(meshes))
+
     // Build BVHs
     gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
     for &mesh in meshes {
         mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
 
-    instances_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
+    instances_bvh_gpu := upload_bvh_instances(upload_arena, cmd_buf, instances[:], meshes[:])
     gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
 
-    tlas := build_tlas(upload_arena, cmd_buf, instances_gpu, u32(len(instances)))
+    tlas := build_tlas(upload_arena, cmd_buf, instances_bvh_gpu, u32(len(instances)))
     gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
     return {
         instances = instances,
         meshes = meshes,
         bvh = tlas,
+
+        instances_gpu = instances_local,
+        meshes_gpu = meshes_local,
     }
 }
 
