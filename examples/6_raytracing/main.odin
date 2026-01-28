@@ -6,7 +6,6 @@ import "core:math"
 import "core:math/linalg"
 import "base:runtime"
 import intr "base:intrinsics"
-import "core:fmt"
 
 import "../../gpu"
 
@@ -44,8 +43,13 @@ main :: proc()
     window_size_x := i32(Start_Window_Size_X)
     window_size_y := i32(Start_Window_Size_Y)
 
-    gpu.init(features = { .Raytracing })
+    gpu.init()
     defer gpu.cleanup()
+
+    if !(.Raytracing in gpu.features_available()) {
+        log.error("Raytracing is not supported, but it is mandatory for this example.")
+        return
+    }
 
     gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
 
@@ -490,8 +494,6 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32
     @(static) cam_pos: [3]f32 = { -7.581631, 1.1906259, 0.25928685 }
 
     @(static) angle: [2]f32 = { 1.570796, 0.3665192 }
-
-    fmt.println(cam_pos, angle)
 
     cam_rot: quaternion128 = 1
 

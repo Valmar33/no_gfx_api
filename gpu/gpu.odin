@@ -201,7 +201,7 @@ TLAS_Desc :: struct
 // Procedures
 
 // Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
-init: proc(features := Features {}) : _init
+init: proc() : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
 swapchain_init: proc(surface: vk.SurfaceKHR, frames_in_flight: u32) : _swapchain_init
@@ -209,6 +209,7 @@ swapchain_resize: proc() : _swapchain_resize  // NOTE: Do not call this every fr
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
 // TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
+features_available: proc() -> Features : _features_available
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr : _mem_alloc

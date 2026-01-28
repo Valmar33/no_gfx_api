@@ -8,7 +8,8 @@ import "core:slice"
 import intr "base:intrinsics"
 import str "core:strings"
 
-import "../gpu"
+Lang_Feature :: enum { Raytracing }
+Lang_Features :: bit_set[Lang_Feature; u32]
 
 Any_Node :: union
 {
@@ -28,7 +29,7 @@ Ast :: struct
     procs: [dynamic]^Ast_Proc_Def,
 
     // Filled in by typechecker
-    used_features: gpu.Features,
+    used_features: Lang_Features,
 }
 
 Ast_Node :: struct

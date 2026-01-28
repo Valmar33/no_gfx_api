@@ -73,10 +73,7 @@ Context :: struct
     alloc_tree: rbt.Tree(Alloc_Range, u32),
 
     // Common resources
-    textures_desc_layout: vk.DescriptorSetLayout,
-    textures_rw_desc_layout: vk.DescriptorSetLayout,
-    samplers_desc_layout: vk.DescriptorSetLayout,
-    bvhs_desc_layout: vk.DescriptorSetLayout,
+    desc_layouts: [dynamic]vk.DescriptorSetLayout,
     common_pipeline_layout_graphics: vk.PipelineLayout,
     common_pipeline_layout_compute: vk.PipelineLayout,
 
@@ -167,13 +164,11 @@ ctx: Context
 @(private="file")
 vk_logger: log.Logger
 
-_init :: proc(features := Features {})
+_init :: proc()
 {
     init_scratch_arenas()
 
     scratch, _ := acquire_scratch()
-
-    ctx.features = features
 
     // Load vulkan function pointers
     vk.load_proc_addresses_global(cast(rawptr) sdl.Vulkan_GetVkGetInstanceProcAddr())
@@ -286,13 +281,63 @@ _init :: proc(features := Features {})
 
     if !found do fatal_error("Could not find suitable GPU.")
 
+    raytracing_extensions := []cstring {
+        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        vk.KHR_RAY_QUERY_EXTENSION_NAME,
+    }
+
+    // Query physical device feature availability
+    {
+        supports_raytracing := true
+
+        count: u32
+        vk.EnumerateDeviceExtensionProperties(ctx.phys_device, nil, &count, nil)
+        extensions := make([]vk.ExtensionProperties, count)
+        vk.EnumerateDeviceExtensionProperties(ctx.phys_device, nil, &count, raw_data(extensions))
+
+        for required_ext in raytracing_extensions
+        {
+            found := false
+            for &supported_ext in extensions
+            {
+                if cstring(&supported_ext.extensionName[0]) == required_ext {
+                    found = true
+                    continue
+                }
+            }
+
+            if !found {
+                supports_raytracing = false
+                break
+            }
+        }
+
+        ray_query_features := vk.PhysicalDeviceRayQueryFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+        }
+        accel_features := vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            pNext = &ray_query_features,
+        }
+        features := vk.PhysicalDeviceFeatures2 {
+            sType = .PHYSICAL_DEVICE_FEATURES_2,
+            pNext = &accel_features
+        }
+        vk.GetPhysicalDeviceFeatures2(ctx.phys_device, &features)
+
+        supports_raytracing = supports_raytracing && accel_features.accelerationStructure && ray_query_features.rayQuery
+
+        if supports_raytracing do ctx.features += { .Raytracing }
+    }
+
     // Get physical device properties
     accel_props := vk.PhysicalDeviceAccelerationStructurePropertiesKHR {
         sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR
     }
     desc_buf_props := vk.PhysicalDeviceDescriptorBufferPropertiesEXT {
         sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
-        pNext = &accel_props if .Raytracing in features else nil,
+        pNext = &accel_props,
     }
     props2 := vk.PhysicalDeviceProperties2 {
         sType = .PHYSICAL_DEVICE_PROPERTIES_2,
@@ -307,7 +352,7 @@ _init :: proc(features := Features {})
     ensure(desc_buf_props.storageImageDescriptorSize <= 32, "Unexpected storage image descriptor size.")
     ensure(desc_buf_props.sampledImageDescriptorSize <= 32, "Unexpected sampled texture descriptor size.")
     ensure(desc_buf_props.samplerDescriptorSize <= 16, "Unexpected sampler descriptor size.")
-    if .Raytracing in features {
+    if .Raytracing in ctx.features {
         ensure(desc_buf_props.accelerationStructureDescriptorSize <= 32, "Unexpected BVH descriptor size.")
     }
     ctx.texture_desc_size = u32(desc_buf_props.sampledImageDescriptorSize)
@@ -368,7 +413,7 @@ _init :: proc(features := Features {})
         append(&required_extensions, vk.EXT_SHADER_OBJECT_EXTENSION_NAME)
         append(&required_extensions, vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)
         append(&required_extensions, vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)
-        if .Raytracing in features
+        if .Raytracing in ctx.features
         {
             append(&required_extensions, vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
             append(&required_extensions, vk.KHR_RAY_QUERY_EXTENSION_NAME)
@@ -425,13 +470,13 @@ _init :: proc(features := Features {})
             pNext = next,
             accelerationStructure = true,
         }
-        if .Raytracing in features do next = raytracing_features
+        if .Raytracing in ctx.features do next = raytracing_features
         rayquery_features := &vk.PhysicalDeviceRayQueryFeaturesKHR {
             sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
             pNext = next,
             rayQuery = true,
         }
-        if .Raytracing in features do next = rayquery_features
+        if .Raytracing in ctx.features do next = rayquery_features
 
         device_ci := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
@@ -502,7 +547,9 @@ _init :: proc(features := Features {})
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
@@ -516,7 +563,9 @@ _init :: proc(features := Features {})
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_rw_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
@@ -530,8 +579,11 @@ _init :: proc(features := Features {})
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.samplers_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
+        if .Raytracing in ctx.features
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
                 sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -544,14 +596,9 @@ _init :: proc(features := Features {})
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.bvhs_desc_layout))
-        }
-
-        desc_layouts := []vk.DescriptorSetLayout {
-            ctx.textures_desc_layout,
-            ctx.textures_rw_desc_layout,
-            ctx.samplers_desc_layout,
-            ctx.bvhs_desc_layout,
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
 
         // Graphics pipeline layout
@@ -566,8 +613,8 @@ _init :: proc(features := Features {})
                 sType = .PIPELINE_LAYOUT_CREATE_INFO,
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = u32(len(desc_layouts)),
-                pSetLayouts = raw_data(desc_layouts),
+                setLayoutCount = u32(len(ctx.desc_layouts)),
+                pSetLayouts = raw_data(ctx.desc_layouts),
             }
             vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout_graphics))
         }
@@ -584,8 +631,8 @@ _init :: proc(features := Features {})
                 sType = .PIPELINE_LAYOUT_CREATE_INFO,
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = u32(len(desc_layouts)),
-                pSetLayouts = raw_data(desc_layouts),
+                setLayoutCount = u32(len(ctx.desc_layouts)),
+                pSetLayouts = raw_data(ctx.desc_layouts),
             }
             vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout_compute))
         }
@@ -642,10 +689,10 @@ _cleanup :: proc()
         }
     }
 
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_rw_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.samplers_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.bvhs_desc_layout, nil)
+    for &layout in ctx.desc_layouts {
+        vk.DestroyDescriptorSetLayout(ctx.device, layout, nil)
+    }
+
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_graphics, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_compute, nil)
 
@@ -841,6 +888,11 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
     if res != .SUCCESS && res != .SUBOPTIMAL_KHR {
         vk_check(res)
     }
+}
+
+_features_available :: proc() -> Features
+{
+    return ctx.features
 }
 
 // Memory
@@ -1265,13 +1317,6 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         }
     }
 
-    desc_layouts := []vk.DescriptorSetLayout {
-        ctx.textures_desc_layout,
-        ctx.textures_rw_desc_layout,
-        ctx.samplers_desc_layout,
-        ctx.bvhs_desc_layout,
-    }
-
     // Setup specialization constants for compute shader workgroup size
     spec_map_entries: [3]vk.SpecializationMapEntry
     spec_data: [3]u32
@@ -1342,8 +1387,8 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         nextStage = next_stage,
         pushConstantRangeCount = u32(len(push_constant_ranges)),
         pPushConstantRanges = raw_data(push_constant_ranges),
-        setLayoutCount = u32(len(desc_layouts)),
-        pSetLayouts = raw_data(desc_layouts),
+        setLayoutCount = u32(len(ctx.desc_layouts)),
+        pSetLayouts = raw_data(ctx.desc_layouts),
         pSpecializationInfo = spec_info_ptr,
     }
 
@@ -1434,7 +1479,7 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 // Raytracing
 _blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 {
-    return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 1
+    return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 16
 }
 
 _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
