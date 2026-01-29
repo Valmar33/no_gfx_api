@@ -2559,7 +2559,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
             }
             case BVH_AABBs:
             {
-                // TODO
+                geom.geometry.aabbs.data.deviceAddress = transmute(vk.DeviceAddress) s.data
             }
         }
     }
@@ -2574,13 +2574,10 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 {
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    bvh_info := get_resource(bvh, ctx.bvhs)
     sync.unlock(&ctx.lock)
 
     vk_cmd_buf := cmd_buf.handle
-
-    sync.lock(&ctx.lock)
-    bvh_info := get_resource(bvh, ctx.bvhs)
-    sync.unlock(&ctx.lock)
 
     if bvh_info.is_blas
     {
