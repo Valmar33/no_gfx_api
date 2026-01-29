@@ -1,0 +1,33 @@
+Data :: struct
+{
+    gbuffer_albedo: textureid,
+    gbuffer_albedo_sampler: samplerid,
+    gbuffer_normal: textureid,
+    gbuffer_normal_sampler: samplerid,
+    gbuffer_metallic_roughness: textureid,
+    gbuffer_metallic_roughness_sampler: samplerid,
+    selected_texture_type: int,
+}
+
+main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)
+{
+    // Implementing the final PBR pass is left as an exercise to the reader.
+
+    // Switch between G-buffer textures based on selected_texture_type
+    // 0 = Albedo, 1 = Normal, 2 = Metallic_Roughness
+    result: vec4;
+    if data.selected_texture_type == 0 {
+        // Sample albedo from G-buffer
+        result = sample(data.gbuffer_albedo, data.gbuffer_albedo_sampler, uv);
+    } else {
+        if data.selected_texture_type == 1 {
+            // Sample normal from G-buffer
+            result = sample(data.gbuffer_normal, data.gbuffer_normal_sampler, uv);
+        } else {
+            // Sample metallic-roughness from G-buffer
+            result = sample(data.gbuffer_metallic_roughness, data.gbuffer_metallic_roughness_sampler, uv);
+        }
+    }
+
+    return result;
+}

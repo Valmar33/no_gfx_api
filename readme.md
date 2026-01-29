@@ -16,8 +16,8 @@ gpu.swapchain_init(surface, Frames_In_Flight)
 vert_shader := gpu.shader_create(/* ... */, .Vertex)
 frag_shader := gpu.shader_create(/* ... */, .Fragment)
 defer {
-    gpu.shader_destroy(&vert_shader)
-    gpu.shader_destroy(&frag_shader)
+    gpu.shader_destroy(vert_shader)
+    gpu.shader_destroy(frag_shader)
 }
 
 // --- Create arenas and allocate memory

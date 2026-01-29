@@ -45,8 +45,8 @@ main :: proc()
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     defer {
-        gpu.shader_destroy(&vert_shader)
-        gpu.shader_destroy(&frag_shader)
+        gpu.shader_destroy(vert_shader)
+        gpu.shader_destroy(frag_shader)
     }
 
     Vertex :: struct { pos: [3]f32, color: [3]f32 }
@@ -108,7 +108,7 @@ main :: proc()
             gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
         }
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
-            gpu.swapchain_resize()
+            gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
         }
 
         last_ts := now_ts

@@ -54,9 +54,9 @@ main :: proc()
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     defer {
-        gpu.shader_destroy(&compute_shader)
-        gpu.shader_destroy(&vert_shader)
-        gpu.shader_destroy(&frag_shader)
+        gpu.shader_destroy(compute_shader)
+        gpu.shader_destroy(vert_shader)
+        gpu.shader_destroy(frag_shader)
     }
 
     // Create a texture for the compute shader to write to
@@ -179,7 +179,7 @@ main :: proc()
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
             gpu.queue_wait_idle(queue)
-            gpu.swapchain_resize()
+            gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
 
             output_desc.dimensions.x = u32(window_size_x)
             output_desc.dimensions.y = u32(window_size_y)
