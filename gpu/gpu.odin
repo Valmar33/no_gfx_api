@@ -404,7 +404,11 @@ arena_destroy :: proc(using arena: ^Arena)
 {
     offset = 0
     size = 0
-    mem_free(cpu)
+    if cpu == nil {
+        mem_free(gpu)
+    } else {
+        mem_free(cpu)
+    }
     cpu = nil
     gpu = nil
 }

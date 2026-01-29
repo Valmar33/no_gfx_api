@@ -745,7 +745,7 @@ get_tls :: proc() -> ^Thread_Local_Context
     if tls_ctx != nil do return tls_ctx
 
     tls_ctx = new(Thread_Local_Context)
-    
+
     for type in Queue_Type
     {
         queue := get_queue(type)
@@ -760,7 +760,7 @@ get_tls :: proc() -> ^Thread_Local_Context
             &tls_ctx.free_buffers[type],
             less = proc(a,b: Free_Command_Buffer) -> bool {
                 return a.timeline_value < b.timeline_value
-            }, 
+            },
             swap = proc(q: []Free_Command_Buffer, i, j: int) {
                 q[i], q[j] = q[j], q[i]
             }
@@ -942,7 +942,7 @@ _swapchain_acquire_next :: proc() -> Texture
 _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
 {
     tls_ctx := get_tls()
-    
+
     sync.lock(&ctx.lock)
     vk_queue := get_resource(queue, &ctx.queues).handle
     sync.unlock(&ctx.lock)
@@ -2168,7 +2168,7 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     enable_b32 := b32(state.enable)
@@ -2192,7 +2192,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     shader_info := get_resource(compute_shader, ctx.shaders)
@@ -2212,7 +2212,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     if _, ok := cmd_buf.compute_shader.?; !ok
@@ -2235,7 +2235,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     if _, ok := cmd_buf.compute_shader.?; !ok
@@ -2265,7 +2265,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     ensure(cmd_buf.queue_type == .Main, "cmd_begin_render_pass called on a non-graphics command buffer")
     vk_cmd_buf := cmd_buf.handle
 
@@ -2320,7 +2320,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
             blend_enables[i] = false
         }
         vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(blend_enables))
-        
+
         // Set color write mask for all attachments
         color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
         color_masks := make([]vk.ColorComponentFlags, color_attachment_count, allocator = scratch)
@@ -2385,7 +2385,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2412,7 +2412,7 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2446,7 +2446,7 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2495,8 +2495,15 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
 
 _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape)
 {
-    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    sync.lock(&ctx.lock)
+    cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    sync.unlock(&ctx.lock)
+
+    vk_cmd_buf := cmd_buf.handle
+
+    sync.lock(&ctx.lock)
     bvh_info := get_resource(bvh, ctx.bvhs)
+    sync.unlock(&ctx.lock)
 
     if !bvh_info.is_blas
     {
@@ -2565,8 +2572,15 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 
 _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr)
 {
-    vk_cmd_buf := cast(vk.CommandBuffer) cmd_buf
+    sync.lock(&ctx.lock)
+    cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    sync.unlock(&ctx.lock)
+
+    vk_cmd_buf := cmd_buf.handle
+
+    sync.lock(&ctx.lock)
     bvh_info := get_resource(bvh, ctx.bvhs)
+    sync.unlock(&ctx.lock)
 
     if bvh_info.is_blas
     {
@@ -2927,7 +2941,7 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> ^Command_Buffer_Info
 vk_submit_cmd_buf :: proc(cmd_buf: ^Command_Buffer_Info, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
     tls_ctx := get_tls()
-    
+
     sync.lock(&ctx.lock)
     queue_info := get_resource(cmd_buf.queue, &ctx.queues)
     sync.unlock(&ctx.lock)
@@ -2960,7 +2974,7 @@ vk_submit_cmd_buf :: proc(cmd_buf: ^Command_Buffer_Info, signal_sem: vk.Semaphor
         signalSemaphoreCount = u32(len(signal_sems)),
         pSignalSemaphores = raw_data(signal_sems)
     }
-    
+
     if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 
     recycle_cmd_buf(cmd_buf)
@@ -3048,7 +3062,7 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
 {
     view_desc := attach.view
     texture := attach.texture
-    
+
     sync.lock(&ctx.lock)
     tex_info := get_resource(texture.handle, ctx.textures)
     sync.unlock(&ctx.lock)
@@ -3292,7 +3306,7 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
         for props, i in family_properties
         {
             if props.queueCount == 0 do continue
-            
+
             // NOTE: If a queue family supports graphics, it is required
             // to also support transfer, but it's NOT required
             // to report .TRANSFER in its queueFlags, as stated in

@@ -406,7 +406,7 @@ render_pass_gbuffer :: proc(
 	textures_ptr := gpu.host_to_device_ptr(texture_heap)
 	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
 	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
+	gpu.cmd_set_desc_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr, nil)
 
 	gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
 
@@ -494,7 +494,7 @@ render_pass_final :: proc(
 	textures_ptr := gpu.host_to_device_ptr(texture_heap)
 	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
 	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
+	gpu.cmd_set_desc_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr, nil)
 
 	// Disable depth testing for fullscreen quad
 	gpu.cmd_set_depth_state(cmd_buf, {mode = {}, compare = .Always})

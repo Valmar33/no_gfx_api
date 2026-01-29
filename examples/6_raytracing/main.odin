@@ -59,9 +59,9 @@ main :: proc()
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
     pathtrace_shader := gpu.shader_create_compute(#load("shaders/pathtracer.comp.spv", []u32), group_size_x, group_size_y, 1)
     defer {
-        gpu.shader_destroy(&vert_shader)
-        gpu.shader_destroy(&frag_shader)
-        gpu.shader_destroy(&pathtrace_shader)
+        gpu.shader_destroy(vert_shader)
+        gpu.shader_destroy(frag_shader)
+        gpu.shader_destroy(pathtrace_shader)
     }
 
     upload_arena := gpu.arena_init(1024 * 1024 * 1024)
@@ -196,7 +196,7 @@ main :: proc()
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
             gpu.queue_wait_idle(queue)
-            gpu.swapchain_resize()
+            gpu.swapchain_resize({ u32(window_size_x), u32(window_size_y) })
 
             output_desc.dimensions.x = u32(window_size_x)
             output_desc.dimensions.y = u32(window_size_y)
@@ -398,6 +398,7 @@ Scene :: struct #all_or_none
 
     instances_gpu: rawptr,
     meshes_gpu: rawptr,
+    instances_bvh_gpu: rawptr,
 }
 
 Scene_GPU :: struct
@@ -425,6 +426,10 @@ destroy_scene :: proc(scene: ^Scene)
     for &mesh in scene.meshes {
         destroy_mesh(&mesh)
     }
+
+    gpu.mem_free(scene.instances_gpu)
+    gpu.mem_free(scene.meshes_gpu)
+    gpu.mem_free(scene.instances_bvh_gpu)
 
     delete(scene.meshes)
     delete(scene.instances)
@@ -746,6 +751,7 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
 
         instances_gpu = instances_local,
         meshes_gpu = meshes_local,
+        instances_bvh_gpu = instances_bvh_gpu,
     }
 }
 
