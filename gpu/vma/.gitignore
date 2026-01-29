@@ -3,7 +3,7 @@ build
 !.gitkeep
 
 # Libraries
-*.lib
+#*.lib
 *.a
 *.la
 *.lo
