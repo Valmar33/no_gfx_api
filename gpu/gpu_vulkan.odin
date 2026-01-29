@@ -1693,6 +1693,7 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
         shapes = cloned_shapes,
         blas_desc = desc,
     }
+    sync.guard(&ctx.lock)
     return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
 }
 
@@ -1733,6 +1734,7 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
         is_blas = false,
         tlas_desc = desc
     }
+    sync.guard(&ctx.lock)
     return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
 }
 
@@ -1743,6 +1745,7 @@ _tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64
 
 _bvh_root_ptr :: proc(bvh: BVH) -> rawptr
 {
+    sync.guard(&ctx.lock)
     bvh_info := get_resource(bvh, ctx.bvhs)
 
     return transmute(rawptr) vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, & {
@@ -1753,6 +1756,7 @@ _bvh_root_ptr :: proc(bvh: BVH) -> rawptr
 
 _bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
 {
+    sync.guard(&ctx.lock)
     bvh_info := get_resource(bvh, ctx.bvhs)
 
     bvh_addr := vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, &{
@@ -1777,6 +1781,7 @@ _get_bvh_descriptor_size :: proc() -> u32
 
 _bvh_destroy :: proc(bvh: ^BVH)
 {
+    sync.guard(&ctx.lock)
     bvh_key := transmute(Key) (bvh^)
     bvh_info := get_resource(bvh^, ctx.bvhs)
 
@@ -1882,7 +1887,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64)
 {
-    sync.guard(&ctx.lock)
+    sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
 
