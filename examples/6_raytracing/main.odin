@@ -76,7 +76,7 @@ main :: proc()
         mip_count = 1,
         layer_count = 1,
         sample_count = 1,
-        format = .RGBA8_Unorm,
+        format = .RGBA16_Float,
         usage = { .Storage, .Sampled },
     }
     output_texture := gpu.alloc_and_create_texture(output_desc)
@@ -96,7 +96,7 @@ main :: proc()
     texture_rw_heap_gpu := gpu.host_to_device_ptr(texture_rw_heap)
 
     // Create texture descriptor for sampled access (fragment shader)
-    texture_desc := gpu.texture_view_descriptor(output_texture, { format = .RGBA8_Unorm })
+    texture_desc := gpu.texture_view_descriptor(output_texture, {})
 
     // Allocate texture heap for fragment shader
     texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
@@ -377,7 +377,8 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
         instance = {
             transform = gpu_transform,
             blas = gpu._test(meshes[instances[i].mesh_idx].bvh),
-            flags = auto_cast(vk.GeometryInstanceFlagsKHR { .TRIANGLE_FACING_CULL_DISABLE }),
+            disable_culling = true,
+            flip_facing = true,
             mask = 1,
         }
     }

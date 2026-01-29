@@ -29,7 +29,7 @@ Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Queue_Type :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
-Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float }
+Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float, RGBA16_Float }
 Usage :: enum { Sampled = 0, Storage, Color_Attachment, Depth_Stencil_Attachment }
 Usage_Flags :: bit_set[Usage; u32]
 Shader_Type_Graphics :: enum { Vertex = 0, Fragment }
@@ -160,7 +160,13 @@ BVH_Instance :: struct
     },
     using _: bit_field u32 {
         _unused: u32 | 24,
-        flags:   BVH_Instance_Flag | 8,
+        disable_culling: bool | 1,
+        flip_facing: bool | 1,
+        force_opaque: bool | 1,
+        force_not_opaque: bool | 1,
+        force_opacity_micromaps: bool | 1,
+        disable_opacity_micromaps: bool | 1,
+        _unused_flags: bool | 2,
     },
     blas: rawptr,
 }
