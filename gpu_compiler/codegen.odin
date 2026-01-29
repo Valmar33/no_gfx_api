@@ -48,17 +48,11 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
 
     writeln("")
 
-    // Generate all decls (structs are already defined here because you can't forward-declare structs in GLSL)
+    // Generate all struct decls first (functions might use some of these structs) (can't forward-declare structs in GLSL)
     for decl in ast.scope.decls
     {
-        switch decl.type.kind
+        #partial switch decl.type.kind
         {
-            case .Poison: {}
-            case .Unknown: {}
-            case .Label: {}
-            case .Pointer: {}
-            case .Slice: {}
-            case .Primitive: {}
             case .Struct:
             {
                 writefln("struct %v", decl.name)
@@ -73,6 +67,14 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
                 writeln("};")
                 writeln("")
             }
+        }
+    }
+
+    // Generate all proc decls
+    for decl in ast.scope.decls
+    {
+        #partial switch decl.type.kind
+        {
             case .Proc:
             {
                 is_main := decl.name == "main"
@@ -90,6 +92,38 @@ codegen :: proc(ast: Ast, shader_type: Shader_Type, input_path: string, output_p
                     }
                 }
                 writeln(");")
+            }
+        }
+    }
+
+    // Generate all global var decls
+    for decl in ast.scope.decls
+    {
+        #partial switch decl.type.kind
+        {
+            case .Proc: {}
+            case .Struct: {}
+            case:
+            {
+                has_def := false
+                for global in ast.global_vars
+                {
+                    if global.decl == decl
+                    {
+                        writef("%v %v", type_to_glsl(global.decl.type), global.decl.name)
+                        write(" = ")
+                        codegen_expr(global.expr)
+                        writeln(";")
+
+                        has_def = true
+                        break
+                    }
+                }
+
+                if !has_def
+                {
+                    writefln("%v %v;", type_to_glsl(decl.type), decl.name)
+                }
             }
         }
     }
@@ -422,8 +456,15 @@ codegen_expr :: proc(expression: ^Ast_Expr)
         {
             write("(")
             codegen_expr(expr.lhs)
-            writef(" %v ", expr.token.text)
+            writef(" %v ", binary_op_to_glsl(expr.op))
             codegen_expr(expr.rhs)
+            write(")")
+        }
+        case ^Ast_Unary_Expr:
+        {
+            write("(")
+            write(unary_op_to_glsl(expr.op))
+            codegen_expr(expr.expr)
             write(")")
         }
         case ^Ast_Ident_Expr:
@@ -488,6 +529,20 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
                     is_intrinsic = true
                 }
+                else if text == "imageLoad"
+                {
+                    assert(len(expr.args) == 2)
+
+                    // For compute shaders, we can use direct indexing without nonuniformEXT
+                    // since we're accessing by index from the data struct
+                    write("imageLoad(_res_textures_rw_[nonuniformEXT(")
+                    codegen_expr(expr.args[0])
+                    write(")], ivec2(")
+                    codegen_expr(expr.args[1])
+                    write("))")
+
+                    is_intrinsic = true
+                }
             }
 
             if is_intrinsic do break
@@ -513,6 +568,7 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
     switch type.kind
     {
         case .Poison: return "<POISON>"
+        case .None: return "void"
         case .Unknown: return "<UNKNOWN>"
         case .Label: return type.name.text
         case .Pointer: return strings.concatenate({ "_res_ptr_", type_to_glsl(type.base) })
@@ -540,6 +596,42 @@ type_to_glsl :: proc(type: ^Ast_Type) -> string
                 case .BVH_ID: return "uint"
             }
         }
+    }
+    return ""
+}
+
+binary_op_to_glsl :: proc(op: Ast_Binary_Op) -> string
+{
+    switch op
+    {
+        case .Add:         return "+"
+        case .Minus:       return "-"
+        case .Mul:         return "*"
+        case .Div:         return "/"
+        case .Bitwise_And: return "&"
+        case .Bitwise_Or:  return "|"
+        case .Bitwise_Xor: return "^"
+        case .LShift:      return "<<"
+        case .RShift:      return ">>"
+        case .And:         return "&&"
+        case .Or:          return "||"
+        case .Greater:     return ">"
+        case .Less:        return "<"
+        case .LE:          return "<="
+        case .GE:          return ">="
+        case .EQ:          return "=="
+        case .NEQ:         return "!="
+    }
+    return ""
+}
+
+unary_op_to_glsl :: proc(op: Ast_Unary_Op) -> string
+{
+    switch op
+    {
+        case .Not:   return "!"
+        case .Plus:  return "+"
+        case .Minus: return "-"
     }
     return ""
 }

@@ -13,6 +13,7 @@ typecheck_ast :: proc(ast: ^Ast, input_path: string, allocator: runtime.Allocato
         scope = ast.scope,
         error = false,
         cur_proc = nil,
+        proc_ret = nil,
     }
 
     add_intrinsics()
@@ -22,6 +23,7 @@ typecheck_ast :: proc(ast: ^Ast, input_path: string, allocator: runtime.Allocato
         switch decl.type.kind
         {
             case .Poison: {}
+            case .None: {}
             case .Unknown: {}
             case .Proc:
             {
@@ -83,8 +85,16 @@ typecheck_ast :: proc(ast: ^Ast, input_path: string, allocator: runtime.Allocato
         c.scope = proc_def.scope
         defer c.scope = old_scope
 
+        c.proc_ret = nil
+
         for stmt in proc_def.statements {
             typecheck_statement(&c, stmt)
+        }
+
+        if c.proc_ret != nil && proc_def.decl.type.ret.kind == .None {
+            typecheck_error(&c, c.proc_ret.token, "Unexpected return, procedure does not have a return type.")
+        } else if c.proc_ret == nil && proc_def.decl.type.ret.kind != .None {
+            typecheck_error(&c, proc_def.decl.token, "Missing return statement.")
         }
     }
 
@@ -98,6 +108,7 @@ Checker :: struct #all_or_none
     scope: ^Ast_Scope,
     input_path: string,
     error: bool,
+    proc_ret: ^Ast_Return,
 }
 
 typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
@@ -120,9 +131,21 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
         case ^Ast_Define_Var:
         {
             typecheck_expr(c, stmt.expr)
-            if stmt.decl.type.kind == .Unknown
+
+            if stmt.expr.type.kind == .None
             {
-                stmt.decl.type = stmt.expr.type
+                typecheck_error(c, stmt.expr.token, "Expression does not return value.")
+                stmt.decl.type = &POISON_TYPE
+            }
+            else if stmt.decl.type.kind == .Unknown
+            {
+                if stmt.expr.type.primitive_kind == .Untyped_Int {
+                    stmt.decl.type = &INT_TYPE
+                } else if stmt.expr.type.primitive_kind == .Untyped_Float {
+                    stmt.decl.type = &FLOAT_TYPE
+                } else {
+                    stmt.decl.type = stmt.expr.type
+                }
             }
             else
             {
@@ -134,7 +157,7 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
         case ^Ast_If:
         {
             typecheck_expr(c, stmt.cond)
-            if stmt.cond.type.primitive_kind != .Bool {
+            if !type_implicit_convert(stmt.cond.type, &BOOL_TYPE) {
                 typecheck_error_mismatching_types(c, stmt.token, stmt.cond.type, &BOOL_TYPE)
             }
 
@@ -181,6 +204,8 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
         }
         case ^Ast_Return:
         {
+            c.proc_ret = stmt
+
             typecheck_expr(c, stmt.expr)
             if !type_implicit_convert(stmt.expr.type, cur_proc.decl.type.ret) {
                 typecheck_error_mismatching_types(c, stmt.token, stmt.expr.type, cur_proc.decl.type.ret)
@@ -210,6 +235,17 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
             expr.type = bin_op_result_type(expr.op, expr.lhs.type, expr.rhs.type)
             if expr.type == &POISON_TYPE {
                 typecheck_error_mismatching_types(c, expr.token, expr.lhs.type, expr.rhs.type)
+            }
+        }
+        case ^Ast_Unary_Expr:
+        {
+            typecheck_expr(c, expr.expr)
+
+            scratch, _ := acquire_scratch()
+
+            expr.type = unary_op_result_type(expr.op, expr.expr.type)
+            if expr.type == &POISON_TYPE {
+                typecheck_error(c, expr.token, "Can't apply operator '%v' on type '%v'.", expr.token.text, type_to_string(expr.expr.type, arena = scratch))
             }
         }
         case ^Ast_Ident_Expr:
@@ -367,7 +403,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                 typecheck_expr(c, arg)
 
                 if !type_implicit_convert(arg.type, proc_decl_arg_type) {
-                    typecheck_error_mismatching_types(c, expr.token, arg.type, proc_decl_arg_type)
+                    typecheck_error_mismatching_types(c, arg.token, arg.type, proc_decl_arg_type)
                 }
             }
 
@@ -417,9 +453,11 @@ decl_lookup :: proc(using c: ^Checker, token: Token) -> ^Ast_Decl
     cur_scope := scope
     for cur_scope != nil
     {
+        is_global_scope := cur_scope.enclosing_scope == nil
+
         for decl in cur_scope.decls
         {
-            ignore_order := decl.type.kind == .Struct || decl.type.kind == .Proc
+            ignore_order := is_global_scope || decl.type.kind == .Struct || decl.type.kind == .Proc
             if !ignore_order && raw_data(decl.token.text) > raw_data(token.text) {
                 continue
             }
@@ -490,6 +528,7 @@ add_intrinsics :: proc()
     // Resource access
     add_intrinsic("sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
     add_intrinsic("imageStore", { &TEXTUREID_TYPE, &VEC2_TYPE, &VEC4_TYPE }, { "tex_idx", "coord", "value" }, nil)
+    add_intrinsic("imageLoad", { &TEXTUREID_TYPE, &VEC2_TYPE }, { "tex_idx", "coord" }, &VEC4_TYPE)
 
     // Raytracing
     ray_result_type := add_intrinsic_struct("Ray_Result", { &UINT_TYPE, &FLOAT_TYPE, &UINT_TYPE, &UINT_TYPE, &VEC2_TYPE, &BOOL_TYPE, &MAT4_TYPE, &MAT4_TYPE }, { "kind", "t", "instance_idx", "primitive_idx", "barycentrics", "front_face", "object_to_world", "world_to_object" })
@@ -501,6 +540,10 @@ add_intrinsics :: proc()
     add_intrinsic("rayquery_result", { &RAYQUERY_TYPE }, { "rq" }, ray_result_type)
 
     // Constructors
+    add_intrinsic("uint", { &FLOAT_TYPE }, { "x" }, &UINT_TYPE)
+    add_intrinsic("int", { &FLOAT_TYPE }, { "x" }, &INT_TYPE)
+    add_intrinsic("float", { &INT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("float", { &UINT_TYPE }, { "x" }, &FLOAT_TYPE)
     add_intrinsic("vec2", { &FLOAT_TYPE, &FLOAT_TYPE }, { "x", "y" }, &VEC2_TYPE)
     add_intrinsic("vec2", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
     add_intrinsic("vec3", { &FLOAT_TYPE, &FLOAT_TYPE, &FLOAT_TYPE }, { "x", "y", "z" }, &VEC3_TYPE)
@@ -514,8 +557,13 @@ add_intrinsics :: proc()
     add_intrinsic("vec4", { &FLOAT_TYPE, &FLOAT_TYPE, &VEC2_TYPE }, { "x", "y", "z" }, &VEC4_TYPE)
     add_intrinsic("vec4", { &VEC2_TYPE, &FLOAT_TYPE, &FLOAT_TYPE }, { "x", "y", "z" }, &VEC4_TYPE)
     add_intrinsic("vec4", { &FLOAT_TYPE, &VEC2_TYPE, &FLOAT_TYPE }, { "x", "y", "z" }, &VEC4_TYPE)
+    add_intrinsic("mat4", { &VEC4_TYPE, &VEC4_TYPE, &VEC4_TYPE, &VEC4_TYPE }, { "x", "y", "z", "w" }, &MAT4_TYPE)
 
     // Math functions - these work on float, vec2, vec3, vec4 (component-wise)
+    add_intrinsic("sqrt", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
+    add_intrinsic("sqrt", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
+    add_intrinsic("sqrt", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
+    add_intrinsic("sqrt", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE)
     add_intrinsic("sin", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE)
     add_intrinsic("sin", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE)
     add_intrinsic("sin", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE)
@@ -550,10 +598,17 @@ add_intrinsics :: proc()
     add_intrinsic("min", { &VEC2_TYPE, &VEC2_TYPE }, { "a", "b" }, &VEC2_TYPE)
     add_intrinsic("min", { &VEC3_TYPE, &VEC3_TYPE }, { "a", "b" }, &VEC3_TYPE)
     add_intrinsic("min", { &VEC4_TYPE, &VEC4_TYPE }, { "a", "b" }, &VEC4_TYPE)
+    add_intrinsic("max", { &FLOAT_TYPE, &FLOAT_TYPE }, { "a", "b" }, &FLOAT_TYPE)
+    add_intrinsic("max", { &VEC2_TYPE, &VEC2_TYPE }, { "a", "b" }, &VEC2_TYPE)
+    add_intrinsic("max", { &VEC3_TYPE, &VEC3_TYPE }, { "a", "b" }, &VEC3_TYPE)
+    add_intrinsic("max", { &VEC4_TYPE, &VEC4_TYPE }, { "a", "b" }, &VEC4_TYPE)
     add_intrinsic("normalize", { &VEC2_TYPE }, { "v" }, &VEC2_TYPE)
     add_intrinsic("normalize", { &VEC3_TYPE }, { "v" }, &VEC3_TYPE)
     add_intrinsic("normalize", { &VEC4_TYPE }, { "v" }, &VEC4_TYPE)
     add_intrinsic("mix", { &VEC4_TYPE, &VEC4_TYPE, &FLOAT_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
+
+    // Matrix manipulation
+    add_intrinsic("transpose", { &MAT4_TYPE }, { "m" }, &MAT4_TYPE)
 }
 
 add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil)
@@ -615,6 +670,18 @@ bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type
         if type2.primitive_kind == .Mat4 do return &VEC4_TYPE
     }
 
+    is_bit_manip := op == .Bitwise_And ||
+                  op == .Bitwise_Or ||
+                  op == .Bitwise_Xor ||
+                  op == .LShift ||
+                  op == .RShift
+    if is_bit_manip
+    {
+        if type_implicit_convert(type1, &UINT_TYPE) && type_implicit_convert(type2, &UINT_TYPE) do return &UINT_TYPE
+        if type_implicit_convert(type1, &INT_TYPE) && type_implicit_convert(type2, &INT_TYPE) do return &INT_TYPE
+        return &POISON_TYPE
+    }
+
     is_compare := op == .Greater ||
                   op == .Less ||
                   op == .LE ||
@@ -651,6 +718,28 @@ bin_op_result_type :: proc(op: Ast_Binary_Op, type1: ^Ast_Type, type2: ^Ast_Type
     }
 
     if same_type(type1, type2) do return type1
+    return &POISON_TYPE
+}
+
+unary_op_result_type :: proc(op: Ast_Unary_Op, type: ^Ast_Type) -> ^Ast_Type
+{
+    is_boolean := op == .Not
+    if is_boolean
+    {
+        if type_implicit_convert(type, &BOOL_TYPE) do return &BOOL_TYPE
+    }
+
+    is_arithmetic := op == .Minus || op == .Plus
+    if is_arithmetic
+    {
+        if type_implicit_convert(type, &INT_TYPE) do return &INT_TYPE
+        if type_implicit_convert(type, &UINT_TYPE) do return &UINT_TYPE
+        if type_implicit_convert(type, &FLOAT_TYPE) do return &FLOAT_TYPE
+        if type_implicit_convert(type, &VEC2_TYPE) do return &VEC2_TYPE
+        if type_implicit_convert(type, &VEC3_TYPE) do return &VEC3_TYPE
+        if type_implicit_convert(type, &VEC4_TYPE) do return &VEC4_TYPE
+    }
+
     return &POISON_TYPE
 }
 

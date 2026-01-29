@@ -168,6 +168,8 @@ main :: proc()
 
     camera_to_world: matrix[4, 4]f32 = 1
 
+    accum_counter := u32(0)
+
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
@@ -206,7 +208,11 @@ main :: proc()
             texture_rw_desc := gpu.texture_rw_view_descriptor(output_texture, {})
             gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
             gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
+
+            accum_counter = 0
         }
+
+        if INPUT.pressing_right_click do accum_counter = 0
 
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
@@ -227,6 +233,7 @@ main :: proc()
             instances = scene.instances_gpu,
             meshes = scene.meshes_gpu,
         }
+        compute_data.cpu.accum_counter = accum_counter
         compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
         compute_data.cpu.camera_to_world = intr.matrix_flatten(camera_to_world)
 
@@ -278,6 +285,7 @@ main :: proc()
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)
+        accum_counter += 1
     }
 
     gpu.wait_idle()
@@ -406,6 +414,7 @@ Mesh_GPU :: struct
 {
     pos: rawptr,
     normal: rawptr,
+    indices: rawptr,
 }
 
 destroy_scene :: proc(scene: ^Scene)
@@ -711,6 +720,7 @@ load_scene_gltf :: proc(contents: []byte, upload_arena: ^gpu.Arena, bvh_scratch_
         mesh = {
             pos = meshes[i].pos,
             normal = meshes[i].normals,
+            indices = meshes[i].indices,
         }
     }
     meshes_local := gpu.mem_alloc_typed_gpu(Mesh_GPU, len(meshes))

@@ -36,6 +36,8 @@ Token_Type :: enum
     Bitwise_And,
     Bitwise_Or,
     Bitwise_Xor,
+    LShift,
+    RShift,
 
     And,
     Or,
@@ -121,6 +123,8 @@ Two_Char_Operators := map[string]Token_Type {
     "->" = .Arrow,
     "&&" = .And,
     "||" = .Or,
+    ">>" = .LShift,
+    "<<" = .RShift,
 }
 
 Token :: struct #all_or_none
@@ -371,6 +375,8 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .Bitwise_And:  return "&"
         case .Bitwise_Or:   return "|"
         case .Bitwise_Xor:  return "~"
+        case .LShift:       return ">>"
+        case .RShift:       return "<<"
         case .And:          return "&&"
         case .Or:           return "||"
         case .Not:          return "!"

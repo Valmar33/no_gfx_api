@@ -426,6 +426,7 @@ _init :: proc()
             pNext = next,
             runtimeDescriptorArray = true,
             shaderSampledImageArrayNonUniformIndexing = true,
+            shaderStorageImageArrayNonUniformIndexing = true,
             timelineSemaphore = true,
             bufferDeviceAddress = true,
             drawIndirectCount = true,
