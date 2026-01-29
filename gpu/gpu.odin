@@ -17,15 +17,19 @@ Command_Buffer :: distinct Handle
 Queue :: distinct Handle
 Semaphore :: distinct Handle
 Shader :: distinct Handle
+BVH :: struct { _: Handle }
 Texture_Descriptor :: struct { bytes: [4]u64 }
 Sampler_Descriptor :: struct { bytes: [2]u64 }
+BVH_Descriptor :: struct { bytes: [2]u64 }
 
 // Enums
+Feature :: enum { Raytracing = 0 }
+Features :: bit_set[Feature; u32]
 Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Queue_Type :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
-Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float }
+Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float, RGBA16_Float }
 Usage :: enum { Sampled = 0, Storage, Color_Attachment, Depth_Stencil_Attachment }
 Usage_Flags :: bit_set[Usage; u32]
 Shader_Type_Graphics :: enum { Vertex = 0, Fragment }
@@ -36,13 +40,19 @@ Blend_Op :: enum { Add, Subtract, Rev_Subtract, Min, Max }
 Blend_Factor :: enum { Zero, One, Src_Color, Dst_Color, Src_Alpha }
 Depth_Mode :: enum { Read = 0, Write }
 Depth_Flags :: bit_set[Depth_Mode; u32]
-Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil }
+Hazard :: enum { Draw_Arguments = 0, Descriptors, Depth_Stencil, BVHs }
 Hazard_Flags :: bit_set[Hazard; u32]
-Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, All }
+Stage :: enum { Transfer = 0, Compute, Raster_Color_Out, Fragment_Shader, Vertex_Shader, Build_BVH, All }
 Color_Component_Flag :: enum { R = 0, G = 1, B = 2, A = 3 }
-ColorComponentFlags :: distinct bit_set[Color_Component_Flag; u8]
+Color_Component_Flags :: distinct bit_set[Color_Component_Flag; u8]
 Filter :: enum { Linear = 0, Nearest }
 Address_Mode :: enum { Repeat = 0, Mirrored_Repeat, Clamp_To_Edge }
+BVH_Instance_Flag :: enum { Disable_Culling = 0, Flip_Facing = 1, Force_Opaque = 2, Force_Not_Opaque = 3 }
+BVH_Instance_Flags :: distinct bit_set[BVH_Instance_Flag; u32]
+BVH_Opacity :: enum { Fully_Opaque = 0, Transparent }
+BVH_Hint :: enum { Default = 0, Prefer_Fast_Trace, Prefer_Fast_Build, Prefer_Low_Memory }
+BVH_Capability :: enum { Update = 0, Compaction }
+BVH_Capabilities :: distinct bit_set[BVH_Capability; u32]
 
 // Constants
 All_Mips: u8 : max(u8)
@@ -125,7 +135,8 @@ Blend_State :: struct
     color_write_mask: u8,
 }
 
-Draw_Indexed_Indirect_Command :: struct {
+Draw_Indexed_Indirect_Command :: struct
+{
     index_count: u32,
     instance_count: u32,
     first_index: u32,
@@ -133,10 +144,64 @@ Draw_Indexed_Indirect_Command :: struct {
     first_instance: u32,
 }
 
-Dispatch_Indirect_Command :: struct {
+Dispatch_Indirect_Command :: struct
+{
     num_groups_x: u32,
     num_groups_y: u32,
     num_groups_z: u32,
+}
+
+BVH_Instance :: struct
+{
+    transform: [12]f32,  // Row-major 3x4 matrix!
+    using _: bit_field u32 {
+        custom_idx: u32 | 24,
+        mask:       u32 | 8,
+    },
+    using _: bit_field u32 {
+        _unused: u32 | 24,
+        disable_culling: bool | 1,
+        flip_facing: bool | 1,
+        force_opaque: bool | 1,
+        force_not_opaque: bool | 1,
+        force_opacity_micromaps: bool | 1,
+        disable_opacity_micromaps: bool | 1,
+        _unused_flags: bool | 2,
+    },
+    blas_root: rawptr,
+}
+
+BVH_Mesh_Desc :: struct
+{
+    opacity: BVH_Opacity,
+    vertex_stride: u32,
+    max_vertex: u32,  // e.g. if reading vertices [200..300], this value must be 300.
+    tri_count: u32,
+}
+BVH_AABB_Desc :: struct
+{
+    opacity: BVH_Opacity,
+    stride: u32,
+    aabb_count: u32,
+}
+BVH_Shape_Desc :: union { BVH_Mesh_Desc, BVH_AABB_Desc }
+
+BVH_Mesh  :: struct { verts: rawptr, indices: rawptr }
+BVH_AABBs :: struct { data: rawptr }
+BVH_Shape :: union { BVH_Mesh, BVH_AABBs }
+
+BLAS_Desc :: struct
+{
+    hint: BVH_Hint,
+    caps: BVH_Capabilities,
+    shapes: []BVH_Shape_Desc,
+}
+
+TLAS_Desc :: struct
+{
+    hint: BVH_Hint,
+    caps: BVH_Capabilities,
+    instance_count: u32,
 }
 
 // Procedures
@@ -150,6 +215,7 @@ swapchain_resize: proc(size: [2]u32) : _swapchain_resize  // NOTE: Do not call t
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
 // TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
+features_available: proc() -> Features : _features_available
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr : _mem_alloc
@@ -182,6 +248,22 @@ get_queue: proc(queue_type: Queue_Type) -> Queue : _get_queue
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 
+// Raytracing
+blas_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_size_and_align
+blas_create: proc(desc: BLAS_Desc, storage: rawptr) -> BVH : _blas_create
+blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
+//blas_update_scratch_buffer_size_and_align
+tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
+tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
+tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
+bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
+bvh_create :: proc { blas_create, tlas_create }
+bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
+bvh_root_ptr: proc(bvh: BVH) -> rawptr : _bvh_root_ptr
+bvh_descriptor: proc(bvh: BVH) -> BVH_Descriptor : _bvh_descriptor
+get_bvh_descriptor_size: proc() -> u32 : _get_bvh_descriptor_size
+bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
+
 // Command buffer
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 
@@ -189,7 +271,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
 
-cmd_set_texture_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr) : _cmd_set_texture_heap
+cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr) : _cmd_set_desc_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -216,6 +298,9 @@ cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data: 
                                           indices: rawptr, indirect_arguments: rawptr) : _cmd_draw_indexed_instanced_indirect
 cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
                                                  indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr) : _cmd_draw_indexed_instanced_indirect_multi
+
+cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape) : _cmd_build_blas
+cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr) : _cmd_build_tlas
 
 /////////////////////////
 // Userland Utilities
@@ -265,21 +350,26 @@ Allocation :: struct($T: typeid)
     gpu: rawptr,
 }
 
-arena_init :: proc(storage: u64) -> Arena
+arena_init :: proc(storage: u64, mem_type := Memory.Default) -> Arena
 {
     res: Arena
     res.size = storage
-    res.cpu = mem_alloc(storage)
-    res.gpu = host_to_device_ptr(res.cpu)
+    alloc := mem_alloc(storage, mem_type = mem_type)
+    res.cpu = nil if mem_type == .GPU else alloc
+    res.gpu = alloc if mem_type == .GPU else host_to_device_ptr(alloc)
     return res
 }
 
 arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
 {
-    offset = u64(align_up(offset, align))
+    assert(bytes > 0 && align > 0)
+
+    gpu_addr := uintptr(arena.gpu) + uintptr(arena.offset)
+    offset = align_up(u64(gpu_addr), align) - u64(uintptr(arena.gpu))
+
     if offset + bytes > size do panic("GPU Arena ran out of space!")
 
-    alloc_cpu = auto_cast(uintptr(cpu) + uintptr(offset))
+    alloc_cpu = nil if cpu == nil else auto_cast(uintptr(cpu) + uintptr(offset))
     alloc_gpu = auto_cast(uintptr(gpu) + uintptr(offset))
     offset += bytes
     return
@@ -314,7 +404,11 @@ arena_destroy :: proc(using arena: ^Arena)
 {
     offset = 0
     size = 0
-    mem_free(cpu)
+    if cpu == nil {
+        mem_free(gpu)
+    } else {
+        mem_free(cpu)
+    }
     cpu = nil
     gpu = nil
 }
@@ -367,6 +461,60 @@ set_sampler_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Sample
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
+
+set_bvh_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: BVH_Descriptor)
+{
+    desc_size := #force_inline get_bvh_descriptor_size()
+    tmp := desc
+    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+}
+
+Owned_BVH :: struct
+{
+    using handle: BVH,
+    mem: rawptr,
+}
+
+alloc_and_create_blas :: proc(desc: BLAS_Desc) -> Owned_BVH
+{
+    size, align := bvh_size_and_align(desc)
+    ptr := mem_alloc(size, align, .GPU)
+    bvh := bvh_create(desc, ptr)
+    return Owned_BVH { bvh, ptr }
+}
+
+alloc_and_create_tlas :: proc(desc: TLAS_Desc) -> Owned_BVH
+{
+    size, align := bvh_size_and_align(desc)
+    ptr := mem_alloc(size, align, .GPU)
+    bvh := bvh_create(desc, ptr)
+    return Owned_BVH { bvh, ptr }
+}
+
+alloc_and_create_bvh :: proc { alloc_and_create_blas, alloc_and_create_tlas }
+
+free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
+{
+    bvh_destroy(bvh)
+    mem_free(bvh.mem)
+    bvh^ = {}
+}
+
+alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
+{
+    size, align := blas_build_scratch_buffer_size_and_align(desc)
+    _, gpu := arena_alloc_untyped(arena, size, align)
+    return gpu
+}
+
+alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
+{
+    size, align := tlas_build_scratch_buffer_size_and_align(desc)
+    _, gpu := arena_alloc_untyped(arena, size, align)
+    return gpu
+}
+
+alloc_bvh_build_scratch_buffer :: proc { alloc_blas_build_scratch_buffer, alloc_tlas_build_scratch_buffer }
 
 // Swapchain utils
 

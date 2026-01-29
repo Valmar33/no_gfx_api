@@ -16,6 +16,7 @@ import vk "vendor:vulkan"
 import "vma"
 
 Max_Textures :: 65535
+Max_BVHs :: 65535
 
 @(private="file")
 Graphics_Shader_Push_Constants :: struct #packed {
@@ -57,12 +58,14 @@ Timeline :: struct
 @(private="file")
 Context :: struct
 {
+    features: Features,
     instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
     surface: vk.SurfaceKHR,
     phys_device: vk.PhysicalDevice,
     device: vk.Device,
     vma_allocator: vma.Allocator,
+    physical_properties: Physical_Properties,
 
     // Allocations
     gpu_allocs: [dynamic]GPU_Alloc_Meta,
@@ -72,11 +75,7 @@ Context :: struct
     alloc_tree: rbt.Tree(Alloc_Range, u32),
 
     // Common resources
-    textures_desc_layout: vk.DescriptorSetLayout,
-    textures_rw_desc_layout: vk.DescriptorSetLayout,
-    samplers_desc_layout: vk.DescriptorSetLayout,
-    data_desc_layout: vk.DescriptorSetLayout,
-    indirect_data_desc_layout: vk.DescriptorSetLayout,
+    desc_layouts: [dynamic]vk.DescriptorSetLayout,
     common_pipeline_layout_graphics: vk.PipelineLayout,
     common_pipeline_layout_compute: vk.PipelineLayout,
 
@@ -84,6 +83,7 @@ Context :: struct
     queues: [len(Queue_Type) + 1]Queue_Info,  // Reserve slot 0 for invalid queue.
     textures: Pool(Texture_Info),
     samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
+    bvhs: Pool(BVH_Info),
     shaders: Pool(Shader_Info),
     command_buffers: Pool(Command_Buffer_Info),
 
@@ -98,6 +98,7 @@ Context :: struct
     texture_desc_size: u32,
     texture_rw_desc_size: u32,
     sampler_desc_size: u32,
+    bvh_desc_size: u32,
 
     lock: sync.Atomic_Mutex, // Ensures thread-safe access to ctx and VK operations
     tls_contexts: [dynamic]^Thread_Local_Context,
@@ -116,6 +117,24 @@ Thread_Local_Context :: struct
     pools: [Queue_Type]vk.CommandPool,
     buffers: [Queue_Type][dynamic]Command_Buffer,
     free_buffers: [Queue_Type]priority_queue.Priority_Queue(Free_Command_Buffer),
+}
+
+@(private="file")
+Physical_Properties :: struct
+{
+    bvh_props: vk.PhysicalDeviceAccelerationStructurePropertiesKHR,
+    props2: vk.PhysicalDeviceProperties2,
+}
+
+@(private="file")
+BVH_Info :: struct
+{
+    handle: vk.AccelerationStructureKHR,
+    mem: rawptr,
+    is_blas: bool,
+    shapes: [dynamic]BVH_Shape_Desc,  // Only used if BLAS.
+    blas_desc: BLAS_Desc,
+    tlas_desc: TLAS_Desc,
 }
 
 @(private="file")
@@ -279,7 +298,7 @@ _init :: proc()
 
     found := false
     best_score: u32
-    device_loop: for candidate, i in phys_devices
+    device_loop: for candidate in phys_devices
     {
         score: u32
 
@@ -306,21 +325,84 @@ _init :: proc()
 
     if !found do fatal_error("Could not find suitable GPU.")
 
-    // Check descriptor sizes
-    props := vk.PhysicalDeviceDescriptorBufferPropertiesEXT {
-        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT
-    };
+    raytracing_extensions := []cstring {
+        vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        vk.KHR_RAY_QUERY_EXTENSION_NAME,
+    }
+
+    // Query physical device feature availability
+    {
+        supports_raytracing := true
+
+        count: u32
+        vk.EnumerateDeviceExtensionProperties(ctx.phys_device, nil, &count, nil)
+        extensions := make([]vk.ExtensionProperties, count)
+        vk.EnumerateDeviceExtensionProperties(ctx.phys_device, nil, &count, raw_data(extensions))
+
+        for required_ext in raytracing_extensions
+        {
+            found := false
+            for &supported_ext in extensions
+            {
+                if cstring(&supported_ext.extensionName[0]) == required_ext {
+                    found = true
+                    continue
+                }
+            }
+
+            if !found {
+                supports_raytracing = false
+                break
+            }
+        }
+
+        ray_query_features := vk.PhysicalDeviceRayQueryFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+        }
+        accel_features := vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            pNext = &ray_query_features,
+        }
+        features := vk.PhysicalDeviceFeatures2 {
+            sType = .PHYSICAL_DEVICE_FEATURES_2,
+            pNext = &accel_features
+        }
+        vk.GetPhysicalDeviceFeatures2(ctx.phys_device, &features)
+
+        supports_raytracing = supports_raytracing && accel_features.accelerationStructure && ray_query_features.rayQuery
+
+        if supports_raytracing do ctx.features += { .Raytracing }
+    }
+
+    // Get physical device properties
+    accel_props := vk.PhysicalDeviceAccelerationStructurePropertiesKHR {
+        sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR
+    }
+    desc_buf_props := vk.PhysicalDeviceDescriptorBufferPropertiesEXT {
+        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
+        pNext = &accel_props,
+    }
     props2 := vk.PhysicalDeviceProperties2 {
         sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-        pNext = &props
-    };
+        pNext = &desc_buf_props,
+    }
     vk.GetPhysicalDeviceProperties2(ctx.phys_device, &props2)
-    ensure(props.storageImageDescriptorSize <= 32, "Unexpected storage image descriptor size.")
-    ensure(props.sampledImageDescriptorSize <= 32, "Unexpected sampled texture descriptor size.")
-    ensure(props.samplerDescriptorSize <= 16, "Unexpected sampler descriptor size.")
-    ctx.texture_desc_size = u32(props.sampledImageDescriptorSize)
-    ctx.texture_rw_desc_size = u32(props.storageImageDescriptorSize)
-    ctx.sampler_desc_size = u32(props.samplerDescriptorSize)
+    ctx.physical_properties = {
+        accel_props, props2
+    }
+
+    // Check descriptor sizes
+    ensure(desc_buf_props.storageImageDescriptorSize <= 32, "Unexpected storage image descriptor size.")
+    ensure(desc_buf_props.sampledImageDescriptorSize <= 32, "Unexpected sampled texture descriptor size.")
+    ensure(desc_buf_props.samplerDescriptorSize <= 16, "Unexpected sampler descriptor size.")
+    if .Raytracing in ctx.features {
+        ensure(desc_buf_props.accelerationStructureDescriptorSize <= 32, "Unexpected BVH descriptor size.")
+    }
+    ctx.texture_desc_size = u32(desc_buf_props.sampledImageDescriptorSize)
+    ctx.texture_rw_desc_size = u32(desc_buf_props.storageImageDescriptorSize)
+    ctx.sampler_desc_size = u32(desc_buf_props.samplerDescriptorSize)
+    ctx.bvh_desc_size = u32(desc_buf_props.accelerationStructureDescriptorSize)
 
     // Queues create info
     priority: f32 = 1.0
@@ -355,71 +437,91 @@ _init :: proc()
     }
 
     // Device
-    device_extensions := []cstring {
-        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-        vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
-        vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
-        vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
-    }
-
-    next: rawptr
-    next = &vk.PhysicalDeviceVulkan12Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        pNext = next,
-        runtimeDescriptorArray = true,
-        shaderSampledImageArrayNonUniformIndexing = true,
-        timelineSemaphore = true,
-        bufferDeviceAddress = true,
-        drawIndirectCount = true,
-        scalarBlockLayout = true,
-    }
-    next = &vk.PhysicalDeviceVulkan11Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-        pNext = next,
-        shaderDrawParameters = true,
-    }
-    next = &vk.PhysicalDeviceVulkan13Features {
-        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        pNext = next,
-        dynamicRendering = true,
-        synchronization2 = true,
-    }
-    next = &vk.PhysicalDeviceDescriptorBufferFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-        pNext = next,
-        descriptorBuffer = true,
-    }
-    next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        pNext = next,
-        shaderObject = true,
-    }
-    next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
-        sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
-        pNext = next,
-        depthClipEnable = true,
-    }
-    next = &vk.PhysicalDeviceFeatures2 {
-        sType = .PHYSICAL_DEVICE_FEATURES_2,
-        pNext = next,
-        features = {
-            shaderInt64 = true,
-            vertexPipelineStoresAndAtomics = true,
+    {
+        required_extensions := make([dynamic]cstring, allocator = scratch)
+        append(&required_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+        append(&required_extensions, vk.EXT_SHADER_OBJECT_EXTENSION_NAME)
+        append(&required_extensions, vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)
+        append(&required_extensions, vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)
+        if .Raytracing in ctx.features
+        {
+            append(&required_extensions, vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+            append(&required_extensions, vk.KHR_RAY_QUERY_EXTENSION_NAME)
+            append(&required_extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
         }
-    }
 
-    device_ci := vk.DeviceCreateInfo {
-        sType = .DEVICE_CREATE_INFO,
-        pNext = next,
-        queueCreateInfoCount = u32(len(queue_create_infos)),
-        pQueueCreateInfos = raw_data(queue_create_infos),
-        enabledExtensionCount = u32(len(device_extensions)),
-        ppEnabledExtensionNames = raw_data(device_extensions),
-    }
-    vk_check(vk.CreateDevice(ctx.phys_device, &device_ci, nil, &ctx.device))
+        next: rawptr
+        next = &vk.PhysicalDeviceVulkan12Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            pNext = next,
+            runtimeDescriptorArray = true,
+            shaderSampledImageArrayNonUniformIndexing = true,
+            shaderStorageImageArrayNonUniformIndexing = true,
+            timelineSemaphore = true,
+            bufferDeviceAddress = true,
+            drawIndirectCount = true,
+            scalarBlockLayout = true,
+        }
+        next = &vk.PhysicalDeviceVulkan11Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            pNext = next,
+            shaderDrawParameters = true,
+        }
+        next = &vk.PhysicalDeviceVulkan13Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            pNext = next,
+            dynamicRendering = true,
+            synchronization2 = true,
+        }
+        next = &vk.PhysicalDeviceDescriptorBufferFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+            pNext = next,
+            descriptorBuffer = true,
+        }
+        next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+            pNext = next,
+            shaderObject = true,
+        }
+        next = &vk.PhysicalDeviceDepthClipEnableFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT,
+            pNext = next,
+            depthClipEnable = true,
+        }
+        next = &vk.PhysicalDeviceFeatures2 {
+            sType = .PHYSICAL_DEVICE_FEATURES_2,
+            pNext = next,
+            features = {
+                shaderInt64 = true,
+                vertexPipelineStoresAndAtomics = true,
+            }
+        }
+        raytracing_features := &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            pNext = next,
+            accelerationStructure = true,
+        }
+        if .Raytracing in ctx.features do next = raytracing_features
+        rayquery_features := &vk.PhysicalDeviceRayQueryFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+            pNext = next,
+            rayQuery = true,
+        }
+        if .Raytracing in ctx.features do next = rayquery_features
 
-    vk.load_proc_addresses_device(ctx.device)
-    if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+        device_ci := vk.DeviceCreateInfo {
+            sType = .DEVICE_CREATE_INFO,
+            pNext = next,
+            queueCreateInfoCount = u32(len(queue_create_infos)),
+            pQueueCreateInfos = raw_data(queue_create_infos),
+            enabledExtensionCount = u32(len(required_extensions)),
+            ppEnabledExtensionNames = raw_data(required_extensions),
+        }
+        vk_check(vk.CreateDevice(ctx.phys_device, &device_ci, nil, &ctx.device))
+
+        vk.load_proc_addresses_device(ctx.device)
+        if vk.BeginCommandBuffer == nil do fatal_error("Failed to load Vulkan device API")
+    }
 
     for &queue in ctx.queues[1:] {
         vk.GetDeviceQueue(ctx.device, queue.family_idx, queue.queue_idx, &queue.handle)
@@ -439,7 +541,9 @@ _init :: proc()
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
@@ -453,7 +557,9 @@ _init :: proc()
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.textures_rw_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
@@ -467,8 +573,11 @@ _init :: proc()
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.samplers_desc_layout))
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
+        if .Raytracing in ctx.features
         {
             layout_ci := vk.DescriptorSetLayoutCreateInfo {
                 sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -476,34 +585,14 @@ _init :: proc()
                 bindingCount = 1,
                 pBindings = &vk.DescriptorSetLayoutBinding {
                     binding = 0,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
+                    descriptorType = .ACCELERATION_STRUCTURE_KHR,
+                    descriptorCount = Max_BVHs,
                     stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
                 },
             }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.data_desc_layout))
-        }
-        {
-            layout_ci := vk.DescriptorSetLayoutCreateInfo {
-                sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                flags = { .DESCRIPTOR_BUFFER_EXT },
-                bindingCount = 1,
-                pBindings = &vk.DescriptorSetLayoutBinding {
-                    binding = 0,
-                    descriptorType = .STORAGE_BUFFER,
-                    descriptorCount = 1,
-                    stageFlags = { .VERTEX, .FRAGMENT, .COMPUTE },
-                },
-            }
-            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &ctx.indirect_data_desc_layout))
-        }
-
-        desc_layouts := []vk.DescriptorSetLayout {
-            ctx.textures_desc_layout,
-            ctx.textures_rw_desc_layout,
-            ctx.samplers_desc_layout,
-            ctx.data_desc_layout,
-            ctx.indirect_data_desc_layout,
+            layout: vk.DescriptorSetLayout
+            vk_check(vk.CreateDescriptorSetLayout(ctx.device, &layout_ci, nil, &layout))
+            append(&ctx.desc_layouts, layout)
         }
 
         // Graphics pipeline layout
@@ -518,8 +607,8 @@ _init :: proc()
                 sType = .PIPELINE_LAYOUT_CREATE_INFO,
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = u32(len(desc_layouts)),
-                pSetLayouts = raw_data(desc_layouts),
+                setLayoutCount = u32(len(ctx.desc_layouts)),
+                pSetLayouts = raw_data(ctx.desc_layouts),
             }
             vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout_graphics))
         }
@@ -536,8 +625,8 @@ _init :: proc()
                 sType = .PIPELINE_LAYOUT_CREATE_INFO,
                 pushConstantRangeCount = u32(len(push_constant_ranges)),
                 pPushConstantRanges = raw_data(push_constant_ranges),
-                setLayoutCount = u32(len(desc_layouts)),
-                pSetLayouts = raw_data(desc_layouts),
+                setLayoutCount = u32(len(ctx.desc_layouts)),
+                pSetLayouts = raw_data(ctx.desc_layouts),
             }
             vk_check(vk.CreatePipelineLayout(ctx.device, &pipeline_layout_ci, nil, &ctx.common_pipeline_layout_compute))
         }
@@ -546,6 +635,7 @@ _init :: proc()
     // Resource pools
     // NOTE: Reserve slot 0 for all resources as key 0 is invalid.
     pool_append(&ctx.textures, Texture_Info {})
+    pool_append(&ctx.bvhs, BVH_Info {})
     pool_append(&ctx.shaders, Shader_Info {})
     pool_append(&ctx.command_buffers, Command_Buffer_Info {})
 
@@ -655,7 +745,7 @@ get_tls :: proc() -> ^Thread_Local_Context
     if tls_ctx != nil do return tls_ctx
 
     tls_ctx = new(Thread_Local_Context)
-    
+
     for type in Queue_Type
     {
         queue := get_queue(type)
@@ -670,7 +760,7 @@ get_tls :: proc() -> ^Thread_Local_Context
             &tls_ctx.free_buffers[type],
             less = proc(a,b: Free_Command_Buffer) -> bool {
                 return a.timeline_value < b.timeline_value
-            }, 
+            },
             swap = proc(q: []Free_Command_Buffer, i, j: int) {
                 q[i], q[j] = q[j], q[i]
             }
@@ -721,11 +811,10 @@ _cleanup :: proc()
 
     destroy_swapchain(&ctx.swapchain)
 
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.textures_rw_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.samplers_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.data_desc_layout, nil)
-    vk.DestroyDescriptorSetLayout(ctx.device, ctx.indirect_data_desc_layout, nil)
+    for &layout in ctx.desc_layouts {
+        vk.DestroyDescriptorSetLayout(ctx.device, layout, nil)
+    }
+
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_graphics, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_compute, nil)
 
@@ -853,7 +942,7 @@ _swapchain_acquire_next :: proc() -> Texture
 _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
 {
     tls_ctx := get_tls()
-    
+
     sync.lock(&ctx.lock)
     vk_queue := get_resource(queue, &ctx.queues).handle
     sync.unlock(&ctx.lock)
@@ -961,6 +1050,11 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
     }
 }
 
+_features_available :: proc() -> Features
+{
+    return ctx.features
+}
+
 // Memory
 
 _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr
@@ -994,6 +1088,9 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
             buf_usage = { .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC, .TRANSFER_DST, .INDIRECT_BUFFER }
             if mem_type == .GPU {
                 buf_usage += { .INDEX_BUFFER }
+            }
+            if .Raytracing in ctx.features {
+                buf_usage += { .ACCELERATION_STRUCTURE_STORAGE_KHR, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
             }
         }
         case .Descriptors:
@@ -1399,14 +1496,6 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         }
     }
 
-    desc_layouts := []vk.DescriptorSetLayout {
-        ctx.textures_desc_layout,
-        ctx.textures_rw_desc_layout,
-        ctx.samplers_desc_layout,
-        ctx.data_desc_layout,
-        ctx.indirect_data_desc_layout,
-    }
-
     // Setup specialization constants for compute shader workgroup size
     spec_map_entries: [3]vk.SpecializationMapEntry
     spec_data: [3]u32
@@ -1480,8 +1569,8 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
         nextStage = next_stage,
         pushConstantRangeCount = u32(len(push_constant_ranges)),
         pPushConstantRanges = raw_data(push_constant_ranges),
-        setLayoutCount = u32(len(desc_layouts)),
-        pSetLayouts = raw_data(desc_layouts),
+        setLayoutCount = u32(len(ctx.desc_layouts)),
+        pSetLayouts = raw_data(ctx.desc_layouts),
         pSpecializationInfo = spec_info_ptr,
     }
 
@@ -1567,6 +1656,176 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
     sem^ = {}
 }
 
+// Raytracing
+_blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+{
+    return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 16
+}
+
+_blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
+{
+    storage_buf, storage_offset, ok_s := compute_buf_offset_from_gpu_ptr(storage)
+    if !ok_s
+    {
+        log.error("Alloc not found.")
+        return {}
+    }
+
+    size_info := get_vk_blas_size_info(desc)
+
+    bvh_handle: vk.AccelerationStructureKHR
+    blas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = storage_buf,
+        offset = vk.DeviceSize(storage_offset),
+        size = size_info.accelerationStructureSize,
+        type = .BOTTOM_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &blas_ci, nil, &bvh_handle))
+
+    new_desc := desc
+    cloned_shapes := slice.clone_to_dynamic(new_desc.shapes)
+    new_desc.shapes = cloned_shapes[:]
+    bvh_info := BVH_Info {
+        handle = bvh_handle,
+        mem = storage,
+        is_blas = true,
+        shapes = cloned_shapes,
+        blas_desc = desc,
+    }
+    sync.guard(&ctx.lock)
+    return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
+}
+
+_blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+{
+    return u64(get_vk_blas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
+}
+
+_tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+{
+    return u64(get_vk_tlas_size_info(desc).accelerationStructureSize), 1
+}
+
+_tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
+{
+    storage_buf, storage_offset, ok_s := compute_buf_offset_from_gpu_ptr(storage)
+    if !ok_s
+    {
+        log.error("Alloc not found.")
+        return {}
+    }
+
+    size_info := get_vk_tlas_size_info(desc)
+
+    bvh_handle: vk.AccelerationStructureKHR
+    tlas_ci := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        buffer = storage_buf,
+        offset = vk.DeviceSize(storage_offset),
+        size = size_info.accelerationStructureSize,
+        type = .TOP_LEVEL,
+    }
+    vk_check(vk.CreateAccelerationStructureKHR(ctx.device, &tlas_ci, nil, &bvh_handle))
+
+    bvh_info := BVH_Info {
+        handle = bvh_handle,
+        mem = storage,
+        is_blas = false,
+        tlas_desc = desc
+    }
+    sync.guard(&ctx.lock)
+    return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
+}
+
+_tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+{
+    return u64(get_vk_tlas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
+}
+
+_bvh_root_ptr :: proc(bvh: BVH) -> rawptr
+{
+    sync.guard(&ctx.lock)
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    return transmute(rawptr) vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, & {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = bvh_info.handle
+    })
+}
+
+_bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
+{
+    sync.guard(&ctx.lock)
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    bvh_addr := vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, &{
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = bvh_info.handle,
+    })
+
+    desc: BVH_Descriptor
+    info := vk.DescriptorGetInfoEXT {
+        sType = .DESCRIPTOR_GET_INFO_EXT,
+        type = .ACCELERATION_STRUCTURE_KHR,
+        data = { accelerationStructure = bvh_addr }
+    }
+    vk.GetDescriptorEXT(ctx.device, &info, int(ctx.bvh_desc_size), &desc)
+    return desc
+}
+
+_get_bvh_descriptor_size :: proc() -> u32
+{
+    return ctx.bvh_desc_size
+}
+
+_bvh_destroy :: proc(bvh: ^BVH)
+{
+    sync.guard(&ctx.lock)
+    bvh_key := transmute(Key) (bvh^)
+    bvh_info := get_resource(bvh^, ctx.bvhs)
+
+    vk.DestroyAccelerationStructureKHR(ctx.device, bvh_info.handle, nil)
+
+    pool_free_idx(&ctx.bvhs, u32(bvh_key.idx))
+    bvh^ = {}
+}
+
+@(private="file")
+get_vk_blas_size_info :: proc(desc: BLAS_Desc) -> vk.AccelerationStructureBuildSizesInfoKHR
+{
+    scratch, _ := acquire_scratch()
+
+    primitive_counts := make([]u32, len(desc.shapes), allocator = scratch)
+    for shape, i in desc.shapes
+    {
+        switch s in shape
+        {
+            case BVH_Mesh_Desc: primitive_counts[i] = s.tri_count
+            case BVH_AABB_Desc: primitive_counts[i] = s.aabb_count
+        }
+    }
+
+    build_info := to_vk_blas_desc(desc, scratch)
+
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
+    vk.GetAccelerationStructureBuildSizesKHR(ctx.device, .DEVICE, &build_info, raw_data(primitive_counts), &size_info)
+    return size_info
+}
+
+@(private="file")
+get_vk_tlas_size_info :: proc(desc: TLAS_Desc) -> vk.AccelerationStructureBuildSizesInfoKHR
+{
+    scratch, _ := acquire_scratch()
+
+    build_info := to_vk_tlas_desc(desc, scratch)
+
+    size_info := vk.AccelerationStructureBuildSizesInfoKHR { sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR }
+    primitive_count := desc.instance_count
+    vk.GetAccelerationStructureBuildSizesKHR(ctx.device, .DEVICE, &build_info, &primitive_count, &size_info)
+    return size_info
+}
+
 // Command buffer
 
 _get_queue :: proc(queue_type: Queue_Type) -> Queue
@@ -1628,7 +1887,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64)
 {
-    sync.guard(&ctx.lock)
+    sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
 
@@ -1683,7 +1942,7 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
     })
 }
 
-_cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers: rawptr)
+_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
@@ -1691,7 +1950,7 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
 
     vk_cmd_buf := cmd_buf.handle
 
-    if textures == nil && textures_rw == nil && samplers == nil do return
+    if textures == nil && textures_rw == nil && samplers == nil && bvhs != nil do return
 
     // Check pointers. Drivers are currently not very good at recovering from situations
     // like this (e.g. on my setup, the whole desktop freezes for 10 seconds) so we try
@@ -1736,9 +1995,21 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
                 return
             }
         }
+        if bvhs != nil
+        {
+            alloc, ok_s := search_alloc_from_gpu_ptr(bvhs)
+            if !ok_s {
+                log.error("Alloc not found.")
+                return
+            }
+            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
+                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
+                return
+            }
+        }
     }
 
-    infos: [3]vk.DescriptorBufferBindingInfoEXT
+    infos: [4]vk.DescriptorBufferBindingInfoEXT
     // Fill in infos with the subset of valid pointers
     cursor := u32(0)
     if textures != nil
@@ -1746,7 +2017,7 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
@@ -1755,7 +2026,7 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures_rw,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
@@ -1764,14 +2035,23 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) samplers,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .STORAGE_BUFFER, .TRANSFER_SRC },
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+        }
+        cursor += 1
+    }
+    if bvhs != nil
+    {
+        infos[cursor] = {
+            sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+            address = transmute(vk.DeviceAddress) bvhs,
+            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
 
     vk.CmdBindDescriptorBuffersEXT(vk_cmd_buf, cursor, &infos[0])
 
-    buffer_offsets := []vk.DeviceSize { 0, 0, 0 }
+    buffer_offsets := []vk.DeviceSize { 0, 0, 0, 0 }
     cursor = 0
     if textures != nil {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 0, 1, &cursor, &buffer_offsets[0])
@@ -1786,6 +2066,11 @@ _cmd_set_texture_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sa
     if samplers != nil {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 2, 1, &cursor, &buffer_offsets[2])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 2, 1, &cursor, &buffer_offsets[2])
+        cursor += 1
+    }
+    if bvhs != nil {
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 3, 1, &cursor, &buffer_offsets[3])
+        vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 3, 1, &cursor, &buffer_offsets[3])
         cursor += 1
     }
 }
@@ -1813,19 +2098,22 @@ _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazar
         // Destination: indirect command read (for draw/dispatch indirect)
         dst_access += { .INDIRECT_COMMAND_READ }
     }
-
     if .Descriptors in hazards
     {
         // When descriptors are updated, ensure visibility
         src_access += { .SHADER_WRITE }
         dst_access += { .SHADER_READ }
     }
-
     if .Depth_Stencil in hazards
     {
         // Depth/stencil attachment synchronization
         src_access += { .DEPTH_STENCIL_ATTACHMENT_WRITE }
         dst_access += { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }
+    }
+    if .BVHs in hazards
+    {
+        src_access += { .ACCELERATION_STRUCTURE_WRITE_KHR }
+        dst_access += { .ACCELERATION_STRUCTURE_READ_KHR }
     }
 
     // If no specific hazards, use generic memory barrier
@@ -1885,7 +2173,7 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     enable_b32 := b32(state.enable)
@@ -1909,7 +2197,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     shader_info := get_resource(compute_shader, ctx.shaders)
@@ -1929,7 +2217,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     if _, ok := cmd_buf.compute_shader.?; !ok
@@ -1952,7 +2240,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     if _, ok := cmd_buf.compute_shader.?; !ok
@@ -1982,7 +2270,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     ensure(cmd_buf.queue_type == .Main, "cmd_begin_render_pass called on a non-graphics command buffer")
     vk_cmd_buf := cmd_buf.handle
 
@@ -2037,7 +2325,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
             blend_enables[i] = false
         }
         vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, color_attachment_count, raw_data(blend_enables))
-        
+
         // Set color write mask for all attachments
         color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
         color_masks := make([]vk.ColorComponentFlags, color_attachment_count, allocator = scratch)
@@ -2102,7 +2390,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2129,7 +2417,7 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2163,7 +2451,7 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     sync.lock(&ctx.lock)
     cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
     sync.unlock(&ctx.lock)
-    
+
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
@@ -2208,6 +2496,119 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     }
 
     vk.CmdDrawIndexedIndirectCount(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), draw_count_buf, vk.DeviceSize(draw_count_offset), max_draw_count, stride)
+}
+
+_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape)
+{
+    sync.lock(&ctx.lock)
+    cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    sync.unlock(&ctx.lock)
+
+    vk_cmd_buf := cmd_buf.handle
+
+    sync.lock(&ctx.lock)
+    bvh_info := get_resource(bvh, ctx.bvhs)
+    sync.unlock(&ctx.lock)
+
+    if !bvh_info.is_blas
+    {
+        log.error("This BVH is not a BLAS.")
+        return
+    }
+
+    if len(shapes) != len(bvh_info.blas_desc.shapes)
+    {
+        log.error("Length used in the shapes argument and length used in the shapes supplied during the creation of this BVH don't match.")
+        return
+    }
+
+    // TODO: Check for mismatching types.
+    /*
+    for shape, i in shapes
+    {
+        switch s in shape
+        {
+            case BVH_Mesh: {}
+            case BVH_AABBs: {}
+        }
+    }
+    */
+
+    scratch, _ := acquire_scratch()
+
+    build_info := to_vk_blas_desc(bvh_info.blas_desc, arena = scratch)
+    build_info.dstAccelerationStructure = bvh_info.handle
+    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage
+    assert(u32(len(shapes)) == build_info.geometryCount)
+
+    range_infos := make([]vk.AccelerationStructureBuildRangeInfoKHR, len(shapes), allocator = scratch)
+
+    // Fill in actual data in shapes
+    for i in 0..<build_info.geometryCount
+    {
+        range_infos[i] = {
+            // primitiveCount = primitive_count,
+            primitiveOffset = 0,
+            firstVertex = 0,
+            transformOffset = 0,
+        }
+
+        geom := &build_info.pGeometries[i]
+        switch s in shapes[i]
+        {
+            case BVH_Mesh:
+            {
+                geom.geometry.triangles.vertexData.deviceAddress = transmute(vk.DeviceAddress) s.verts
+                geom.geometry.triangles.indexData.deviceAddress = transmute(vk.DeviceAddress) s.indices
+                range_infos[i].primitiveCount = bvh_info.blas_desc.shapes[i].(BVH_Mesh_Desc).tri_count
+            }
+            case BVH_AABBs:
+            {
+                geom.geometry.aabbs.data.deviceAddress = transmute(vk.DeviceAddress) s.data
+            }
+        }
+    }
+
+    // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
+    // We always build one at a time, so we only need a pointer to an array (double pointer).
+    range_infos_ptr := raw_data(range_infos)
+    vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_infos_ptr)
+}
+
+_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr)
+{
+    sync.lock(&ctx.lock)
+    cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    bvh_info := get_resource(bvh, ctx.bvhs)
+    sync.unlock(&ctx.lock)
+
+    vk_cmd_buf := cmd_buf.handle
+
+    if bvh_info.is_blas
+    {
+        log.error("This BVH is not a TLAS.")
+        return
+    }
+
+    scratch, _ := acquire_scratch()
+
+    build_info := to_vk_tlas_desc(bvh_info.tlas_desc, arena = scratch)
+    build_info.dstAccelerationStructure = bvh_info.handle
+    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage
+    assert(build_info.geometryCount == 1)
+
+    // Fill in actual data
+    build_info.pGeometries[0].geometry.instances.data.deviceAddress = transmute(vk.DeviceAddress) instances
+
+    // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
+    // We always build one at a time, and a TLAS always has only one geometry.
+    range_info := []vk.AccelerationStructureBuildRangeInfoKHR {
+        {
+            primitiveCount = bvh_info.tlas_desc.instance_count
+        }
+    }
+    range_info_ptr := raw_data(range_info)
+    vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_info_ptr)
 }
 
 @(private="file")
@@ -2542,7 +2943,7 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> ^Command_Buffer_Info
 vk_submit_cmd_buf :: proc(cmd_buf: ^Command_Buffer_Info, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
     tls_ctx := get_tls()
-    
+
     sync.lock(&ctx.lock)
     queue_info := get_resource(cmd_buf.queue, &ctx.queues)
     sync.unlock(&ctx.lock)
@@ -2575,7 +2976,7 @@ vk_submit_cmd_buf :: proc(cmd_buf: ^Command_Buffer_Info, signal_sem: vk.Semaphor
         signalSemaphoreCount = u32(len(signal_sems)),
         pSignalSemaphores = raw_data(signal_sems)
     }
-    
+
     if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
 
     recycle_cmd_buf(cmd_buf)
@@ -2612,6 +3013,7 @@ to_vk_stage :: #force_inline proc(stage: Stage) -> vk.PipelineStageFlags
         case .Raster_Color_Out: return { .COLOR_ATTACHMENT_OUTPUT }
         case .Fragment_Shader: return { .FRAGMENT_SHADER }
         case .Vertex_Shader: return { .VERTEX_SHADER }
+        case .Build_BVH: return { .ACCELERATION_STRUCTURE_BUILD_KHR }
         case .All: return { .ALL_COMMANDS }
     }
     return {}
@@ -2662,7 +3064,7 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
 {
     view_desc := attach.view
     texture := attach.texture
-    
+
     sync.lock(&ctx.lock)
     tex_info := get_resource(texture.handle, ctx.textures)
     sync.unlock(&ctx.lock)
@@ -2732,6 +3134,7 @@ to_vk_texture_format :: proc(format: Texture_Format) -> vk.Format
         case .RGBA8_Unorm: return .R8G8B8A8_UNORM
         case .BGRA8_Unorm: return .B8G8R8A8_UNORM
         case .D32_Float: return .D32_SFLOAT
+        case .RGBA16_Float: return .R16G16B16A16_SFLOAT
     }
     return {}
 }
@@ -2797,6 +3200,101 @@ to_vk_address_mode :: proc(addr_mode: Address_Mode) -> vk.SamplerAddressMode
 }
 
 @(private="file")
+to_vk_blas_desc :: proc(blas_desc: BLAS_Desc, arena: runtime.Allocator) -> vk.AccelerationStructureBuildGeometryInfoKHR
+{
+    geometries := make([]vk.AccelerationStructureGeometryKHR, len(blas_desc.shapes), allocator = arena)
+    for &geom, i in geometries
+    {
+        switch shape in blas_desc.shapes[i]
+        {
+            case BVH_Mesh_Desc:
+            {
+                flags: vk.GeometryFlagsKHR = { .OPAQUE } if shape.opacity == .Fully_Opaque else {}
+                geom = vk.AccelerationStructureGeometryKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                    flags = flags,
+                    geometryType = .TRIANGLES,
+                    geometry = { triangles = {
+                        sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                        vertexFormat = .R32G32B32_SFLOAT,
+                        vertexData = {},
+                        vertexStride = vk.DeviceSize(shape.vertex_stride),
+                        maxVertex = shape.max_vertex,
+                        indexType = .UINT32,
+                        indexData = {},
+                        transformData = {},
+                    } }
+                }
+            }
+            case BVH_AABB_Desc:
+            {
+                flags: vk.GeometryFlagsKHR = { .OPAQUE } if shape.opacity == .Fully_Opaque else {}
+                geom = vk.AccelerationStructureGeometryKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                    flags = flags,
+                    geometryType = .AABBS,
+                    geometry = { aabbs = {
+                        sType = .ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+                        stride = vk.DeviceSize(shape.stride),
+                        data = {},
+                    } }
+                }
+            }
+        }
+    }
+
+    return vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = to_vk_bvh_flags(blas_desc.hint, blas_desc.caps),
+        type = .BOTTOM_LEVEL,
+        mode = .BUILD,
+        geometryCount = u32(len(geometries)),
+        pGeometries = raw_data(geometries)
+    }
+}
+
+@(private="file")
+to_vk_tlas_desc :: proc(tlas_desc: TLAS_Desc, arena: runtime.Allocator) -> vk.AccelerationStructureBuildGeometryInfoKHR
+{
+    geometry := new(vk.AccelerationStructureGeometryKHR)
+    geometry^ = {
+        sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        geometryType = .INSTANCES,
+        geometry = {
+            instances = {
+                sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                arrayOfPointers = false,
+                data = {
+                    // deviceAddress = vku.get_buffer_device_address(device, instances_buf)
+                }
+            }
+        }
+    }
+
+    return vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        flags = to_vk_bvh_flags(tlas_desc.hint, tlas_desc.caps),
+        type = .TOP_LEVEL,
+        mode = .BUILD,
+        geometryCount = 1,
+        pGeometries = geometry
+    }
+}
+
+@(private="file")
+to_vk_bvh_flags :: proc(hint: BVH_Hint, caps: BVH_Capabilities) -> vk.BuildAccelerationStructureFlagsKHR
+{
+    flags: vk.BuildAccelerationStructureFlagsKHR
+    if .Update in caps do            flags += { .ALLOW_UPDATE }
+    if .Compaction in caps do        flags += { .ALLOW_COMPACTION }
+    if hint == .Prefer_Fast_Trace do flags += { .PREFER_FAST_TRACE }
+    if hint == .Prefer_Fast_Build do flags += { .PREFER_FAST_BUILD }
+    if hint == .Prefer_Low_Memory do flags += { .LOW_MEMORY }
+
+    return flags
+}
+
+@(private="file")
 find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
 {
     {
@@ -2810,7 +3308,7 @@ find_queue_family :: proc(graphics: bool, compute: bool, transfer: bool) -> u32
         for props, i in family_properties
         {
             if props.queueCount == 0 do continue
-            
+
             // NOTE: If a queue family supports graphics, it is required
             // to also support transfer, but it's NOT required
             // to report .TRANSFER in its queueFlags, as stated in

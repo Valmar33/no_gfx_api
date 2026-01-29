@@ -71,20 +71,23 @@ main :: proc()
     upload_arena := gpu.arena_init(1024 * 1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
 
+    scene, _, gltf_data := shared.load_scene_gltf(Sponza_Scene)
+    defer {
+        shared.destroy_scene(&scene)
+        gltf2.unload(gltf_data)
+    }
+
+    meshes_gpu: [dynamic]Mesh_GPU
+    defer {
+        for &mesh_gpu in meshes_gpu do mesh_destroy(&mesh_gpu)
+        delete(meshes_gpu)
+    }
+
     queue := gpu.get_queue(.Main)
-
     upload_cmd_buf := gpu.commands_begin(queue)
-
-	scene, _, gltf_data := shared.load_scene_gltf(
-		Sponza_Scene,
-		&upload_arena,
-		upload_cmd_buf,
-	)
-	defer {
-		shared.destroy_scene(&scene)
-		gltf2.unload(gltf_data)
-	}
-
+    for mesh in scene.meshes {
+        append(&meshes_gpu, upload_mesh(&upload_arena, upload_cmd_buf, mesh))
+    }
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(queue, { upload_cmd_buf })
 
@@ -150,7 +153,7 @@ main :: proc()
 
         for instance in scene.instances
         {
-            mesh := scene.meshes[instance.mesh_idx]
+            mesh := meshes_gpu[instance.mesh_idx]
 
             Vert_Data :: struct #all_or_none {
                 positions: rawptr,
@@ -184,4 +187,49 @@ main :: proc()
     }
 
     gpu.wait_idle()
+}
+
+Mesh_GPU :: struct
+{
+    pos: rawptr,
+    normals: rawptr,
+    uvs: rawptr,
+    indices: rawptr,
+    idx_count: u32,
+}
+
+upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh: shared.Mesh) -> Mesh_GPU
+{
+    assert(len(mesh.pos) == len(mesh.normals))
+    assert(len(mesh.pos) == len(mesh.uvs))
+
+    positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.pos))
+    normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.normals))
+    uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(mesh.uvs))
+    indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(mesh.indices))
+    copy(positions_staging.cpu, mesh.pos[:])
+    copy(normals_staging.cpu, mesh.normals[:])
+    copy(uvs_staging.cpu, mesh.uvs[:])
+    copy(indices_staging.cpu, mesh.indices[:])
+
+    res: Mesh_GPU
+    res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.pos))
+    res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.normals))
+    res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(mesh.uvs))
+    res.indices = gpu.mem_alloc_typed_gpu(u32, len(mesh.indices))
+    res.idx_count = u32(len(mesh.indices))
+    gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(mesh.pos) * size_of(mesh.pos[0])))
+    gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(mesh.normals) * size_of(mesh.normals[0])))
+    gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(mesh.uvs) * size_of(mesh.uvs[0])))
+    gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(mesh.indices) * size_of(mesh.indices[0])))
+    return res
+}
+
+mesh_destroy :: proc(mesh: ^Mesh_GPU)
+{
+    gpu.mem_free(mesh.pos)
+    gpu.mem_free(mesh.normals)
+    gpu.mem_free(mesh.uvs)
+    gpu.mem_free(mesh.indices)
+    mesh^ = {}
 }
