@@ -168,7 +168,7 @@ BVH_Instance :: struct
         disable_opacity_micromaps: bool | 1,
         _unused_flags: bool | 2,
     },
-    blas: rawptr,
+    blas_root: rawptr,
 }
 
 BVH_Mesh_Desc :: struct
@@ -259,6 +259,7 @@ tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, a
 bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
 bvh_create :: proc { blas_create, tlas_create }
 bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
+bvh_root_ptr: proc(bvh: BVH) -> rawptr : _bvh_root_ptr
 bvh_descriptor: proc(bvh: BVH) -> BVH_Descriptor : _bvh_descriptor
 get_bvh_descriptor_size: proc() -> u32 : _get_bvh_descriptor_size
 bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy

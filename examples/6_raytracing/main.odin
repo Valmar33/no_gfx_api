@@ -376,7 +376,7 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
         gpu_transform := [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
         instance = {
             transform = gpu_transform,
-            blas = gpu._test(meshes[instances[i].mesh_idx].bvh),
+            blas_root = gpu.bvh_root_ptr(meshes[instances[i].mesh_idx].bvh),
             disable_culling = true,
             flip_facing = true,
             mask = 1,

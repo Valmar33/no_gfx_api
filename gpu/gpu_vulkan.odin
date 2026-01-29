@@ -1517,16 +1517,6 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
     return transmute(BVH) u64(pool_append(&ctx.bvhs, bvh_info))
 }
 
-_test :: proc(bvh: BVH) -> rawptr
-{
-    bvh_info := get_resource(bvh, ctx.bvhs)
-
-    return transmute(rawptr) vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, & {
-        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-        accelerationStructure = bvh_info.handle
-    })
-}
-
 _blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
 {
     return u64(get_vk_blas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
@@ -1570,6 +1560,16 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
 _tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
 {
     return u64(get_vk_tlas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
+}
+
+_bvh_root_ptr :: proc(bvh: BVH) -> rawptr
+{
+    bvh_info := get_resource(bvh, ctx.bvhs)
+
+    return transmute(rawptr) vk.GetAccelerationStructureDeviceAddressKHR(ctx.device, & {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        accelerationStructure = bvh_info.handle
+    })
 }
 
 _bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
