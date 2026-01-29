@@ -9,6 +9,7 @@ import "core:math/linalg"
 import "core:mem"
 import "core:slice"
 import "gltf2"
+import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
 
@@ -518,4 +519,10 @@ xform_to_mat_f32 :: proc(pos: [3]f32, rot: quaternion128, scale: [3]f32) -> matr
 xform_to_mat :: proc {
 	xform_to_mat_f32,
 	xform_to_mat_f64,
+}
+
+transform_to_gpu_transform :: proc(transform: matrix[4, 4]f32) -> [12]f32 {
+	transform_row_major := intr.transpose(transform)
+	flattened := linalg.matrix_flatten(transform_row_major)
+	return [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
 }
