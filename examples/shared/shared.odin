@@ -1,6 +1,5 @@
 package shared
 
-import "../../gpu"
 import "base:runtime"
 import "core:fmt"
 
@@ -8,7 +7,9 @@ import log "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
+import "core:slice"
 import "gltf2"
+import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
 
@@ -27,75 +28,20 @@ Gltf_Texture_Info :: struct {
 }
 
 Mesh :: struct {
-	pos:                    rawptr,
-	normals:                rawptr,
-	uvs:                    rawptr,
-	indices:                rawptr,
-	idx_count:              u32,
+	pos:                    [dynamic][4]f32,
+	normals:                [dynamic][4]f32,
+	uvs:                    [dynamic][2]f32,
+	indices:                [dynamic]u32,
 	base_color_map:         u32,
 	metallic_roughness_map: u32,
 	normal_map:             u32,
 }
 
-upload_mesh :: proc(
-	upload_arena: ^gpu.Arena,
-	cmd_buf: gpu.Command_Buffer,
-	positions: [][4]f32,
-	normals: [][4]f32,
-	uvs: [][2]f32,
-	indices: []u32,
-	base_color_map: u32 = MISSING_TEXTURE_ID,
-	metallic_roughness_map: u32 = MISSING_TEXTURE_ID,
-	normal_map: u32 = MISSING_TEXTURE_ID,
-) -> Mesh {
-	assert(len(positions) == len(normals))
-	assert(len(positions) == len(uvs))
-
-	positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(positions))
-	normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(normals))
-	uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(uvs))
-	indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(indices))
-	copy(positions_staging.cpu, positions)
-	copy(normals_staging.cpu, normals)
-	copy(uvs_staging.cpu, uvs)
-	copy(indices_staging.cpu, indices)
-
-	res: Mesh
-	res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(positions))
-	res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(normals))
-	res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(uvs))
-	res.indices = gpu.mem_alloc_typed_gpu(u32, len(indices))
-	res.idx_count = u32(len(indices))
-	res.base_color_map = base_color_map
-	res.metallic_roughness_map = metallic_roughness_map
-	res.normal_map = normal_map
-	gpu.cmd_mem_copy(
-		cmd_buf,
-		positions_staging.gpu,
-		res.pos,
-		u64(len(positions) * size_of(positions[0])),
-	)
-	gpu.cmd_mem_copy(
-		cmd_buf,
-		normals_staging.gpu,
-		res.normals,
-		u64(len(normals) * size_of(normals[0])),
-	)
-	gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(uvs) * size_of(uvs[0])))
-	gpu.cmd_mem_copy(
-		cmd_buf,
-		indices_staging.gpu,
-		res.indices,
-		u64(len(indices) * size_of(indices[0])),
-	)
-	return res
-}
-
 destroy_mesh :: proc(mesh: ^Mesh) {
-	gpu.mem_free(mesh.pos)
-	gpu.mem_free(mesh.normals)
-	gpu.mem_free(mesh.uvs)
-	gpu.mem_free(mesh.indices)
+	delete(mesh.pos)
+	delete(mesh.normals)
+	delete(mesh.uvs)
+	delete(mesh.indices)
 	mesh^ = {}
 }
 
@@ -324,8 +270,6 @@ buffer_slice_with_stride :: proc(
 
 load_scene_gltf :: proc(
 	contents: []byte,
-	upload_arena: ^gpu.Arena,
-	cmd_buf: gpu.Command_Buffer,
 ) -> (
 	Scene,
 	[]Gltf_Texture_Info,
@@ -492,17 +436,16 @@ load_scene_gltf :: proc(
 					uv = {0.0, 0.0}
 				}
 			}
-			loaded := upload_mesh(
-				upload_arena,
-				cmd_buf,
-				pos_final,
-				normals_final,
-				uvs_final,
-				indices_u32[:],
-				base_color_map,
-				metallic_roughness_map,
-				normal_map,
-			)
+
+			loaded := Mesh {
+				pos = slice.clone_to_dynamic(pos_final),
+				normals = slice.clone_to_dynamic(normals_final),
+				uvs = slice.clone_to_dynamic(uvs_final),
+				indices = slice.clone_to_dynamic(indices_u32[:]),
+				base_color_map = base_color_map,
+				metallic_roughness_map = metallic_roughness_map,
+				normal_map = normal_map,
+			}
 			append(&meshes, loaded)
 		}
 	}
@@ -576,4 +519,10 @@ xform_to_mat_f32 :: proc(pos: [3]f32, rot: quaternion128, scale: [3]f32) -> matr
 xform_to_mat :: proc {
 	xform_to_mat_f32,
 	xform_to_mat_f64,
+}
+
+transform_to_gpu_transform :: proc(transform: matrix[4, 4]f32) -> [12]f32 {
+	transform_row_major := intr.transpose(transform)
+	flattened := linalg.matrix_flatten(transform_row_major)
+	return [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
 }

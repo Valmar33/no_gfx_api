@@ -147,27 +147,33 @@ main :: proc() {
 	texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size) * 2048, alloc_type = .Descriptors)
 	defer gpu.mem_free(texture_rw_heap)
 
-
 	magenta_texture := create_magenta_texture(&upload_arena, upload_cmd_buf, texture_heap)
 	defer gpu.free_and_destroy_texture(&magenta_texture)
 
-	scene, texture_infos, gltf_data := shared.load_scene_gltf(
-		Sponza_Scene,
-		&upload_arena,
-		upload_cmd_buf,
-	)
+	scene, texture_infos, gltf_data := shared.load_scene_gltf(Sponza_Scene)
 	defer {
 		shared.destroy_scene(&scene)
 		gltf2.unload(gltf_data)
 	}
 
-    defer {
-        // Clean up loaded textures
-        sync.guard(&mutex)
-        for &tex in loaded_textures {
-            gpu.free_and_destroy_texture(&tex)
-        }
-    }
+	// Upload meshes
+	meshes_gpu: [dynamic]Mesh_GPU
+	defer {
+		for &mesh_gpu in meshes_gpu do mesh_destroy(&mesh_gpu)
+		delete(meshes_gpu)
+	}
+
+	for mesh in scene.meshes {
+		append(&meshes_gpu, upload_mesh(&upload_arena, upload_cmd_buf, mesh))
+	}
+
+	defer {
+		// Clean up loaded textures
+		sync.guard(&mutex)
+		for &tex in loaded_textures {
+			gpu.free_and_destroy_texture(&tex)
+		}
+	}
 
 	when Load_Textures_Async {
 		worker_threads: [dynamic]^thread.Thread
@@ -184,41 +190,41 @@ main :: proc() {
 			scene:         ^shared.Scene,
 			texture_heap:  rawptr,
 			logger:        log.Logger,
-            current_chunk: ^int,
+			current_chunk: ^int,
 		}
 		loader_data := Texture_Loader_Data {
-            texture_infos = texture_infos,
-            gltf_data     = gltf_data,
-            scene         = &scene,
-            texture_heap  = texture_heap,
-            logger        = console_logger,
-            current_chunk = new(int),
-        }
+			texture_infos = texture_infos,
+			gltf_data     = gltf_data,
+			scene         = &scene,
+			texture_heap  = texture_heap,
+			logger        = console_logger,
+			current_chunk = new(int),
+		}
 
-        texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
-            data := cast(^Texture_Loader_Data)thread.data
-            context.logger = data.logger
+		texture_loader_thread_proc :: proc(thread: ^thread.Thread) {
+			data := cast(^Texture_Loader_Data)thread.data
+			context.logger = data.logger
 
-            for !cancel_loading_textures {
-                current_chunk_start := sync.atomic_add(data.current_chunk, Loader_Chunk_Size)
-                current_chunk_end := min(current_chunk_start + Loader_Chunk_Size, len(data.texture_infos))
+			for !cancel_loading_textures {
+				current_chunk_start := sync.atomic_add(data.current_chunk, Loader_Chunk_Size)
+				current_chunk_end := min(current_chunk_start + Loader_Chunk_Size, len(data.texture_infos))
 
-                if current_chunk_start >= len(data.texture_infos) {
-                    break
-                }
+				if current_chunk_start >= len(data.texture_infos) {
+					break
+				}
 
-                log.debug(
-                    fmt.tprintf("Creating texture loader for chunk %v of %v", current_chunk_start, len(data.texture_infos)),
-                )
+				log.debug(
+					fmt.tprintf("Creating texture loader for chunk %v of %v", current_chunk_start, len(data.texture_infos)),
+				)
 
-                load_scene_textures_from_gltf(
-                    data.texture_infos[current_chunk_start:current_chunk_end],
-                    data.gltf_data,
-                    data.scene,
-                    data.texture_heap,
-                )
-            }
-        }
+				load_scene_textures_from_gltf(
+					data.texture_infos[current_chunk_start:current_chunk_end],
+					data.gltf_data,
+					data.scene,
+					data.texture_heap,
+				)
+			}
+		}
 
 		for i := 0; i < Num_Async_Worker_Threads; i += 1 {
 			texture_loader_thread := thread.create(texture_loader_thread_proc)
@@ -341,6 +347,7 @@ main :: proc() {
 			sampler_heap,
 			frame_arena,
 			&scene,
+			meshes_gpu[:],
 			world_to_view,
 			view_to_proj,
 		)
@@ -386,6 +393,7 @@ render_pass_gbuffer :: proc(
 	sampler_heap: rawptr,
 	frame_arena: ^gpu.Arena,
 	scene: ^shared.Scene,
+	meshes_gpu: []Mesh_GPU,
 	world_to_view: matrix[4, 4]f32,
 	view_to_proj: matrix[4, 4]f32,
 ) {
@@ -406,12 +414,15 @@ render_pass_gbuffer :: proc(
 	textures_ptr := gpu.host_to_device_ptr(texture_heap)
 	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
 	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
+	gpu.cmd_set_desc_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr, nil)
 
 	gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
 
 	for instance in scene.instances {
-		mesh := scene.meshes[instance.mesh_idx]
+		mesh := meshes_gpu[instance.mesh_idx]
+		base_color_map := scene.meshes[instance.mesh_idx].base_color_map
+		metallic_roughness_map := scene.meshes[instance.mesh_idx].metallic_roughness_map
+		normal_map := scene.meshes[instance.mesh_idx].normal_map
 
 		Vert_Data :: struct #all_or_none {
 			positions:             rawptr,
@@ -446,11 +457,11 @@ render_pass_gbuffer :: proc(
 		}
 		frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
 		frag_data.cpu^ = {
-			base_color_map                 = mesh.base_color_map,
+			base_color_map                 = base_color_map,
 			base_color_map_sampler         = 0,
-			metallic_roughness_map         = mesh.metallic_roughness_map,
+			metallic_roughness_map         = metallic_roughness_map,
 			metallic_roughness_map_sampler = 0,
-			normal_map                     = mesh.normal_map,
+			normal_map                     = normal_map,
 			normal_map_sampler             = 0,
 		}
 
@@ -494,7 +505,7 @@ render_pass_final :: proc(
 	textures_ptr := gpu.host_to_device_ptr(texture_heap)
 	textures_rw_ptr := gpu.host_to_device_ptr(texture_rw_heap)
 	samplers_ptr := gpu.host_to_device_ptr(sampler_heap)
-	gpu.cmd_set_texture_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr)
+	gpu.cmd_set_desc_heap(cmd_buf, textures_ptr, textures_rw_ptr, samplers_ptr, nil)
 
 	// Disable depth testing for fullscreen quad
 	gpu.cmd_set_depth_state(cmd_buf, {mode = {}, compare = .Always})
@@ -875,4 +886,49 @@ load_texture_from_gltf :: proc(
 
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
 	return texture
+}
+
+Mesh_GPU :: struct
+{
+	pos: rawptr,
+	normals: rawptr,
+	uvs: rawptr,
+	indices: rawptr,
+	idx_count: u32,
+}
+
+upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh: shared.Mesh) -> Mesh_GPU
+{
+	assert(len(mesh.pos) == len(mesh.normals))
+	assert(len(mesh.pos) == len(mesh.uvs))
+
+	positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.pos))
+	normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.normals))
+	uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(mesh.uvs))
+	indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(mesh.indices))
+	copy(positions_staging.cpu, mesh.pos[:])
+	copy(normals_staging.cpu, mesh.normals[:])
+	copy(uvs_staging.cpu, mesh.uvs[:])
+	copy(indices_staging.cpu, mesh.indices[:])
+
+	res: Mesh_GPU
+	res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.pos))
+	res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.normals))
+	res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(mesh.uvs))
+	res.indices = gpu.mem_alloc_typed_gpu(u32, len(mesh.indices))
+	res.idx_count = u32(len(mesh.indices))
+	gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(mesh.pos) * size_of(mesh.pos[0])))
+	gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(mesh.normals) * size_of(mesh.normals[0])))
+	gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(mesh.uvs) * size_of(mesh.uvs[0])))
+	gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(mesh.indices) * size_of(mesh.indices[0])))
+	return res
+}
+
+mesh_destroy :: proc(mesh: ^Mesh_GPU)
+{
+	gpu.mem_free(mesh.pos)
+	gpu.mem_free(mesh.normals)
+	gpu.mem_free(mesh.uvs)
+	gpu.mem_free(mesh.indices)
+	mesh^ = {}
 }

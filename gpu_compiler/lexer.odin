@@ -32,6 +32,17 @@ Token_Type :: enum
     Colon,
     Semi,
     Caret,
+
+    Bitwise_And,
+    Bitwise_Or,
+    Bitwise_Xor,
+    LShift,
+    RShift,
+
+    And,
+    Or,
+    Not,
+
     LE,
     GE,
     EQ,
@@ -56,7 +67,10 @@ Token_Type :: enum
     Return,
 
     // Literals
-    NumLit,
+    IntLit,
+    FloatLit,
+    True,
+    False,
 
     // Lexer message types
     EOS,  // End of stream
@@ -70,6 +84,8 @@ Keywords := map[string]Token_Type {
     "break"  = .Break,
     "continue" = .Continue,
     "return" = .Return,
+    "true"   = .True,
+    "false"  = .False,
 }
 One_Char_Operators := map[u8]Token_Type {
     '(' = .LParen,
@@ -90,6 +106,10 @@ One_Char_Operators := map[u8]Token_Type {
     ':' = .Colon,
     ';' = .Semi,
     '^' = .Caret,
+    '&' = .Bitwise_And,
+    '|' = .Bitwise_Or,
+    '~' = .Bitwise_Xor,
+    '!' = .Not,
 }
 Two_Char_Operators := map[string]Token_Type {
     "<=" = .LE,
@@ -101,12 +121,10 @@ Two_Char_Operators := map[string]Token_Type {
     "*=" = .Mul_Equals,
     "/=" = .Div_Equals,
     "->" = .Arrow,
-}
-
-Literal_Value :: union
-{
-    u64,  // This can represent all integer constants, "-" is treated as an operator
-    f32,
+    "&&" = .And,
+    "||" = .Or,
+    ">>" = .LShift,
+    "<<" = .RShift,
 }
 
 Token :: struct #all_or_none
@@ -114,7 +132,6 @@ Token :: struct #all_or_none
     type: Token_Type,
     text: string,
 
-    value: Literal_Value,
     line: u32,
     col_start: u32,
 }
@@ -152,7 +169,6 @@ next_token :: proc(using lexer: ^Lexer) -> Token
     token := Token {
         type = .EOS,
         text = "",
-        value = {},
         line = line,
         col_start = offset - line_start,
     }
@@ -185,8 +201,6 @@ next_token :: proc(using lexer: ^Lexer) -> Token
     }
     else if is_num(buf[offset])
     {
-        token.type = .NumLit
-
         old_offset := offset
         is_int := true
         for ; is_num_middle(buf[offset]); offset += 1 {
@@ -198,15 +212,15 @@ next_token :: proc(using lexer: ^Lexer) -> Token
 
         if is_int
         {
-            value, ok := strconv.parse_u64(num_str)
+            token.type = .IntLit
+            _, ok := strconv.parse_u64_maybe_prefixed(num_str)
             if !ok do token.type = .Unknown
-            token.value = value
         }
         else
         {
-            value, ok := strconv.parse_f32(num_str)
+            token.type = .FloatLit
+            _, ok := strconv.parse_f32(num_str)
             if !ok do token.type = .Unknown
-            token.value = value
         }
     }
     else  // Operators, parentheses, etc.
@@ -265,6 +279,7 @@ eat_all_whitespace :: proc(using lexer: ^Lexer)
                 {
                     offset += 1
                     line_start = offset
+                    line += 1
                 }
                 else if buf[offset] == '*' && buf[offset+1] == '/'
                 {
@@ -326,7 +341,7 @@ is_ident_middle :: #force_inline proc(c: u8) -> bool
 
 is_num_middle :: #force_inline proc(c: u8) -> bool
 {
-    return is_num(c) || c == '.' || c == 'e' || c == '-';
+    return is_num(c) || c == '.' || c == 'e' || c == 'x' || is_alpha(c);
 }
 
 is_newline :: #force_inline proc(c: u8) -> bool
@@ -357,6 +372,14 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .Colon:        return ":"
         case .Semi:         return ";"
         case .Caret:        return "^"
+        case .Bitwise_And:  return "&"
+        case .Bitwise_Or:   return "|"
+        case .Bitwise_Xor:  return "~"
+        case .LShift:       return ">>"
+        case .RShift:       return "<<"
+        case .And:          return "&&"
+        case .Or:           return "||"
+        case .Not:          return "!"
         case .LE:           return "<="
         case .GE:           return ">="
         case .EQ:           return "=="
@@ -375,8 +398,21 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .Break:        return "break"
         case .Continue:     return "continue"
         case .Return:       return "return"
-        case .NumLit:       return "number"
+        case .IntLit:       return "integer literal"
+        case .FloatLit:     return "floating point literal"
+        case .True:         return "true"
+        case .False:        return "false"
         case .EOS:          return "end of file"
     }
     return "UNKNOWN"
+}
+
+get_token_lit_int_value :: proc(token: Token) -> u64
+{
+    assert(token.type == .IntLit)
+
+    value, ok := strconv.parse_u64_maybe_prefixed(token.text)
+    assert(ok)
+
+    return value
 }
