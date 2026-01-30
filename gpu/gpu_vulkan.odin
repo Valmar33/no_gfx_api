@@ -205,8 +205,6 @@ vk_logger: log.Logger
 
 _init :: proc()
 {
-    init_scratch_arenas()
-
     scratch, _ := acquire_scratch()
 
     // Load vulkan function pointers
@@ -2725,22 +2723,22 @@ align_up :: proc(x, align: u64) -> (aligned: u64)
 // Scratch arenas
 
 @(private="file")
-scratch_arenas: [4]vmem.Arena
-
-@(private="file")
-init_scratch_arenas :: proc()
-{
-    for &scratch in scratch_arenas
-    {
-        error := vmem.arena_init_growing(&scratch)
-        assert(error == nil)
-    }
-}
-
-@(private="file")
 @(deferred_out = release_scratch)
 acquire_scratch :: proc(used_allocators: ..mem.Allocator) -> (mem.Allocator, vmem.Arena_Temp)
 {
+    @(thread_local) scratch_arenas: [4]vmem.Arena = {}
+    @(thread_local) initialized: bool = false
+    if !initialized
+    {
+        for &scratch in scratch_arenas
+        {
+            error := vmem.arena_init_growing(&scratch)
+            assert(error == nil)
+        }
+
+        initialized = true
+    }
+
     available_arena: ^vmem.Arena
     if len(used_allocators) < 1
     {
