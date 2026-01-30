@@ -23,7 +23,6 @@ import "core:sync"
 import "core:thread"
 import "core:sys/info"
 
-
 import sdl "vendor:sdl3"
 
 import shared "../shared"
@@ -719,7 +718,12 @@ load_scene_textures_from_gltf :: proc(
 	scene: ^shared.Scene,
 	texture_heap: rawptr,
 ) {
-	transfer_queue := gpu.get_queue(.Transfer)
+	// TODO(Leo): This uses .Main instead of .Transfer
+	// because we generate mipmaps as well here (which is a gfx op). If I'm
+	// not mistaken there currently isn't any form of cross queue
+	// GPU-GPU synchronization so using 2 separate queues wouldn't be
+	// that easy, currently.
+	transfer_queue := gpu.get_queue(.Main)
 
 	upload_arena := gpu.arena_init(Loader_Chunk_Size * 4 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
@@ -874,17 +878,19 @@ load_texture_from_gltf :: proc(
 		{
 			type = .D2,
 			dimensions = {u32(img.width), u32(img.height), 1},
-			mip_count = 1,
+			mip_count = u32(math.log2(f32(max(img.width, img.height)))),
 			layer_count = 1,
 			sample_count = 1,
 			format = .RGBA8_Unorm,
-			usage = {.Sampled},
+			usage = { .Sampled, .Transfer_Src },
 		},
 		queue,
 	)
 	if sync.guard(&mutex) do append(&loaded_textures, texture)
 
 	gpu.cmd_copy_to_texture(cmd_buf, texture, staging_gpu, texture.mem)
+	gpu.cmd_barrier(cmd_buf, .Transfer, .Transfer)
+	gpu.cmd_generate_mipmaps(cmd_buf, texture)
 	return texture
 }
 

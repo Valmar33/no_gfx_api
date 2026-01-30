@@ -29,8 +29,8 @@ Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Queue_Type :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
-Texture_Format :: enum { Default = 0, RGBA8_Unorm, BGRA8_Unorm, D32_Float, RGBA16_Float }
-Usage :: enum { Sampled = 0, Storage, Color_Attachment, Depth_Stencil_Attachment }
+Texture_Format :: enum { Default = 0, RGBA8_Unorm, RGBA8_SRGB, BGRA8_Unorm, D32_Float, RGBA16_Float }
+Usage :: enum { Sampled = 0, Storage, Transfer_Src, Color_Attachment, Depth_Stencil_Attachment }
 Usage_Flags :: bit_set[Usage; u32]
 Shader_Type_Graphics :: enum { Vertex = 0, Fragment }
 Load_Op :: enum { Clear = 0, Load, Dont_Care }
@@ -59,6 +59,15 @@ All_Mips: u8 : max(u8)
 All_Layers: u16 : max(u16)
 
 // Structs
+Blit_Rect :: struct
+{
+    offset_a: [3]i32,  // offset_a == 0 && offset_b == 0 -> full image
+    offset_b: [3]i32,  // offset_a == 0 && offset_b == 0 -> full image
+    mip_level: u32,
+    base_layer: u32,
+    layer_count: u32,
+}
+
 Texture_Desc :: struct
 {
     type: Texture_Type,
@@ -78,6 +87,9 @@ Sampler_Desc :: struct
     address_mode_u: Address_Mode,
     address_mode_v: Address_Mode,
     address_mode_w: Address_Mode,
+    mip_lod_bias: f32,
+    min_lod: f32,
+    max_lod: f32,  // 0.0 = use all lods
 }
 
 Texture_View_Desc :: struct
@@ -114,6 +126,7 @@ Texture :: struct #all_or_none
 {
     dimensions: [3]u32,
     format: Texture_Format,
+    mip_count: u32,
     handle: Texture_Handle
 }
 
@@ -270,6 +283,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 // Commands
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
+cmd_blit_texture: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter) : _cmd_blit_texture
 
 cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr) : _cmd_set_desc_heap
 
@@ -528,4 +542,19 @@ swapchain_init_from_sdl :: proc(window: ^sdl.Window, frames_in_flight: u32)
     window_size_y: i32
     sdl.GetWindowSize(window, &window_size_x, &window_size_y)
     swapchain_init(vk_surface, { u32(max(0, window_size_x)), u32(max(0, window_size_y)) }, frames_in_flight)
+}
+
+// Texture utils
+cmd_generate_mipmaps :: proc(cmd_buf: Command_Buffer, texture: Texture)
+{
+    for mip in 1..<texture.mip_count
+    {
+        if mip > 1 {
+            cmd_barrier(cmd_buf, .Transfer, .Transfer)
+        }
+
+        src := Blit_Rect { mip_level = mip - 1 }
+        dst := Blit_Rect { mip_level = mip }
+        cmd_blit_texture(cmd_buf, texture, texture, { src }, { dst }, .Linear)
+    }
 }

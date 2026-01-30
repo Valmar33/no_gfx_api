@@ -11,6 +11,7 @@ import rbt "core:container/rbtree"
 import "core:dynlib"
 import "core:container/priority_queue"
 import "core:strings"
+import "core:math"
 
 import vk "vendor:vulkan"
 import "vma"
@@ -935,6 +936,7 @@ _swapchain_acquire_next :: proc() -> Texture
     return Texture {
         dimensions = { ctx.swapchain.width, ctx.swapchain.height, 1 },
         format = .BGRA8_Unorm,
+        mip_count = 1,
         handle = transmute(Texture_Handle) ctx.swapchain.texture_keys[ctx.swapchain_image_idx],
     }
 }
@@ -1250,8 +1252,8 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = nil,
             image = image,
             subresourceRange = {
                 aspectMask = plane_aspect,
-                levelCount = 1,
-                layerCount = 1,
+                levelCount = desc.mip_count,
+                layerCount = desc.layer_count,
             },
             oldLayout = .UNDEFINED,
             newLayout = .GENERAL,
@@ -1275,6 +1277,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = nil,
     return {
         dimensions = desc.dimensions,
         format = desc.format,
+        mip_count = desc.mip_count,
         handle = transmute(Texture_Handle) u64(pool_append(&ctx.textures, tex_info))
     }
 }
@@ -1367,7 +1370,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
         format = to_vk_texture_format(format),
         subresourceRange = {
             aspectMask = plane_aspect,
-            levelCount = 1,
+            levelCount = texture.mip_count,
             layerCount = 1,
         }
     }
@@ -1430,6 +1433,9 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
         addressModeU = to_vk_address_mode(sampler_desc.address_mode_u),
         addressModeV = to_vk_address_mode(sampler_desc.address_mode_v),
         addressModeW = to_vk_address_mode(sampler_desc.address_mode_w),
+        mipLodBias = sampler_desc.mip_lod_bias,
+        minLod = sampler_desc.min_lod,
+        maxLod = sampler_desc.max_lod if sampler_desc.max_lod != 0.0 else vk.LOD_CLAMP_NONE,
     }
     sampler := get_or_add_sampler(sampler_ci)
 
@@ -1913,7 +1919,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes:
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
 {
     sync.lock(&ctx.lock)
-    cmd_buf := get_resource(cmd_buf, ctx.command_buffers)
+    cmd_buf_info := get_resource(cmd_buf, ctx.command_buffers)
     tex_info := get_resource(texture.handle, ctx.textures)
     sync.unlock(&ctx.lock)
 
@@ -1927,7 +1933,7 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
 
     plane_aspect: vk.ImageAspectFlags = { .DEPTH } if texture.format == .D32_Float else { .COLOR }
 
-    vk.CmdCopyBufferToImage(cmd_buf.handle, src_buf, vk_image, .GENERAL, 1, &vk.BufferImageCopy {
+    vk.CmdCopyBufferToImage(cmd_buf_info.handle, src_buf, vk_image, .GENERAL, 1, &vk.BufferImageCopy {
         bufferOffset = vk.DeviceSize(src_offset),
         bufferRowLength = texture.dimensions.x,
         bufferImageHeight = texture.dimensions.y,
@@ -1940,6 +1946,66 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
         imageOffset = {},
         imageExtent = { texture.dimensions.x, texture.dimensions.y, texture.dimensions.z }
     })
+}
+
+_cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter)
+{
+    assert(len(src_rects) == len(dst_rects))
+
+    sync.guard(&ctx.lock)
+
+    cmd_buf_info := get_resource(cmd_buf, ctx.command_buffers)
+    src_info := get_resource(src.handle, ctx.textures)
+    dst_info := get_resource(dst.handle, ctx.textures)
+
+    vk_filter := to_vk_filter(filter)
+
+    // TODO: This needs to be thread-local!!!
+    scratch, _ := acquire_scratch()
+    regions := make([]vk.ImageBlit, len(src_rects), allocator = scratch)
+    for &region, i in regions
+    {
+        src_rect := src_rects[i]
+        dst_rect := dst_rects[i]
+
+        src_dimensions := [3]i32 { i32(src.dimensions.x), i32(src.dimensions.y), i32(src.dimensions.z) }
+        dst_dimensions := [3]i32 { i32(dst.dimensions.x), i32(dst.dimensions.y), i32(dst.dimensions.z) }
+
+        src_offsets := [2][3]i32 { src_rect.offset_a, src_rect.offset_b }
+        if src_offsets == ([2][3]i32 { { 0, 0, 0 }, { 0, 0, 0 } }) {
+            src_offsets[1] = get_mip_dimensions_i32(src_dimensions, src_rect.mip_level)
+        }
+
+        dst_offsets := [2][3]i32 { dst_rect.offset_a, dst_rect.offset_b }
+        if dst_offsets == ([2][3]i32 { { 0, 0, 0 }, { 0, 0, 0 } }) {
+            dst_offsets[1] = get_mip_dimensions_i32(dst_dimensions, dst_rect.mip_level)
+        }
+
+        region = {
+            srcSubresource = {
+                aspectMask = { .COLOR },
+                mipLevel = src_rect.mip_level,
+                baseArrayLayer = src_rect.base_layer,
+                layerCount = src_rect.layer_count if src_rect.layer_count > 0 else 1,  // TODO
+            },
+            srcOffsets = {
+                { src_offsets[0].x, src_offsets[0].y, src_offsets[0].z },
+                { src_offsets[1].x, src_offsets[1].y, src_offsets[1].z },
+            },
+            dstSubresource = {
+                aspectMask = { .COLOR },
+                mipLevel = dst_rect.mip_level,
+                baseArrayLayer = dst_rect.base_layer,
+                layerCount = dst_rect.layer_count if dst_rect.layer_count > 0 else 1,  // TODO
+            },
+            dstOffsets = {
+                { dst_offsets[0].x, dst_offsets[0].y, dst_offsets[0].z },
+                { dst_offsets[1].x, dst_offsets[1].y, dst_offsets[1].z },
+            }
+        }
+    }
+
+    vk.CmdBlitImage(cmd_buf_info.handle, src_info.handle, .GENERAL, dst_info.handle, .GENERAL, u32(len(regions)), raw_data(regions), vk_filter)
 }
 
 _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr)
@@ -3131,9 +3197,10 @@ to_vk_texture_format :: proc(format: Texture_Format) -> vk.Format
     switch format
     {
         case .Default: panic("Implementation bug!")
-        case .RGBA8_Unorm: return .R8G8B8A8_UNORM
-        case .BGRA8_Unorm: return .B8G8R8A8_UNORM
-        case .D32_Float: return .D32_SFLOAT
+        case .RGBA8_Unorm:  return .R8G8B8A8_UNORM
+        case .RGBA8_SRGB:   return .R8G8B8A8_SRGB
+        case .BGRA8_Unorm:  return .B8G8R8A8_UNORM
+        case .D32_Float:    return .D32_SFLOAT
         case .RGBA16_Float: return .R16G16B16A16_SFLOAT
     }
     return {}
@@ -3162,6 +3229,7 @@ to_vk_texture_usage :: proc(usage: Usage_Flags) -> vk.ImageUsageFlags
     if .Storage in usage do                  res += { .STORAGE }
     if .Color_Attachment in usage do         res += { .COLOR_ATTACHMENT }
     if .Depth_Stencil_Attachment in usage do res += { .DEPTH_STENCIL_ATTACHMENT }
+    if .Transfer_Src in usage do             res += { .TRANSFER_SRC }
     return res
 }
 
@@ -3413,6 +3481,26 @@ get_resource :: proc
     get_resource_from_pool,
     get_resource_from_slice,
     get_resource_from_array,
+}
+
+@(private="file")
+get_mip_dimensions_u32 :: proc(texture_dimensions: [3]u32, mip_level: u32) -> [3]u32
+{
+    return {
+        max(1, u32(f32(texture_dimensions.x) / f32(u32(1) << mip_level))),
+        max(1, u32(f32(texture_dimensions.y) / f32(u32(1) << mip_level))),
+        max(1, u32(f32(texture_dimensions.z) / f32(u32(1) << mip_level))),
+    }
+}
+
+@(private="file")
+get_mip_dimensions_i32 :: proc(texture_dimensions: [3]i32, mip_level: u32) -> [3]i32
+{
+    return {
+        max(1, i32(f32(texture_dimensions.x) / f32(i32(1) << mip_level))),
+        max(1, i32(f32(texture_dimensions.y) / f32(i32(1) << mip_level))),
+        max(1, i32(f32(texture_dimensions.z) / f32(i32(1) << mip_level))),
+    }
 }
 
 // Interop
