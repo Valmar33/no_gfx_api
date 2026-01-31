@@ -89,9 +89,7 @@ main :: proc()
         gpu.mem_free(indices_local)
     }
 
-    queue := gpu.get_queue(.Main)
-
-    upload_cmd_buf := gpu.commands_begin(queue)
+    upload_cmd_buf := gpu.commands_begin(.Main)
 
     upload_arena := gpu.arena_init(10 * 1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
@@ -106,7 +104,7 @@ main :: proc()
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
 
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     gpu.set_texture_desc(texture_heap, 0, gpu.texture_view_descriptor(bowser_tex, { format = .RGBA8_Unorm }))
     gpu.set_texture_desc(texture_heap, 1, gpu.texture_view_descriptor(peach_tex, { format = .RGBA8_Unorm }))
@@ -149,7 +147,7 @@ main :: proc()
 
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
 
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = { 0.7, 0.7, 0.7, 1.0 } }
@@ -178,9 +176,9 @@ main :: proc()
 
         gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, indices_local, u32(len(indices.cpu)), 1)
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)

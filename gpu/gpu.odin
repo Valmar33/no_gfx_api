@@ -10,11 +10,12 @@ import vk "vendor:vulkan"
 // This API follows the ZII (Zero Is Initialization) principle. Initializing to 0
 // will yield predictable and reasonable behavior in general.
 
+VALIDATION :: #config(NO_GFX_API_VALIDATION, true)
+
 // Handles
 Handle :: rawptr
 Texture_Handle :: distinct Handle
 Command_Buffer :: distinct Handle
-Queue :: distinct Handle
 Semaphore :: distinct Handle
 Shader :: distinct Handle
 BVH :: struct { _: Handle }
@@ -27,7 +28,7 @@ Feature :: enum { Raytracing = 0 }
 Features :: bit_set[Feature; u32]
 Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
-Queue_Type :: enum { Main = 0, Compute, Transfer }
+Queue :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
 Texture_Format :: enum { Default = 0, RGBA8_Unorm, RGBA8_SRGB, BGRA8_Unorm, D32_Float, RGBA16_Float }
 Usage :: enum { Sampled = 0, Storage, Transfer_Src, Color_Attachment, Depth_Stencil_Attachment }
@@ -219,14 +220,13 @@ TLAS_Desc :: struct
 
 // Procedures
 
-// Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
+// Initialization and interaction with the OS.
 init: proc() : _init
 cleanup: proc() : _cleanup
 wait_idle: proc() : _wait_idle
 swapchain_init: proc(surface: vk.SurfaceKHR, init_size: [2]u32, frames_in_flight: u32) : _swapchain_init
 swapchain_resize: proc(size: [2]u32) : _swapchain_resize  // NOTE: Do not call this every frame! Only if the dimensions change.
 swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks CPU until at least one frame is available.
-// TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 features_available: proc() -> Features : _features_available
 
@@ -257,7 +257,6 @@ semaphore_wait: proc(sem: Semaphore, wait_value: u64) : _semaphore_wait
 semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
 
 // Queues
-get_queue: proc(queue_type: Queue_Type) -> Queue : _get_queue
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
 queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
 

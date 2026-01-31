@@ -83,13 +83,12 @@ main :: proc()
         delete(meshes_gpu)
     }
 
-    queue := gpu.get_queue(.Main)
-    upload_cmd_buf := gpu.commands_begin(queue)
+    upload_cmd_buf := gpu.commands_begin(.Main)
     for mesh in scene.meshes {
         append(&meshes_gpu, upload_mesh(&upload_arena, upload_cmd_buf, mesh))
     }
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     now_ts := sdl.GetPerformanceCounter()
 
@@ -118,7 +117,7 @@ main :: proc()
         }
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
-            gpu.queue_wait_idle(queue)
+            gpu.queue_wait_idle(.Main)
             gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
             depth_desc.dimensions.x = u32(window_size_x)
             depth_desc.dimensions.y = u32(window_size_y)
@@ -138,7 +137,7 @@ main :: proc()
 
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
 
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = { 0.7, 0.7, 0.7, 1.0 } }
@@ -178,9 +177,9 @@ main :: proc()
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)

@@ -120,8 +120,7 @@ main :: proc() {
 	upload_arena := gpu.arena_init(128 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
-	queue := gpu.get_queue(.Main)
-	upload_cmd_buf := gpu.commands_begin(queue)
+	upload_cmd_buf := gpu.commands_begin(.Main)
 
 	full_screen_quad_verts_gpu, full_screen_quad_indices_gpu := create_fullscreen_quad(
 		&upload_arena,
@@ -257,7 +256,7 @@ main :: proc() {
 	}
 
 	gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-	gpu.queue_submit(queue, {upload_cmd_buf})
+	gpu.queue_submit(.Main, {upload_cmd_buf})
 
 	now_ts := sdl.GetPerformanceCounter()
 
@@ -293,7 +292,7 @@ main :: proc() {
 			gpu.semaphore_wait(frame_sem, next_frame - Frames_In_Flight)
 		}
 		if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
-			gpu.queue_wait_idle(queue)
+			gpu.queue_wait_idle(.Main)
 			gpu.swapchain_resize({u32(max(0, window_size_x)), u32(max(0, window_size_y))})
 
 			gpu.free_and_destroy_texture(&gbuffer_albedo)
@@ -330,7 +329,7 @@ main :: proc() {
 
 		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
 
-		cmd_buf := gpu.commands_begin(queue)
+		cmd_buf := gpu.commands_begin(.Main)
 
 		// G-buffer pass: render geometry to multiple color attachments
 		render_pass_gbuffer(
@@ -368,9 +367,9 @@ main :: proc() {
 			full_screen_quad_indices_gpu,
 		)
 
-		gpu.queue_submit(queue, {cmd_buf}, frame_sem, next_frame)
+		gpu.queue_submit(.Main, {cmd_buf}, frame_sem, next_frame)
 
-		gpu.swapchain_present(queue, frame_sem, next_frame)
+		gpu.swapchain_present(.Main, frame_sem, next_frame)
 		next_frame += 1
 
 		gpu.arena_free_all(frame_arena)
@@ -723,7 +722,7 @@ load_scene_textures_from_gltf :: proc(
 	// not mistaken there currently isn't any form of cross queue
 	// GPU-GPU synchronization so using 2 separate queues wouldn't be
 	// that easy, currently.
-	transfer_queue := gpu.get_queue(.Main)
+	transfer_queue := gpu.Queue.Main
 
 	upload_arena := gpu.arena_init(Loader_Chunk_Size * 4 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)

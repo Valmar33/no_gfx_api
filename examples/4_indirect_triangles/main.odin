@@ -128,15 +128,13 @@ main :: proc()
         gpu.mem_free(indirect_data_local)
     }
 
-    queue := gpu.get_queue(.Main)
-
-    upload_cmd_buf := gpu.commands_begin(queue)
+    upload_cmd_buf := gpu.commands_begin(.Main)
     gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
     gpu.cmd_mem_copy(upload_cmd_buf, count.gpu, count_local, 1 * size_of(u32))
     gpu.cmd_mem_copy(upload_cmd_buf, indirect_command, indirect_data_local, Num_Triangles * size_of(IndirectData))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     now_ts := sdl.GetPerformanceCounter()
 
@@ -175,7 +173,7 @@ main :: proc()
 
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
 
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = changing_color(delta_time) }
@@ -205,9 +203,9 @@ main :: proc()
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)

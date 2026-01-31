@@ -161,9 +161,7 @@ main :: proc()
         gpu.mem_free(indices_local)
     }
 
-    queue := gpu.get_queue(.Main)
-
-    upload_cmd_buf := gpu.commands_begin(queue)
+    upload_cmd_buf := gpu.commands_begin(.Main)
     gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
     gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
 
@@ -173,7 +171,7 @@ main :: proc()
     }
 
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     gpu.set_bvh_desc(bvh_heap, 0, gpu.bvh_descriptor(scene.bvh))
 
@@ -209,7 +207,7 @@ main :: proc()
         }
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
-            gpu.queue_wait_idle(queue)
+            gpu.queue_wait_idle(.Main)
             gpu.swapchain_resize({ u32(window_size_x), u32(window_size_y) })
 
             output_desc.dimensions.x = u32(window_size_x)
@@ -248,7 +246,7 @@ main :: proc()
         compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
         compute_data.cpu.camera_to_world = intr.matrix_flatten(camera_to_world)
 
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
 
         // Dispatch compute shader to write to texture
         gpu.cmd_set_desc_heap(cmd_buf, nil, texture_rw_heap_gpu, nil, gpu.host_to_device_ptr(bvh_heap))
@@ -290,9 +288,9 @@ main :: proc()
 
         gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, frag_data.gpu, indices_local, u32(len(indices.cpu)), 1)
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf }, frame_sem, next_frame)
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)
