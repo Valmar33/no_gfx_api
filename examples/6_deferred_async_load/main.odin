@@ -42,6 +42,9 @@ Num_Async_Worker_Threads := clamp(info.cpu.logical_cores - 1, 2, 6)
 // How many textures to load in a single batch / command buffer
 Loader_Chunk_Size :: 16
 
+// Use CPU block-compressed mip generation instead of GPU mipmaps.
+Compress_Textures :: false
+
 // G-buffer texture indices in texture heap
 GBUFFER_ALBEDO_IDX :: 1000
 GBUFFER_NORMAL_IDX :: 1001
@@ -239,7 +242,11 @@ main :: proc() {
 		}
 	}
 
-	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
+	gpu.set_sampler_desc(
+		sampler_heap,
+		0,
+		gpu.sampler_descriptor({ max_anisotropy = min(16.0, gpu.device_limits().max_anisotropy) }),
+	)
 
 
 	gbuffer_albedo, gbuffer_normal, gbuffer_metallic_roughness, depth_texture :=
@@ -725,7 +732,7 @@ load_scene_textures_from_gltf :: proc(
 	// that easy, currently.
 	transfer_queue := gpu.get_queue(.Main)
 
-	upload_arena := gpu.arena_init(Loader_Chunk_Size * 4 * 1024 * 1024)
+	upload_arena := gpu.arena_init(Loader_Chunk_Size * 8 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
 	for info in texture_infos {
@@ -798,10 +805,12 @@ load_scene_textures_from_gltf :: proc(
 			scene.meshes[info.mesh_id].normal_map = texture.texture_idx
 		}
 
+		view_format: gpu.Texture_Format = .RGBA8_Unorm
+		if Compress_Textures do view_format = .BC3_RGBA_Unorm
 		gpu.set_texture_desc(
 			texture_heap,
 			texture.texture_idx,
-			gpu.texture_view_descriptor(texture.texture, {format = .RGBA8_Unorm}),
+			gpu.texture_view_descriptor(texture.texture, {format = view_format}),
 		)
 	}
 }
@@ -870,6 +879,48 @@ load_texture_from_gltf :: proc(
 		return {}
 	}
 	defer image.destroy(img)
+
+	if Compress_Textures {
+		compressed := shared.bc3_compress_rgba8_mips(
+			img.pixels.buf[:],
+			u32(img.width),
+			u32(img.height),
+		)
+		defer {
+			delete(compressed.data)
+			delete(compressed.offsets)
+		}
+
+		staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(compressed.data)))
+		runtime.mem_copy(staging, raw_data(compressed.data), len(compressed.data))
+
+		texture := gpu.alloc_and_create_texture(
+			{
+				type = .D2,
+				dimensions = {u32(img.width), u32(img.height), 1},
+				mip_count = compressed.mip_count,
+				layer_count = 1,
+				sample_count = 1,
+				format = .BC3_RGBA_Unorm,
+				usage = { .Sampled, .Transfer_Src },
+			},
+			queue,
+		)
+		if sync.guard(&mutex) do append(&loaded_textures, texture)
+
+		regions := make([]gpu.Mip_Copy_Region, int(compressed.mip_count))
+		for mip: u32 = 0; mip < compressed.mip_count; mip += 1 {
+			regions[mip] = {
+				src_offset = compressed.offsets[mip],
+				mip_level = mip,
+				array_layer = 0,
+				layer_count = 1,
+			}
+		}
+
+		gpu.cmd_copy_mips_to_texture(cmd_buf, texture, staging_gpu, regions)
+		return texture
+	}
 
 	staging, staging_gpu := gpu.arena_alloc_untyped(upload_arena, u64(len(img.pixels.buf)))
 	runtime.mem_copy(staging, raw_data(img.pixels.buf), len(img.pixels.buf))
