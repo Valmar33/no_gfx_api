@@ -29,7 +29,21 @@ Allocation_Type :: enum { Default = 0, Descriptors }
 Memory :: enum { Default = 0, GPU, Readback }
 Queue_Type :: enum { Main = 0, Compute, Transfer }
 Texture_Type :: enum { D2 = 0, D3, D1 }
-Texture_Format :: enum { Default = 0, RGBA8_Unorm, RGBA8_SRGB, BGRA8_Unorm, D32_Float, RGBA16_Float }
+Texture_Format :: enum {
+	Default = 0,
+	RGBA8_Unorm,
+	BGRA8_Unorm,
+	D32_Float,
+	RGBA16_Float,
+	BC1_RGBA_Unorm,
+	BC3_RGBA_Unorm,
+	BC7_RGBA_Unorm,
+	ASTC_4x4_RGBA_Unorm,
+	ETC2_RGB8_Unorm,
+	ETC2_RGBA8_Unorm,
+	EAC_R11_Unorm,
+	EAC_RG11_Unorm,
+}
 Usage :: enum { Sampled = 0, Storage, Transfer_Src, Color_Attachment, Depth_Stencil_Attachment }
 Usage_Flags :: bit_set[Usage; u32]
 Shader_Type_Graphics :: enum { Vertex = 0, Fragment }
@@ -66,6 +80,13 @@ Blit_Rect :: struct
     mip_level: u32,
     base_layer: u32,
     layer_count: u32,
+}
+
+Mip_Copy_Region :: struct {
+	src_offset:  u64, // Offset in staging buffer
+	mip_level:   u32,
+	array_layer: u32,
+	layer_count: u32,
 }
 
 Texture_Desc :: struct
@@ -290,6 +311,7 @@ commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 // Commands
 cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
 cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
+cmd_copy_mips_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src_buffer: rawptr, regions: []Mip_Copy_Region) : _cmd_copy_mips_to_texture
 cmd_blit_texture: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter) : _cmd_blit_texture
 
 cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr) : _cmd_set_desc_heap
