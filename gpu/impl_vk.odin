@@ -493,6 +493,7 @@ _init :: proc()
             features = {
                 shaderInt64 = true,
                 vertexPipelineStoresAndAtomics = true,
+                samplerAnisotropy = true,
             }
         }
         raytracing_features := &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
@@ -1055,6 +1056,13 @@ _features_available :: proc() -> Features
     return ctx.features
 }
 
+_device_limits :: proc() -> Device_Limits
+{
+    return {
+        max_anisotropy = max(1.0, ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy),
+    }
+}
+
 // Memory
 
 _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr
@@ -1423,6 +1431,14 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
 
 _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
 {
+    if sampler_desc.max_anisotropy != 0.0 {
+        ensure(
+            sampler_desc.max_anisotropy >= 1.0 &&
+            sampler_desc.max_anisotropy <= ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy,
+            "Sampler anisotropy out of range. Call gpu.device_limits() to get the supported maximum anisotropy.",
+        )
+    }
+
     sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         magFilter = to_vk_filter(sampler_desc.mag_filter),
@@ -1434,6 +1450,8 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
         mipLodBias = sampler_desc.mip_lod_bias,
         minLod = sampler_desc.min_lod,
         maxLod = sampler_desc.max_lod if sampler_desc.max_lod != 0.0 else vk.LOD_CLAMP_NONE,
+        anisotropyEnable = b32(sampler_desc.max_anisotropy > 1.0),
+        maxAnisotropy = sampler_desc.max_anisotropy,
     }
     sampler := get_or_add_sampler(sampler_ci)
 
@@ -2004,6 +2022,66 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
     }
 
     vk.CmdBlitImage(cmd_buf_info.handle, src_info.handle, .GENERAL, dst_info.handle, .GENERAL, u32(len(regions)), raw_data(regions), vk_filter)
+}
+
+_cmd_copy_mips_to_texture :: proc(
+    cmd_buf: Command_Buffer,
+    texture: Texture,
+    src_buffer: rawptr,
+    regions: []Mip_Copy_Region,
+)
+{
+    sync.lock(&ctx.lock)
+    cmd := get_resource(cmd_buf, ctx.command_buffers)
+    tex_info := get_resource(texture.handle, ctx.textures)
+    sync.unlock(&ctx.lock)
+
+    src_buf, base_offset, ok_s := compute_buf_offset_from_gpu_ptr(src_buffer)
+    if !ok_s {
+        fatal_error("Alloc not found.")
+        return
+    }
+
+    if texture.mip_count < u32(len(regions)) {
+        fatal_error("Texture mip count is less than the number of regions")
+        return
+    }
+
+    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if texture.format == .D32_Float else { .COLOR }
+    is_compressed := is_block_compressed(texture.format)
+
+    scratch, _ := acquire_scratch()
+
+    copies := make([]vk.BufferImageCopy, len(regions), allocator = scratch)
+
+    for region, i in regions {
+        mip_width := max(1, texture.dimensions.x >> region.mip_level)
+        mip_height := max(1, texture.dimensions.y >> region.mip_level)
+        mip_depth := max(1, texture.dimensions.z >> region.mip_level)
+
+        copies[i] = vk.BufferImageCopy{
+            bufferOffset = vk.DeviceSize(u64(base_offset) + region.src_offset),
+            bufferRowLength = 0 if is_compressed else mip_width,
+            bufferImageHeight = 0 if is_compressed else mip_height,
+            imageSubresource = {
+                aspectMask = plane_aspect,
+                mipLevel = region.mip_level,
+                baseArrayLayer = region.array_layer,
+                layerCount = region.layer_count,
+            },
+            imageOffset = {},
+            imageExtent = { mip_width, mip_height, mip_depth },
+        }
+    }
+
+    vk.CmdCopyBufferToImage(
+        cmd.handle,
+        src_buf,
+        tex_info.handle,
+        .GENERAL,
+        cast(u32) len(copies),
+        raw_data(copies),
+    )
 }
 
 _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr)
@@ -3195,13 +3273,39 @@ to_vk_texture_format :: proc(format: Texture_Format) -> vk.Format
     switch format
     {
         case .Default: panic("Implementation bug!")
-        case .RGBA8_Unorm:  return .R8G8B8A8_UNORM
-        case .RGBA8_SRGB:   return .R8G8B8A8_SRGB
-        case .BGRA8_Unorm:  return .B8G8R8A8_UNORM
-        case .D32_Float:    return .D32_SFLOAT
+        case .RGBA8_Unorm: return .R8G8B8A8_UNORM
+        case .BGRA8_Unorm: return .B8G8R8A8_UNORM
+        case .D32_Float: return .D32_SFLOAT
         case .RGBA16_Float: return .R16G16B16A16_SFLOAT
+        case .BC1_RGBA_Unorm: return .BC1_RGBA_UNORM_BLOCK
+        case .BC3_RGBA_Unorm: return .BC3_UNORM_BLOCK
+        case .BC7_RGBA_Unorm: return .BC7_UNORM_BLOCK
+        case .ASTC_4x4_RGBA_Unorm: return .ASTC_4x4_UNORM_BLOCK
+        case .ETC2_RGB8_Unorm: return .ETC2_R8G8B8_UNORM_BLOCK
+        case .ETC2_RGBA8_Unorm: return .ETC2_R8G8B8A8_UNORM_BLOCK
+        case .EAC_R11_Unorm: return .EAC_R11_UNORM_BLOCK
+        case .EAC_RG11_Unorm: return .EAC_R11G11_UNORM_BLOCK
     }
     return {}
+}
+
+@(private="file")
+is_block_compressed :: #force_inline proc(format: Texture_Format) -> bool
+{
+    #partial switch format
+    {
+        case .BC1_RGBA_Unorm,
+             .BC3_RGBA_Unorm,
+             .BC7_RGBA_Unorm,
+             .ASTC_4x4_RGBA_Unorm,
+             .ETC2_RGB8_Unorm,
+             .ETC2_RGBA8_Unorm,
+             .EAC_R11_Unorm,
+             .EAC_RG11_Unorm:
+            return true
+    }
+
+    return false
 }
 
 @(private="file")
