@@ -239,7 +239,11 @@ main :: proc() {
 		}
 	}
 
-	gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
+	gpu.set_sampler_desc(
+		sampler_heap,
+		0,
+		gpu.sampler_descriptor({ max_anisotropy = min(16.0, gpu.device_limits().max_anisotropy) }),
+	)
 
 
 	gbuffer_albedo, gbuffer_normal, gbuffer_metallic_roughness, depth_texture :=

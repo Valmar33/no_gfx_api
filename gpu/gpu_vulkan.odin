@@ -493,6 +493,7 @@ _init :: proc()
             features = {
                 shaderInt64 = true,
                 vertexPipelineStoresAndAtomics = true,
+                samplerAnisotropy = true,
             }
         }
         raytracing_features := &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
@@ -1055,6 +1056,13 @@ _features_available :: proc() -> Features
     return ctx.features
 }
 
+_device_limits :: proc() -> Device_Limits
+{
+    return {
+        max_anisotropy = max(1.0, ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy),
+    }
+}
+
 // Memory
 
 _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr
@@ -1423,6 +1431,14 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
 
 _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
 {
+    if sampler_desc.max_anisotropy != 0.0 {
+        ensure(
+            sampler_desc.max_anisotropy >= 1.0 &&
+            sampler_desc.max_anisotropy <= ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy,
+            "Sampler anisotropy out of range. Call gpu.device_limits() to get the supported maximum anisotropy.",
+        )
+    }
+
     sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         magFilter = to_vk_filter(sampler_desc.mag_filter),
@@ -1434,6 +1450,8 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
         mipLodBias = sampler_desc.mip_lod_bias,
         minLod = sampler_desc.min_lod,
         maxLod = sampler_desc.max_lod if sampler_desc.max_lod != 0.0 else vk.LOD_CLAMP_NONE,
+        anisotropyEnable = b32(sampler_desc.max_anisotropy > 1.0),
+        maxAnisotropy = sampler_desc.max_anisotropy,
     }
     sampler := get_or_add_sampler(sampler_ci)
 

@@ -90,6 +90,7 @@ Sampler_Desc :: struct
     mip_lod_bias: f32,
     min_lod: f32,
     max_lod: f32,  // 0.0 = use all lods
+    max_anisotropy: f32,
 }
 
 Texture_View_Desc :: struct
@@ -217,6 +218,11 @@ TLAS_Desc :: struct
     instance_count: u32,
 }
 
+Device_Limits :: struct
+{
+    max_anisotropy: f32,
+}
+
 // Procedures
 
 // Initialization and interaction with the OS. This is simpler than it would probably be, for brevity.
@@ -229,6 +235,7 @@ swapchain_acquire_next: proc() -> Texture : _swapchain_acquire_next  // Blocks C
 // TODO: The only queue that makes sense here is ( .Main, 0 ). Remove the queue param?
 swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _swapchain_present
 features_available: proc() -> Features : _features_available
+device_limits: proc() -> Device_Limits : _device_limits
 
 // Memory
 mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr : _mem_alloc
