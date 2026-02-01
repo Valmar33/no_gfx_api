@@ -994,12 +994,14 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
             vk_check(vk.EndCommandBuffer(vk_cmd_buf))
         }
 
+        {
+            cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+            defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+            cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue_type].val, 1) + 1
+        }
+
         cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
         vk_cmd_buf := transmute(vk.CommandBuffer) cmd_buf_info.handle
-
-        cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue_type].val, 1) + 1
-        pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
-
         queue_sem := ctx.cmd_bufs_timelines[cmd_buf_info.queue_type].sem
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
@@ -1332,9 +1334,8 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 @(private="file")
 get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateInfo) -> vk.ImageView
 {
-    sync.guard(&ctx.lock)
-
-    tex_info := pool_get(&ctx.textures, texture)
+    tex_info := pool_get_mut_lock(&ctx.textures, texture)
+    defer pool_get_mut_unlock(&ctx.textures, texture)
 
     for view in tex_info.views
     {
@@ -1347,7 +1348,6 @@ get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateI
     view_ci := info
     vk_check(vk.CreateImageView(ctx.device, &view_ci, nil, &image_view))
     append(&tex_info.views, Image_View_Info { info, image_view })
-    pool_set(&ctx.textures, texture, tex_info)
     return image_view
 }
 
@@ -1612,9 +1612,9 @@ _shader_destroy :: proc(shader: Shader)
     // Remove from any command buffer tracking
     for cmd_buf in shader_info.command_buffers
     {
-        cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
         cmd_buf_info.compute_shader = {}
-        pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
     }
 
     delete(shader_info.command_buffers)
@@ -1844,7 +1844,7 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
     vk_cmd_buf := cmd_buf_info.handle
     vk_check(vk.BeginCommandBuffer(vk_cmd_buf, &cmd_buf_bi))
 
-    return cmd_buf_info.pool_handle
+    return cmd_buf
 }
 
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
@@ -1867,9 +1867,9 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_submit_cmd_buf(cmd_buf, vk_signal_sem, signal_value)
 
         // Clear compute shader tracking for this command buffer
-        cmd_buf_info = pool_get(&ctx.command_buffers, cmd_buf)
-        cmd_buf_info.compute_shader = {}
-        pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
+        cmd_buf_info_mut := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info_mut.compute_shader = {}
     }
 }
 
@@ -1877,7 +1877,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64)
 {
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
 
     src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
     dst_buf, dst_offset, ok_d := compute_buf_offset_from_gpu_ptr(dst)
@@ -1894,7 +1894,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes:
             size = vk.DeviceSize(bytes),
         }
     }
-    vk.CmdCopyBuffer(cmd_buf.handle, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
+    vk.CmdCopyBuffer(cmd_buf_info.handle, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
 }
 
 // TODO: dst is ignored atm.
@@ -2236,11 +2236,12 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
 
 _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
 {
-    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-    vk_cmd_buf := cmd_buf_info.handle
-
     shader_info := pool_get(&ctx.shaders, compute_shader)
     vk_shader_info := shader_info.handle
+
+    cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+    defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
 
     shader_stages := []vk.ShaderStageFlags { { .COMPUTE } }
     to_bind := []vk.ShaderEXT { vk_shader_info }
@@ -2248,7 +2249,6 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 
     cmd_buf_info.compute_shader = compute_shader
-    pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
 }
 
 _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
@@ -2839,7 +2839,9 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 
     // Check whether there is a free command buffer available with a timeline value that is less than or equal to the current semaphore value
     if handle, ok := priority_queue.pop_safe(&tls_ctx.free_buffers[queue]); ok {
-        cmd_buf_info := pool_get(&ctx.command_buffers, handle.pool_handle)
+        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, handle.pool_handle)
+        defer pool_get_mut_unlock(&ctx.command_buffers, handle.pool_handle)
+
         ensure(cmd_buf_info.recording == false, "Command buffer on the free list is still recording")
 
         current_semaphore_value: u64
@@ -2856,8 +2858,6 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
             }
 
             cmd_buf_info.thread_id = sync.current_thread_id()
-            pool_set(&ctx.command_buffers, handle.pool_handle, cmd_buf_info)
-
             return handle.pool_handle
         } else {
             priority_queue.push(&tls_ctx.free_buffers[queue], handle)
@@ -2881,9 +2881,12 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
     vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &cmd_buf_info.handle))
 
     cmd_buf := pool_add(&ctx.command_buffers, cmd_buf_info)
-    cmd_buf_info.pool_handle = cmd_buf
-    pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
-    append(&tls_ctx.buffers[queue], cmd_buf_info.pool_handle)
+    {
+        cmd_buf_info_mut := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info_mut.pool_handle = cmd_buf
+        append(&tls_ctx.buffers[queue], cmd_buf_info_mut.pool_handle)
+    }
 
     return cmd_buf
 }
@@ -2892,6 +2895,12 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 vk_submit_cmd_buf :: proc(cmd_buf: Command_Buffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
     tls_ctx := get_tls()
+
+    {
+        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue].val, 1) + 1
+    }
 
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
     queue := cmd_buf_info.queue
@@ -2902,8 +2911,6 @@ vk_submit_cmd_buf :: proc(cmd_buf: Command_Buffer, signal_sem: vk.Semaphore = {}
     ensure(cmd_buf_info.recording == true, "Command buffer is not recording. Reusing a command buffer after submit is forbidden.")
     ensure(cmd_buf_info.thread_id == sync.current_thread_id(), "You are trying to submit a command buffer on different thread than it was recorded on.")
 
-    cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[queue].val, 1) + 1
-    pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
     queue_sem := ctx.cmd_bufs_timelines[queue].sem
 
     signal_sems: []vk.Semaphore = { queue_sem, signal_sem } if signal_sem != {} else { queue_sem }
@@ -2936,10 +2943,13 @@ recycle_cmd_buf :: proc(cmd_buf: Command_Buffer)
 {
     tls_ctx := get_tls()
 
-    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-    cmd_buf_info.recording = false
-    pool_set(&ctx.command_buffers, cmd_buf, cmd_buf_info)
+    {
+        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
+        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info.recording = false
+    }
 
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
     priority_queue.push(&tls_ctx.free_buffers[cmd_buf_info.queue_type], Free_Command_Buffer { pool_handle = cmd_buf_info.pool_handle, timeline_value = cmd_buf_info.timeline_value })
 }
 

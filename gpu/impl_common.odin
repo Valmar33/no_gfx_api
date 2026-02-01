@@ -7,14 +7,20 @@ import "core:mem"
 import "core:sync"
 import "core:log"
 import "base:runtime"
-
-Resource_Block_Size :: 256
+import intr "base:intrinsics"
 
 // Implementation of a thread-safe resource pool to be used for no_gfx_api handles
-Resource_Pool :: struct($Handle_T: typeid, $Info_T: typeid)
+Resource_Block_Size :: 256
+Resource_Block :: struct($T: typeid)
 {
-    array: [dynamic]Resource(Info_T),
-    free_list: [dynamic]u32,
+    res: [Resource_Block_Size]Resource(T),
+}
+
+Resource_Pool :: struct($Handle_T: typeid, $Info_T: typeid) where size_of(Handle_T) == 8
+{
+    blocks: [dynamic]^Resource_Block(Info_T),  // Makes pointers to elements stable.
+    res_count: u32,  // Number of resources added to the "blocks" data structure.
+    freelist: [dynamic]u32,
     lock: sync.Atomic_Mutex,
     init: bool,
 }
@@ -23,6 +29,14 @@ Resource :: struct($T: typeid)
 {
     info: T,
     gen: u32,
+    lock: sync.Benaphore,
+    meta: Resource_Metadata,
+}
+
+Resource_Metadata :: struct
+{
+    name: string,
+    created_at: runtime.Source_Code_Location,
 }
 
 Resource_Key :: struct
@@ -42,41 +56,60 @@ pool_init :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
 pool_get :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> Info_T
 {
     assert(init)
-
-    sync.guard(&lock)
-
+    assert(handle != {})
     key := transmute(Resource_Key) handle
-    assert(key.gen == array[key.idx].gen)
-    return array[key.idx].info
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    assert(key.gen == el.gen)
+    return el.info
 }
 
-pool_set :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, new_info: Info_T)
+// "@deferred_in" can't be used with generics...
+pool_get_mut_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^Info_T
 {
     assert(init)
-
-    sync.guard(&lock)
-
+    assert(handle != {})
     key := transmute(Resource_Key) handle
-    assert(key.gen == array[key.idx].gen)
-    array[key.idx].info = new_info
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := &blocks[block_idx].res[el_idx]
+    assert(key.gen == el.gen)
+    sync.lock(&blocks[block_idx].res[el_idx].lock)
+    return &el.info
+}
+
+pool_get_mut_unlock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
+{
+    assert(init)
+    assert(handle != {})
+    key := transmute(Resource_Key) handle
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := blocks[block_idx].res[el_idx]
+    assert(key.gen == el.gen)
+    sync.unlock(&blocks[block_idx].res[el_idx].lock)
 }
 
 pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T) -> Handle_T
 {
     assert(init)
-
     sync.guard(&lock)
 
     free_idx: u32
-    if len(free_list) > 0 {
-        free_idx = pop(&free_list)
+    if len(freelist) > 0 {
+        free_idx = pop(&freelist)
     } else {
-        append(&array, Resource(Info_T) {})
-        free_idx = u32(len(array)) - 1
+        pool_append_internal(pool, Resource(Info_T) {})
+        free_idx = res_count - 1
     }
 
-    gen := array[free_idx].gen
-    array[free_idx].info = info
+    block_idx, el_idx := pool_get_idx(free_idx)
+    blocks[block_idx].res[el_idx].info = info
+    gen := blocks[block_idx].res[el_idx].gen
 
     key := Resource_Key { idx = free_idx, gen = gen }
     return transmute(Handle_T) key
@@ -85,33 +118,51 @@ pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T) -
 pool_remove :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
 {
     assert(init)
-
+    assert(handle != {})
     sync.guard(&lock)
 
     key := transmute(Resource_Key) handle
 
-    el := &array[key.idx]
-
-    if key.gen != el.gen {
-        return
-    }
+    block_idx, el_idx := pool_get_idx(key.idx)
+    el := &blocks[block_idx].res[el_idx]
+    assert(key.gen == el.gen)
 
     el.gen += 1
-    if key.idx == u32(len(array)) {
-        pop(&array)
-    } else {
-        append(&free_list, key.idx)
-    }
+    append(&freelist, key.idx)
 }
 
 pool_destroy :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
 {
     assert(init)
+    sync.guard(&lock)
 
-    delete(array)
-    delete(free_list)
-    array = {}
-    free_list = {}
+    for block in blocks {
+        free(block)
+    }
+    delete(blocks)
+    blocks = {}
+    freelist = nil
+    init = false
+}
+
+@(private="file")
+pool_get_idx :: #force_inline proc(idx: u32) -> (block_idx: u32, el_idx: u32)
+{
+    return idx / Resource_Block_Size, idx % Resource_Block_Size
+}
+
+@(private="file")
+pool_append_internal :: #force_inline proc(using pool: ^Resource_Pool($Handle_T, $Info_T), el: Resource(Info_T))
+{
+    do_alloc_new_block := res_count % Resource_Block_Size == 0
+    res_count += 1
+    if do_alloc_new_block {
+        new_block := new(Resource_Block(Info_T))
+        append(&blocks, new_block)
+    }
+
+    block_idx, el_idx := pool_get_idx(res_count - 1)
+    blocks[block_idx].res[el_idx] = el
 }
 
 // Scratch arena implementation
@@ -166,6 +217,7 @@ release_scratch :: #force_inline proc(allocator: mem.Allocator, temp: vmem.Arena
 }
 
 // Utilities
+
 get_mip_dimensions_u32 :: proc(texture_dimensions: [3]u32, mip_level: u32) -> [3]u32
 {
     return {
