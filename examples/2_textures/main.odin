@@ -54,9 +54,9 @@ main :: proc()
         gpu.shader_destroy(frag_shader)
     }
 
-    texture_heap := gpu.mem_alloc_raw(gpu.get_texture_view_descriptor_size(), 65536, 64, alloc_type = .Descriptors)
+    texture_heap := gpu.mem_alloc_raw(gpu.texture_view_descriptor_size(), 65536, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(texture_heap)
-    sampler_heap := gpu.mem_alloc_raw(gpu.get_sampler_descriptor_size(), 10, 64, alloc_type = .Descriptors)
+    sampler_heap := gpu.mem_alloc_raw(gpu.sampler_descriptor_size(), 10, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(sampler_heap)
 
     Vertex :: struct { pos: [3]f32, uv: [2]f32 }

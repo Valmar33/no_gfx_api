@@ -1402,17 +1402,17 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
     return desc
 }
 
-_get_texture_view_descriptor_size :: proc() -> u32
+_texture_view_descriptor_size :: proc() -> u32
 {
     return ctx.texture_desc_size
 }
 
-_get_texture_rw_view_descriptor_size :: proc() -> u32
+_texture_rw_view_descriptor_size :: proc() -> u32
 {
     return ctx.texture_rw_desc_size
 }
 
-_get_sampler_descriptor_size :: proc() -> u32
+_sampler_descriptor_size :: proc() -> u32
 {
     return ctx.sampler_desc_size
 }
@@ -1710,7 +1710,7 @@ _bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
     return desc
 }
 
-_get_bvh_descriptor_size :: proc() -> u32
+_bvh_descriptor_size :: proc() -> u32
 {
     return ctx.bvh_desc_size
 }

@@ -133,17 +133,17 @@ main :: proc() {
 
 	// Set up texture heap
 	texture_heap := gpu.mem_alloc_raw(
-		gpu.get_texture_view_descriptor_size(),
+		gpu.texture_view_descriptor_size(),
 		2048,
 		64,
 		alloc_type = .Descriptors,
 	)
 	defer gpu.mem_free_raw(texture_heap)
-	sampler_heap := gpu.mem_alloc_raw(gpu.get_texture_view_descriptor_size(), 10, 64, alloc_type = .Descriptors)
+	sampler_heap := gpu.mem_alloc_raw(gpu.texture_view_descriptor_size(), 10, 64, alloc_type = .Descriptors)
 	defer gpu.mem_free_raw(sampler_heap)
 
 	// Set up read-write texture heap for G-buffer textures
-	texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
+	texture_rw_heap_size := gpu.texture_rw_view_descriptor_size()
 	texture_rw_heap := gpu.mem_alloc_raw(texture_rw_heap_size, 2048, 64, alloc_type = .Descriptors)
 	defer gpu.mem_free_raw(texture_rw_heap)
 

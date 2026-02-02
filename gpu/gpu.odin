@@ -248,9 +248,9 @@ texture_destroy: proc(texture: ^Texture) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
 texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_rw_view_descriptor
 sampler_descriptor: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor : _sampler_descriptor
-get_texture_view_descriptor_size: proc() -> u32 : _get_texture_view_descriptor_size
-get_texture_rw_view_descriptor_size: proc() -> u32 : _get_texture_rw_view_descriptor_size
-get_sampler_descriptor_size: proc() -> u32 : _get_sampler_descriptor_size
+texture_view_descriptor_size: proc() -> u32 : _texture_view_descriptor_size
+texture_rw_view_descriptor_size: proc() -> u32 : _texture_rw_view_descriptor_size
+sampler_descriptor_size: proc() -> u32 : _sampler_descriptor_size
 
 // Shaders
 shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main") -> Shader : _shader_create
@@ -279,7 +279,7 @@ bvh_create :: proc { blas_create, tlas_create }
 bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
 bvh_root_ptr: proc(bvh: BVH) -> rawptr : _bvh_root_ptr
 bvh_descriptor: proc(bvh: BVH) -> BVH_Descriptor : _bvh_descriptor
-get_bvh_descriptor_size: proc() -> u32 : _get_bvh_descriptor_size
+bvh_descriptor_size: proc() -> u32 : _bvh_descriptor_size
 bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
 
 // Command buffer
@@ -532,28 +532,28 @@ texture_free_and_destroy :: proc(texture: ^Owned_Texture)
 
 set_texture_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Texture_Descriptor)
 {
-    desc_size := #force_inline get_texture_view_descriptor_size()
+    desc_size := #force_inline texture_view_descriptor_size()
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
 set_texture_rw_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Texture_Descriptor)
 {
-    desc_size := #force_inline get_texture_rw_view_descriptor_size()
+    desc_size := #force_inline texture_rw_view_descriptor_size()
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
 set_sampler_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Sampler_Descriptor)
 {
-    desc_size := #force_inline get_sampler_descriptor_size()
+    desc_size := #force_inline sampler_descriptor_size()
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
 set_bvh_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: BVH_Descriptor)
 {
-    desc_size := #force_inline get_bvh_descriptor_size()
+    desc_size := #force_inline bvh_descriptor_size()
     tmp := desc
     runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }

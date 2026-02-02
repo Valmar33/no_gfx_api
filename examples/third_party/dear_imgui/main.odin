@@ -76,10 +76,10 @@ main :: proc()
         gpu.mem_free(indices_local)
     }
 
-    texture_heap_size := gpu.get_texture_rw_view_descriptor_size()
+    texture_heap_size := gpu.texture_rw_view_descriptor_size()
     texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(texture_heap)
-    sampler_heap_size := gpu.get_sampler_descriptor_size()
+    sampler_heap_size := gpu.sampler_descriptor_size()
     sampler_heap := gpu.mem_alloc_raw(sampler_heap_size, 10, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(sampler_heap)
 

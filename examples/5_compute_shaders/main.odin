@@ -79,7 +79,7 @@ main :: proc()
     sampler_id := u32(0)
 
     // Allocate texture heap for compute shader
-    texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
+    texture_rw_heap_size := gpu.texture_rw_view_descriptor_size()
     texture_rw_heap := gpu.mem_alloc_raw(texture_rw_heap_size, 10, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(texture_rw_heap)
     gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
@@ -88,7 +88,8 @@ main :: proc()
     texture_desc := gpu.texture_view_descriptor(output_texture, { format = .RGBA8_Unorm })
 
     // Allocate texture heap for fragment shader
-    texture_heap := gpu.mem_alloc_raw(size_of(gpu.Texture_Descriptor), 65536, 64, alloc_type = .Descriptors)
+    texture_heap_size := gpu.texture_rw_view_descriptor_size()
+    texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(texture_heap)
     gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
 
