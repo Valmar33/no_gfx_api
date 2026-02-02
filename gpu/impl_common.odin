@@ -66,8 +66,9 @@ pool_get :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_
     return el.info
 }
 
-// "@deferred_in" can't be used with generics...
-pool_get_mut_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^Info_T
+// To be used like this:
+// if resource, lock := pool_get_mut(&pool, handle); sync.guard(lock)
+pool_get_mut :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> (^Info_T, ^sync.Benaphore)
 {
     assert(init)
     assert(handle != {})
@@ -76,22 +77,9 @@ pool_get_mut_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle
     block_idx, el_idx := pool_get_idx(key.idx)
 
     el := &blocks[block_idx].res[el_idx]
-    assert(key.gen == el.gen)
-    sync.lock(&blocks[block_idx].res[el_idx].lock)
-    return &el.info
-}
-
-pool_get_mut_unlock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
-{
-    assert(init)
-    assert(handle != {})
-    key := transmute(Resource_Key) handle
-
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := blocks[block_idx].res[el_idx]
-    assert(key.gen == el.gen)
-    sync.unlock(&blocks[block_idx].res[el_idx].lock)
+    el_gen := intr.volatile_load(&el.gen)
+    assert(key.gen == el_gen)
+    return &el.info, &blocks[block_idx].res[el_idx].lock
 }
 
 pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T) -> Handle_T

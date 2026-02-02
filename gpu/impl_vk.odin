@@ -994,9 +994,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
             vk_check(vk.EndCommandBuffer(vk_cmd_buf))
         }
 
-        {
-            cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-            defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        if cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
             cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue_type].val, 1) + 1
         }
 
@@ -1334,8 +1332,7 @@ _texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
 @(private="file")
 get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateInfo) -> vk.ImageView
 {
-    tex_info := pool_get_mut_lock(&ctx.textures, texture)
-    defer pool_get_mut_unlock(&ctx.textures, texture)
+    tex_info, r_lock := pool_get_mut(&ctx.textures, texture); sync.guard(r_lock)
 
     for view in tex_info.views
     {
@@ -1612,8 +1609,7 @@ _shader_destroy :: proc(shader: Shader)
     // Remove from any command buffer tracking
     for cmd_buf in shader_info.command_buffers
     {
-        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
         cmd_buf_info.compute_shader = {}
     }
 
@@ -1867,8 +1863,7 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
         vk_submit_cmd_buf(cmd_buf, vk_signal_sem, signal_value)
 
         // Clear compute shader tracking for this command buffer
-        cmd_buf_info_mut := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+        cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
         cmd_buf_info_mut.compute_shader = {}
     }
 }
@@ -2239,8 +2234,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     shader_info := pool_get(&ctx.shaders, compute_shader)
     vk_shader_info := shader_info.handle
 
-    cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-    defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+    cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
     vk_cmd_buf := cmd_buf_info.handle
 
     shader_stages := []vk.ShaderStageFlags { { .COMPUTE } }
@@ -2839,8 +2833,7 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 
     // Check whether there is a free command buffer available with a timeline value that is less than or equal to the current semaphore value
     if handle, ok := priority_queue.pop_safe(&tls_ctx.free_buffers[queue]); ok {
-        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, handle.pool_handle)
-        defer pool_get_mut_unlock(&ctx.command_buffers, handle.pool_handle)
+        cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, handle.pool_handle); sync.guard(r_lock)
 
         ensure(cmd_buf_info.recording == false, "Command buffer on the free list is still recording")
 
@@ -2881,9 +2874,8 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
     vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &cmd_buf_info.handle))
 
     cmd_buf := pool_add(&ctx.command_buffers, cmd_buf_info)
+    if cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
     {
-        cmd_buf_info_mut := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
         cmd_buf_info_mut.pool_handle = cmd_buf
         append(&tls_ctx.buffers[queue], cmd_buf_info_mut.pool_handle)
     }
@@ -2895,11 +2887,8 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 vk_submit_cmd_buf :: proc(cmd_buf: Command_Buffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
 {
     tls_ctx := get_tls()
-
-    {
-        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
-        cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue].val, 1) + 1
+    if cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
+        cmd_buf_info_mut.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info_mut.queue].val, 1) + 1
     }
 
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2943,9 +2932,7 @@ recycle_cmd_buf :: proc(cmd_buf: Command_Buffer)
 {
     tls_ctx := get_tls()
 
-    {
-        cmd_buf_info := pool_get_mut_lock(&ctx.command_buffers, cmd_buf)
-        defer pool_get_mut_unlock(&ctx.command_buffers, cmd_buf)
+    if cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
         cmd_buf_info.recording = false
     }
 
