@@ -82,6 +82,20 @@ pool_get_mut :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Han
     return &el.info, &blocks[block_idx].res[el_idx].lock
 }
 
+pool_get_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^sync.Benaphore
+{
+    assert(init)
+    assert(handle != {})
+    key := transmute(Resource_Key) handle
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := &blocks[block_idx].res[el_idx]
+    el_gen := intr.volatile_load(&el.gen)
+    assert(key.gen == el_gen)
+    return &blocks[block_idx].res[el_idx].lock
+}
+
 pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T) -> Handle_T
 {
     assert(init)

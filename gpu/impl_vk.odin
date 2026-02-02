@@ -85,7 +85,6 @@ Context :: struct
     // Resource pools
     queues: [Queue]Queue_Info,  // Reserve slot 0 for invalid queue.
     textures: Resource_Pool(Texture_Handle, Texture_Info),
-    samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
     bvhs: Resource_Pool(BVH, BVH_Info),
     shaders: Resource_Pool(Shader, Shader_Info),
     command_buffers: Resource_Pool(Command_Buffer, Command_Buffer_Info),
@@ -120,6 +119,7 @@ Thread_Local_Context :: struct
     pools: [Queue]vk.CommandPool,
     buffers: [Queue][dynamic]Command_Buffer,
     free_buffers: [Queue]priority_queue.Priority_Queue(Free_Command_Buffer),
+    samplers: [dynamic]Sampler_Info,  // Samplers are interned but have permanent lifetime
 }
 
 @(private="file")
@@ -798,16 +798,17 @@ _cleanup :: proc()
                     delete(tls_context.buffers[type])
                 }
 
+                for sampler in tls_context.samplers
+                {
+                    vk.DestroySampler(ctx.device, sampler.sampler, nil)
+                }
+
                 free(tls_context)
             }
         }
 
         delete(ctx.tls_contexts)
         ctx.tls_contexts = {}
-    }
-
-    for &sampler in ctx.samplers {
-        vk.DestroySampler(ctx.device, sampler.sampler, nil)
     }
 
     destroy_swapchain(&ctx.swapchain)
@@ -1351,9 +1352,9 @@ get_or_add_image_view :: proc(texture: Texture_Handle, info: vk.ImageViewCreateI
 @(private="file")
 get_or_add_sampler :: proc(info: vk.SamplerCreateInfo) -> vk.Sampler
 {
-    sync.guard(&ctx.lock)
+    tls := get_tls()
 
-    for sampler in ctx.samplers
+    for sampler in tls.samplers
     {
         if sampler.info == info {
             return sampler.sampler
@@ -1363,7 +1364,7 @@ get_or_add_sampler :: proc(info: vk.SamplerCreateInfo) -> vk.Sampler
     sampler: vk.Sampler
     sampler_ci := info
     vk_check(vk.CreateSampler(ctx.device, &sampler_ci, nil, &sampler))
-    append(&ctx.samplers, Sampler_Info { info, sampler })
+    append(&tls.samplers, Sampler_Info { info, sampler })
     return sampler
 }
 
