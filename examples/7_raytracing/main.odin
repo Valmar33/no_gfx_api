@@ -232,6 +232,7 @@ main :: proc()
         total_time += delta_time
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
+        gpu.arena_free_all(frame_arena)
 
         old_camera_to_world := camera_to_world
         camera_to_world := linalg.inverse(shared.first_person_camera_view(delta_time))
@@ -292,8 +293,6 @@ main :: proc()
 
         gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
-
-        gpu.arena_free_all(frame_arena)
         accum_counter += 1
     }
 

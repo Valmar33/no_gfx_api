@@ -308,6 +308,8 @@ main :: proc() {
 				)
 		}
 
+		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
+
 		last_ts := now_ts
 		now_ts = sdl.GetPerformanceCounter()
 		delta_time := min(
@@ -326,8 +328,7 @@ main :: proc() {
 		)
 
 		frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
-
-		swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
+		gpu.arena_free_all(frame_arena)
 
 		cmd_buf := gpu.commands_begin(.Main)
 
@@ -371,8 +372,6 @@ main :: proc() {
 
 		gpu.swapchain_present(.Main, frame_sem, next_frame)
 		next_frame += 1
-
-		gpu.arena_free_all(frame_arena)
 	}
 
 	gpu.wait_idle()

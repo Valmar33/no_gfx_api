@@ -191,14 +191,15 @@ main :: proc()
             gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
         }
 
+        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
+
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
         delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
         total_time += delta_time
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
-
-        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
+        gpu.arena_free_all(frame_arena)
 
         // Allocate compute data for this frame with current time and resolution
         compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
@@ -262,8 +263,6 @@ main :: proc()
 
         gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
-
-        gpu.arena_free_all(frame_arena)
     }
 
     gpu.wait_idle()
