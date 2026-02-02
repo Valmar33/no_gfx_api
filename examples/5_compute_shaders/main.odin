@@ -69,8 +69,8 @@ main :: proc()
         format = .RGBA8_Unorm,
         usage = { .Storage, .Sampled },
     }
-    output_texture := gpu.alloc_and_create_texture(output_desc)
-    defer gpu.free_and_destroy_texture(&output_texture)
+    output_texture := gpu.texture_alloc_and_create(output_desc)
+    defer gpu.texture_free_and_destroy(&output_texture)
 
     // Create texture descriptor for RW access (compute shader)
     texture_rw_desc := gpu.texture_rw_view_descriptor(output_texture, {})
@@ -80,30 +80,26 @@ main :: proc()
 
     // Allocate texture heap for compute shader
     texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
-    texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size), alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_rw_heap)
+    texture_rw_heap := gpu.mem_alloc_raw(texture_rw_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_rw_heap)
     gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
-    texture_rw_heap_gpu := gpu.host_to_device_ptr(texture_rw_heap)
 
     // Create texture descriptor for sampled access (fragment shader)
     texture_desc := gpu.texture_view_descriptor(output_texture, { format = .RGBA8_Unorm })
 
     // Allocate texture heap for fragment shader
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_heap)
+    texture_heap := gpu.mem_alloc_raw(size_of(gpu.Texture_Descriptor), 65536, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_heap)
     gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
 
     // Create sampler
-    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
-    defer gpu.mem_free(sampler_heap)
+    sampler_heap := gpu.mem_alloc_raw(size_of(gpu.Sampler_Descriptor), 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(sampler_heap)
     gpu.set_sampler_desc(sampler_heap, sampler_id, gpu.sampler_descriptor({}))
 
     // Indirect dispatch command (group counts)
-    indirect_dispatch_command_ptr: rawptr
-    indirect_dispatch_command_cpu_mem: []gpu.Dispatch_Indirect_Command
-    indirect_dispatch_command_cpu_mem = gpu.mem_alloc_typed(gpu.Dispatch_Indirect_Command, 1)
-    indirect_dispatch_command_ptr = gpu.host_to_device_ptr(raw_data(indirect_dispatch_command_cpu_mem))
-    defer gpu.mem_free_typed(indirect_dispatch_command_cpu_mem)
+    indirect_dispatch_command := gpu.mem_alloc(gpu.Dispatch_Indirect_Command)
+    defer gpu.mem_free(indirect_dispatch_command)
 
     Compute_Data :: struct {
         output_texture_id: u32,
@@ -117,7 +113,7 @@ main :: proc()
     defer gpu.arena_destroy(&arena)
 
     // Create fullscreen quad
-    verts := gpu.arena_alloc_array(&arena, Vertex, 4)
+    verts := gpu.arena_alloc(&arena, Vertex, 4)
     verts.cpu[0].pos = { -1.0,  1.0, 0.0 }  // Top-left
     verts.cpu[1].pos = {  1.0, -1.0, 0.0 }  // Bottom-right
     verts.cpu[2].pos = {  1.0,  1.0, 0.0 }  // Top-right
@@ -127,7 +123,7 @@ main :: proc()
     verts.cpu[2].uv  = {  1.0,  0.0 }
     verts.cpu[3].uv  = {  0.0,  1.0 }
 
-    indices := gpu.arena_alloc_array(&arena, u32, 6)
+    indices := gpu.arena_alloc(&arena, u32, 6)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
@@ -135,16 +131,16 @@ main :: proc()
     indices.cpu[4] = 1
     indices.cpu[5] = 3
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 4)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 6)
+    verts_local := gpu.mem_alloc(Vertex, 4, .GPU)
+    indices_local := gpu.mem_alloc(u32, 6, .GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(indices.cpu))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(.Main, { upload_cmd_buf })
 
@@ -181,8 +177,8 @@ main :: proc()
 
             output_desc.dimensions.x = u32(window_size_x)
             output_desc.dimensions.y = u32(window_size_y)
-            gpu.free_and_destroy_texture(&output_texture)
-            output_texture = gpu.alloc_and_create_texture(output_desc)
+            gpu.texture_free_and_destroy(&output_texture)
+            output_texture = gpu.texture_alloc_and_create(output_desc)
 
             // Update descriptor for new texture
             texture_desc = gpu.texture_view_descriptor(output_texture, {})
@@ -210,7 +206,7 @@ main :: proc()
         cmd_buf := gpu.commands_begin(.Main)
 
         // Dispatch compute shader to write to texture
-        gpu.cmd_set_desc_heap(cmd_buf, nil, texture_rw_heap_gpu, nil, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, {}, texture_rw_heap, {}, {})
         gpu.cmd_set_compute_shader(cmd_buf, compute_shader)
 
         num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
@@ -218,13 +214,13 @@ main :: proc()
         num_groups_z := u32(1)
 
         if Use_Indirect {
-            indirect_dispatch_command_cpu_mem[0] = gpu.Dispatch_Indirect_Command {
+            indirect_dispatch_command.cpu^ = gpu.Dispatch_Indirect_Command {
                 num_groups_x,
                 num_groups_y,
                 num_groups_z,
             }
 
-            gpu.cmd_dispatch_indirect(cmd_buf, compute_data.gpu, indirect_dispatch_command_ptr)
+            gpu.cmd_dispatch_indirect(cmd_buf, compute_data.gpu, indirect_dispatch_command)
         } else {
             gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
         }
@@ -239,15 +235,13 @@ main :: proc()
             }
         })
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-        textures := gpu.host_to_device_ptr(texture_heap)
-        samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, texture_heap, {}, sampler_heap, {})
 
         Vert_Data :: struct {
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
+        verts_data.cpu.verts = verts_local.gpu.ptr
 
         Frag_Data :: struct {
             texture_id: u32,

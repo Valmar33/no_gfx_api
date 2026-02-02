@@ -34,29 +34,7 @@ Compute_Shader_Push_Constants :: struct #packed {
 }
 
 @(private="file")
-GPU_Alloc_Meta :: struct #all_or_none
-{
-    buf_handle: vk.Buffer,
-    allocation: vma.Allocation,
-    device_address: vk.DeviceAddress,
-    align: u32,
-    buf_size: vk.DeviceSize,
-    alloc_type: Allocation_Type,
-}
-
-@(private="file")
-Alloc_Range :: struct
-{
-    ptr: u64,
-    size: u32,
-}
-
-@(private="file")
-Timeline :: struct
-{
-    sem: vk.Semaphore,
-    val: u64,
-}
+Alloc_Handle :: distinct Handle
 
 @(private="file")
 Context :: struct
@@ -70,19 +48,13 @@ Context :: struct
     vma_allocator: vma.Allocator,
     physical_properties: Physical_Properties,
 
-    // Allocations
-    gpu_allocs: [dynamic]GPU_Alloc_Meta,
-    // TODO: freelist of gpu allocs
-    cpu_ptr_to_alloc: map[rawptr]u32,  // Each entry has an index to its corresponding GPU allocation
-    gpu_ptr_to_alloc: map[rawptr]u32,  // From base GPU allocation pointer to metadata
-    alloc_tree: rbt.Tree(Alloc_Range, u32),
-
     // Common resources
     desc_layouts: [dynamic]vk.DescriptorSetLayout,
     common_pipeline_layout_graphics: vk.PipelineLayout,
     common_pipeline_layout_compute: vk.PipelineLayout,
 
     // Resource pools
+    allocs: Resource_Pool(Alloc_Handle, Alloc_Info),
     queues: [Queue]Queue_Info,  // Reserve slot 0 for invalid queue.
     textures: Resource_Pool(Texture_Handle, Texture_Info),
     bvhs: Resource_Pool(BVH, BVH_Info),
@@ -146,6 +118,25 @@ Key :: struct
     idx: u64
 }
 #assert(size_of(Key) == 8)
+
+@(private="file")
+Alloc_Info :: struct
+{
+    buf_handle: vk.Buffer,
+    allocation: vma.Allocation,
+    cpu: rawptr,
+    gpu: rawptr,
+    align: u32,
+    buf_size: vk.DeviceSize,
+    alloc_type: Allocation_Type,
+}
+
+@(private="file")
+Timeline :: struct
+{
+    sem: vk.Semaphore,
+    val: u64,
+}
 
 @(private="file")
 Texture_Info :: struct
@@ -636,26 +627,11 @@ _init :: proc()
     }
 
     // Resource pools
+    pool_init(&ctx.allocs)
     pool_init(&ctx.textures)
     pool_init(&ctx.bvhs)
     pool_init(&ctx.shaders)
     pool_init(&ctx.command_buffers)
-
-    // Tree init
-    rbt.init_cmp(&ctx.alloc_tree, proc(range_a: Alloc_Range, range_b: Alloc_Range) -> rbt.Ordering {
-        // NOTE: When searching, Alloc_Range { ptr, 0 } is used.
-        diff_ba := int(range_b.ptr) - int(range_a.ptr)
-        diff_ab := int(range_a.ptr) - int(range_b.ptr)
-        if diff_ba >= 0 && diff_ba < int(range_a.size) {
-            return .Equal
-        } else if diff_ab >= 0 && diff_ab < int(range_b.size) {
-            return .Equal
-        } else if range_a.ptr < range_b.ptr {
-            return .Less
-        } else {
-            return .Greater
-        }
-    })
 
     // VMA allocator
     vma_vulkan_procs := vma.create_vulkan_functions()
@@ -1064,8 +1040,10 @@ _features_available :: proc() -> Features
 
 // Memory
 
-_mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr
+_mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> ptr
 {
+    bytes := el_size * el_count
+
     vma_usage: vma.Memory_Usage
     properties: vk.MemoryPropertyFlags
     switch mem_type
@@ -1119,7 +1097,7 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
     mem_requirements: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(ctx.device, buf, &mem_requirements)
 
-    mem_requirements.alignment = vk.DeviceSize(max(u64(mem_requirements.alignment), align))
+    mem_requirements.alignment = vk.DeviceSize(max(i64(mem_requirements.alignment), align))
 
     alloc_ci := vma.Allocation_Create_Info {
         flags = vma.Allocation_Create_Flags { .Mapped } if mem_type != .GPU else {},
@@ -1127,104 +1105,64 @@ _mem_alloc :: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc
         required_flags = properties,
     }
     alloc: vma.Allocation
-    alloc_info: vma.Allocation_Info
-    vk_check(vma.allocate_memory(ctx.vma_allocator, mem_requirements, alloc_ci, &alloc, &alloc_info))
+    vma_alloc_info: vma.Allocation_Info
+    vk_check(vma.allocate_memory(ctx.vma_allocator, mem_requirements, alloc_ci, &alloc, &vma_alloc_info))
 
     vk_check(vma.bind_buffer_memory(ctx.vma_allocator, alloc, buf))
+
+    p: ptr
+    if mem_type != .GPU do p.cpu = vma_alloc_info.mapped_data
 
     info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
         buffer = buf
     }
     addr := vk.GetBufferDeviceAddress(ctx.device, &info)
-    addr_ptr := cast(rawptr) cast(uintptr) addr
+    p.gpu.ptr = cast(rawptr) cast(uintptr) addr
 
-    sync.guard(&ctx.lock)
-    append(&ctx.gpu_allocs, GPU_Alloc_Meta {
+    alloc_info := Alloc_Info {
         allocation = alloc,
         buf_handle = buf,
-        device_address = addr,
+        cpu = p.cpu,
+        gpu = p.gpu.ptr,
         align = u32(align),
         buf_size = cast(vk.DeviceSize) bytes,
         alloc_type = alloc_type,
-    })
-    gpu_alloc_idx := u32(len(ctx.gpu_allocs)) - 1
-    ctx.gpu_ptr_to_alloc[addr_ptr] = gpu_alloc_idx
-    rbt.find_or_insert(&ctx.alloc_tree, Alloc_Range { u64(addr), u32(bytes) }, gpu_alloc_idx)
-
-    if mem_type != .GPU
-    {
-        ptr := alloc_info.mapped_data
-        ctx.cpu_ptr_to_alloc[ptr] = gpu_alloc_idx
-        return ptr
     }
-
-    return rawptr(uintptr(addr))
+    alloc_handle := pool_add(&ctx.allocs, alloc_info)
+    p.gpu._impl[0] = u64(uintptr(alloc_handle))
+    return p
 }
 
-_mem_free :: proc(ptr: rawptr, loc := #caller_location)
+_mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64) -> ptr
 {
-    sync.guard(&ctx.lock)
-    cpu_alloc, cpu_found := ctx.cpu_ptr_to_alloc[ptr]
-    gpu_alloc, gpu_found := ctx.gpu_ptr_to_alloc[ptr]
-    if !cpu_found && !gpu_found
-    {
-        log.error("Attempting to free a pointer which is not allocated.", location = loc)
-        return
-    }
-
-    if cpu_found
-    {
-        meta := ctx.gpu_allocs[cpu_alloc]
-        rbt.remove_key(&ctx.alloc_tree, Alloc_Range { u64(meta.device_address), u32(meta.buf_size) })
-        vma.destroy_buffer(ctx.vma_allocator, meta.buf_handle, meta.allocation)
-        delete_key(&ctx.cpu_ptr_to_alloc, ptr)
-    }
-    else if gpu_found
-    {
-        meta := ctx.gpu_allocs[gpu_alloc]
-        rbt.remove_key(&ctx.alloc_tree, Alloc_Range { u64(meta.device_address), u32(meta.buf_size) })
-        vma.destroy_buffer(ctx.vma_allocator, meta.buf_handle, meta.allocation)
-        delete_key(&ctx.gpu_ptr_to_alloc, ptr)
-    }
+    // TODO: Add suballocation to a suballocation list in allocs.
+    // This lets us do bounds checking on arena allocated pointers for example.
+    suballoc_p := p
+    ptr_apply_offset(&suballoc_p, offset)
+    return suballoc_p
 }
 
-_host_to_device_ptr :: proc(ptr: rawptr) -> rawptr
+_mem_free_raw :: proc(p: gpuptr, loc := #caller_location)
 {
-    // We could do a tree search here but that would be more expensive
-    sync.guard(&ctx.lock)
-
-    meta_idx, found := ctx.cpu_ptr_to_alloc[ptr]
-    if !found
-    {
-        log.error("Attempting to get the device pointer of a host pointer which is not allocated. Note: The pointer passed to this function must be a base allocation pointer.")
-        return {}
-    }
-
-    meta := ctx.gpu_allocs[meta_idx]
-    return rawptr(uintptr(meta.device_address))
+    alloc := transmute(Alloc_Handle) p._impl[0]
+    alloc_info := pool_get(&ctx.allocs, alloc)
+    vma.destroy_buffer(ctx.vma_allocator, alloc_info.buf_handle, alloc_info.allocation)
+    pool_remove(&ctx.allocs, alloc)
 }
 
 // Textures
-_texture_create :: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
+_texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
 {
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
     queue_to_use := queue
 
-    alloc_idx, ok_s := search_alloc_from_gpu_ptr(storage)
-    if !ok_s
-    {
-        log.error("Address does not reside in allocated GPU memory.")
-        return {}
-    }
-    sync.lock(&ctx.lock)
-    alloc := ctx.gpu_allocs[alloc_idx]
-    sync.unlock(&ctx.lock)
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) storage._impl[0])
 
     image: vk.Image
-    offset := uintptr(storage) - uintptr(alloc.device_address)
-    vk_check(vma.create_aliasing_image2(ctx.vma_allocator, alloc.allocation, vk.DeviceSize(offset), {
+    offset := uintptr(storage.ptr) - uintptr(alloc_info.gpu)
+    vk_check(vma.create_aliasing_image2(ctx.vma_allocator, alloc_info.allocation, vk.DeviceSize(offset), {
         sType = .IMAGE_CREATE_INFO,
         imageType = to_vk_texture_type(desc.type),
         format = to_vk_texture_format(desc.format),
@@ -1664,9 +1602,9 @@ _blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
     return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 16
 }
 
-_blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
+_blas_create :: proc(desc: BLAS_Desc, storage: gpuptr) -> BVH
 {
-    storage_buf, storage_offset, ok_s := compute_buf_offset_from_gpu_ptr(storage)
+    storage_buf, storage_offset, ok_s := get_buf_offset_from_gpu_ptr(storage)
     if !ok_s
     {
         log.error("Alloc not found.")
@@ -1690,7 +1628,7 @@ _blas_create :: proc(desc: BLAS_Desc, storage: rawptr) -> BVH
     new_desc.shapes = cloned_shapes[:]
     bvh_info := BVH_Info {
         handle = bvh_handle,
-        mem = storage,
+        mem = storage.ptr,
         is_blas = true,
         shapes = cloned_shapes,
         blas_desc = desc,
@@ -1708,9 +1646,9 @@ _tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
     return u64(get_vk_tlas_size_info(desc).accelerationStructureSize), 1
 }
 
-_tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
+_tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr) -> BVH
 {
-    storage_buf, storage_offset, ok_s := compute_buf_offset_from_gpu_ptr(storage)
+    storage_buf, storage_offset, ok_s := get_buf_offset_from_gpu_ptr(storage)
     if !ok_s
     {
         log.error("Alloc not found.")
@@ -1731,7 +1669,7 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: rawptr) -> BVH
 
     bvh_info := BVH_Info {
         handle = bvh_handle,
-        mem = storage,
+        mem = storage.ptr,
         is_blas = false,
         tlas_desc = desc
     }
@@ -1871,12 +1809,12 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 // Commands
 
-_cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64)
+_cmd_mem_copy_raw :: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64)
 {
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
 
-    src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
-    dst_buf, dst_offset, ok_d := compute_buf_offset_from_gpu_ptr(dst)
+    src_buf, src_offset, ok_s := get_buf_offset_from_gpu_ptr(src)
+    dst_buf, dst_offset, ok_d := get_buf_offset_from_gpu_ptr(dst)
     if !ok_s || !ok_d
     {
         log.error("Alloc not found.")
@@ -1894,7 +1832,7 @@ _cmd_mem_copy :: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes:
 }
 
 // TODO: dst is ignored atm.
-_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr)
+_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
@@ -1903,7 +1841,7 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
 
     vk_image := tex_info.handle
 
-    src_buf, src_offset, ok_s := compute_buf_offset_from_gpu_ptr(src)
+    src_buf, src_offset, ok_s := get_buf_offset_from_gpu_ptr(src)
     if !ok_s {
         log.error("Alloc not found.")
         return
@@ -1984,7 +1922,7 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
     vk.CmdBlitImage(cmd_buf_info.handle, src_info.handle, .GENERAL, dst_info.handle, .GENERAL, u32(len(regions)), raw_data(regions), vk_filter)
 }
 
-_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr)
+_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -1992,13 +1930,14 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
 
     vk_cmd_buf := cmd_buf.handle
 
-    if textures == nil && textures_rw == nil && samplers == nil && bvhs != nil do return
+    if textures == {} && textures_rw == {} && samplers == {} && bvhs != {} do return
 
     // Check pointers. Drivers are currently not very good at recovering from situations
     // like this (e.g. on my setup, the whole desktop freezes for 10 seconds) so we try
     // to catch these at the API level if possible.
+    when false  // TODO: Reintroduce these with proper validation code
     {
-        if textures != nil
+        if textures != {}
         {
             alloc, ok_s := search_alloc_from_gpu_ptr(textures)
             if !ok_s {
@@ -2011,7 +1950,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
                 return
             }
         }
-        if textures_rw != nil
+        if textures_rw != {}
         {
             alloc, ok_s := search_alloc_from_gpu_ptr(textures_rw)
             if !ok_s {
@@ -2024,7 +1963,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
                 return
             }
         }
-        if samplers != nil
+        if samplers != {}
         {
             alloc, ok_s := search_alloc_from_gpu_ptr(samplers)
             if !ok_s {
@@ -2037,7 +1976,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
                 return
             }
         }
-        if bvhs != nil
+        if bvhs != {}
         {
             alloc, ok_s := search_alloc_from_gpu_ptr(bvhs)
             if !ok_s {
@@ -2054,38 +1993,38 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
     infos: [4]vk.DescriptorBufferBindingInfoEXT
     // Fill in infos with the subset of valid pointers
     cursor := u32(0)
-    if textures != nil
+    if textures != {}
     {
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-            address = transmute(vk.DeviceAddress) textures,
+            address = transmute(vk.DeviceAddress) textures.ptr,
             usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
-    if textures_rw != nil
+    if textures_rw != {}
     {
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-            address = transmute(vk.DeviceAddress) textures_rw,
+            address = transmute(vk.DeviceAddress) textures_rw.ptr,
             usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
-    if samplers != nil
+    if samplers != {}
     {
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-            address = transmute(vk.DeviceAddress) samplers,
+            address = transmute(vk.DeviceAddress) samplers.ptr,
             usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
     }
-    if bvhs != nil
+    if bvhs != {}
     {
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-            address = transmute(vk.DeviceAddress) bvhs,
+            address = transmute(vk.DeviceAddress) bvhs.ptr,
             usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
         }
         cursor += 1
@@ -2095,22 +2034,22 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
 
     buffer_offsets := []vk.DeviceSize { 0, 0, 0, 0 }
     cursor = 0
-    if textures != nil {
+    if textures != {} {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 0, 1, &cursor, &buffer_offsets[0])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 0, 1, &cursor, &buffer_offsets[0])
         cursor += 1
     }
-    if textures_rw != nil {
+    if textures_rw != {} {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 1, 1, &cursor, &buffer_offsets[1])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 1, 1, &cursor, &buffer_offsets[1])
         cursor += 1
     }
-    if samplers != nil {
+    if samplers != {} {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 2, 1, &cursor, &buffer_offsets[2])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 2, 1, &cursor, &buffer_offsets[2])
         cursor += 1
     }
-    if bvhs != nil {
+    if bvhs != {} {
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .GRAPHICS, ctx.common_pipeline_layout_graphics, 3, 1, &cursor, &buffer_offsets[3])
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 3, 1, &cursor, &buffer_offsets[3])
         cursor += 1
@@ -2246,7 +2185,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     cmd_buf_info.compute_shader = compute_shader
 }
 
-_cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
+_cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2261,7 +2200,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
     }
 
     push_constants := Compute_Shader_Push_Constants {
-        compute_data = compute_data,
+        compute_data = compute_data.ptr,
     }
 
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
@@ -2269,7 +2208,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_
     vk.CmdDispatch(vk_cmd_buf, num_groups_x, num_groups_y, num_groups_z)
 }
 
-_cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr)
+_cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2283,7 +2222,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
         return
     }
 
-    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(arguments)
+    arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found for indirect dispatch")
@@ -2291,7 +2230,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data: rawptr, ar
     }
 
     push_constants := Compute_Shader_Push_Constants {
-        compute_data = compute_data,
+        compute_data = compute_data.ptr,
     }
 
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_compute, { .COMPUTE }, 0, size_of(Compute_Shader_Push_Constants), &push_constants)
@@ -2414,14 +2353,14 @@ _cmd_end_render_pass :: proc(cmd_buf: Command_Buffer)
     vk.CmdEndRendering(vk_cmd_buf)
 }
 
-_cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                    indices: rawptr, index_count: u32, instance_count: u32 = 1)
+_cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
+                                    index_count: u32, instance_count: u32 = 1)
 {
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
 
     vk_cmd_buf := cmd_buf.handle
 
-    indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
+    indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
     if !ok_i
     {
         log.error("Indices alloc not found")
@@ -2429,8 +2368,8 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     }
 
     push_constants := Graphics_Shader_Push_Constants {
-        vert_data = vertex_data,
-        frag_data = fragment_data,
+        vert_data = vertex_data.ptr,
+        frag_data = fragment_data.ptr,
         indirect_data = nil,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
@@ -2439,8 +2378,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr
     vk.CmdDrawIndexed(vk_cmd_buf, index_count, instance_count, 0, 0, 0)
 }
 
-_cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                            indices: rawptr, indirect_arguments: rawptr)
+_cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices, indirect_arguments: gpuptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2448,14 +2386,14 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
 
     vk_cmd_buf := cmd_buf.handle
 
-    indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
+    indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
     if !ok_i
     {
         log.error("Indices alloc not found")
         return
     }
 
-    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(indirect_arguments)
+    arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(indirect_arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found")
@@ -2463,9 +2401,9 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     }
 
     push_constants := Graphics_Shader_Push_Constants {
-        vert_data = vertex_data,
-        frag_data = fragment_data,
-        indirect_data = indirect_arguments,
+        vert_data = vertex_data.ptr,
+        frag_data = fragment_data.ptr,
+        indirect_data = indirect_arguments.ptr,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
@@ -2473,28 +2411,28 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     vk.CmdDrawIndexedIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), 1, 0)
 }
 
-_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                    indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr)
+_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data_vertex, data_pixel, indices: gpuptr,
+                                                   indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr)
 {
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
 
     vk_cmd_buf := cmd_buf.handle
 
-    indices_buf, indices_offset, ok_i := compute_buf_offset_from_gpu_ptr(indices)
+    indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
     if !ok_i
     {
         log.error("Indices alloc not found")
         return
     }
 
-    arguments_buf, arguments_offset, ok_a := compute_buf_offset_from_gpu_ptr(indirect_arguments)
+    arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(indirect_arguments)
     if !ok_a
     {
         log.error("Arguments alloc not found")
         return
     }
 
-    draw_count_buf, draw_count_offset, ok_dc := compute_buf_offset_from_gpu_ptr(draw_count)
+    draw_count_buf, draw_count_offset, ok_dc := get_buf_offset_from_gpu_ptr(draw_count)
     if !ok_dc
     {
         log.error("Draw count alloc not found")
@@ -2505,9 +2443,9 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     // indirect_arguments points to the unified indirect data array containing both command and user data
     // The stride is the size of the combined struct { IndirectDrawCommand cmd; UserData data; }
     push_constants := Graphics_Shader_Push_Constants {
-        vert_data = data_vertex,
-        frag_data = data_pixel,
-        indirect_data = indirect_arguments,
+        vert_data = data_vertex.ptr,
+        frag_data = data_pixel.ptr,
+        indirect_data = indirect_arguments.ptr,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
 
@@ -2524,7 +2462,7 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     vk.CmdDrawIndexedIndirectCount(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), draw_count_buf, vk.DeviceSize(draw_count_offset), max_draw_count, stride)
 }
 
-_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape)
+_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2564,7 +2502,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 
     build_info := to_vk_blas_desc(bvh_info.blas_desc, arena = scratch)
     build_info.dstAccelerationStructure = bvh_info.handle
-    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage
+    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage.ptr
     assert(u32(len(shapes)) == build_info.geometryCount)
 
     range_infos := make([]vk.AccelerationStructureBuildRangeInfoKHR, len(shapes), allocator = scratch)
@@ -2601,7 +2539,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
     vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_infos_ptr)
 }
 
-_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr)
+_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage, instances: gpuptr)
 {
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
@@ -2620,11 +2558,11 @@ _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, 
 
     build_info := to_vk_tlas_desc(bvh_info.tlas_desc, arena = scratch)
     build_info.dstAccelerationStructure = bvh_info.handle
-    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage
+    build_info.scratchData.deviceAddress = transmute(vk.DeviceAddress) scratch_storage.ptr
     assert(build_info.geometryCount == 1)
 
     // Fill in actual data
-    build_info.pGeometries[0].geometry.instances.data.deviceAddress = transmute(vk.DeviceAddress) instances
+    build_info.pGeometries[0].geometry.instances.data.deviceAddress = transmute(vk.DeviceAddress) instances.ptr
 
     // Vulkan expects an array of pointers (to arrays), one pointer per BVH to build.
     // We always build one at a time, and a TLAS always has only one geometry.
@@ -2788,40 +2726,25 @@ Swapchain :: struct
     present_semaphores: []vk.Semaphore,
 }
 
-// NOTE: This is slow but unfortunately needed for some things. Vulkan
-// is still a "buffer object" centric API.
 @(private="file")
-search_alloc_from_gpu_ptr :: proc(ptr: rawptr) -> (res: u32, ok: bool)
+get_buf_offset_from_gpu_ptr :: proc(p: gpuptr) -> (buf: vk.Buffer, offset: u32, ok: bool)
 {
-    sync.guard(&ctx.lock)
-    alloc_idx, found := rbt.find_value(&ctx.alloc_tree, Alloc_Range { u64(uintptr(ptr)), 0 })
-    return alloc_idx, found
-}
+    if p == {} do return {}, {}, false
 
-@(private="file")
-compute_buf_offset_from_gpu_ptr :: proc(ptr: rawptr) -> (buf: vk.Buffer, offset: u32, ok: bool)
-{
-    alloc_idx, ok_s := search_alloc_from_gpu_ptr(ptr)
-    if !ok_s do return {}, {}, false
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) p._impl[0])
 
-    sync.guard(&ctx.lock)
-    alloc := ctx.gpu_allocs[alloc_idx]
-
-    buf = alloc.buf_handle
-    offset = u32(uintptr(ptr) - uintptr(alloc.device_address))
+    buf = alloc_info.buf_handle
+    offset = u32(uintptr(p.ptr) - uintptr(alloc_info.gpu))
     return buf, offset, true
 }
 
 @(private="file")
-get_buf_size_from_gpu_ptr :: proc(ptr: rawptr) -> (size: vk.DeviceSize, ok: bool)
+get_buf_size_from_gpu_ptr :: proc(p: gpuptr) -> (size: vk.DeviceSize, ok: bool)
 {
-    alloc_idx, ok_s := search_alloc_from_gpu_ptr(ptr)
-    if !ok_s do return 0, false
+    if p == {} do return {}, false
 
-    sync.guard(&ctx.lock)
-    // Get actual buffer size from metadata (not allocation size, which may be larger due to alignment)
-    alloc := ctx.gpu_allocs[alloc_idx]
-    return alloc.buf_size, true
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) p._impl[0])
+    return alloc_info.buf_size, true
 }
 
 // Command buffers

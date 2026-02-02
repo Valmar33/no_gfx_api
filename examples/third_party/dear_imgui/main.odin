@@ -56,7 +56,7 @@ main :: proc()
     upload_arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&upload_arena)
 
-    verts := gpu.arena_alloc_array(&upload_arena, Vertex, 3)
+    verts := gpu.arena_alloc(&upload_arena, Vertex, 3)
     verts.cpu[0].pos = { -0.5,  0.5, 0.0, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0, 0.0 }
@@ -64,28 +64,30 @@ main :: proc()
     verts.cpu[1].color = { 0.0, 1.0, 0.0, 0.0 }
     verts.cpu[2].color = { 0.0, 0.0, 1.0, 0.0 }
 
-    indices := gpu.arena_alloc_array(&upload_arena, u32, 3)
+    indices := gpu.arena_alloc(&upload_arena, u32, 3)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
+    verts_local := gpu.mem_alloc(Vertex, 3, .GPU)
+    indices_local := gpu.mem_alloc(u32, 3, .GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_heap)
-    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
-    defer gpu.mem_free(sampler_heap)
+    texture_heap_size := gpu.get_texture_rw_view_descriptor_size()
+    texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_heap)
+    sampler_heap_size := gpu.get_sampler_descriptor_size()
+    sampler_heap := gpu.mem_alloc_raw(sampler_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(sampler_heap)
 
     gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, 3)
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, 3)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(.Main, { upload_cmd_buf })
 
@@ -158,15 +160,13 @@ main :: proc()
 
         // Render triangle
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-        textures := gpu.host_to_device_ptr(texture_heap)
-        samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, texture_heap, {}, sampler_heap, {})
         Vert_Data :: struct {
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
-        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, indices_local, 3, 1)
+        verts_data.cpu.verts = verts_local.gpu.ptr
+        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, {}, indices_local, 3, 1)
 
         // Render ImGui on top
         draw_data := imgui.get_draw_data()

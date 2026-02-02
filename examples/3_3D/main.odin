@@ -58,8 +58,8 @@ main :: proc()
         sample_count = 1,
         usage = { .Depth_Stencil_Attachment },
     }
-    depth_texture := gpu.alloc_and_create_texture(depth_desc)
-    defer gpu.free_and_destroy_texture(&depth_texture)
+    depth_texture := gpu.texture_alloc_and_create(depth_desc)
+    defer gpu.texture_free_and_destroy(&depth_texture)
 
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
@@ -121,8 +121,8 @@ main :: proc()
             gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
             depth_desc.dimensions.x = u32(window_size_x)
             depth_desc.dimensions.y = u32(window_size_y)
-            gpu.free_and_destroy_texture(&depth_texture)
-            depth_texture = gpu.alloc_and_create_texture(depth_desc)
+            gpu.texture_free_and_destroy(&depth_texture)
+            depth_texture = gpu.texture_alloc_and_create(depth_desc)
         }
 
         swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
@@ -166,15 +166,15 @@ main :: proc()
             #assert(size_of(Vert_Data) == 8+8+64+64+64+64)
             verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
             verts_data.cpu^ = {
-                positions = mesh.pos,
-                normals = mesh.normals,
+                positions = mesh.pos.gpu.ptr,
+                normals = mesh.normals.gpu.ptr,
                 model_to_world = intr.matrix_flatten(instance.transform),
                 model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                 world_to_view = intr.matrix_flatten(world_to_view),
                 view_to_proj = intr.matrix_flatten(view_to_proj),
             }
 
-            gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, mesh.indices, mesh.idx_count, 1)
+            gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, {}, mesh.indices, mesh.idx_count, 1)
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
@@ -189,10 +189,10 @@ main :: proc()
 
 Mesh_GPU :: struct
 {
-    pos: rawptr,
-    normals: rawptr,
-    uvs: rawptr,
-    indices: rawptr,
+    pos: gpu.slice_t([4]f32),
+    normals: gpu.slice_t([4]f32),
+    uvs: gpu.slice_t([2]f32),
+    indices: gpu.slice_t(u32),
     idx_count: u32,
 }
 
@@ -201,25 +201,25 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     assert(len(mesh.pos) == len(mesh.normals))
     assert(len(mesh.pos) == len(mesh.uvs))
 
-    positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.pos))
-    normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.normals))
-    uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(mesh.uvs))
-    indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(mesh.indices))
+    positions_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.pos))
+    normals_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.normals))
+    uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.uvs))
+    indices_staging := gpu.arena_alloc(upload_arena, u32, len(mesh.indices))
     copy(positions_staging.cpu, mesh.pos[:])
     copy(normals_staging.cpu, mesh.normals[:])
     copy(uvs_staging.cpu, mesh.uvs[:])
     copy(indices_staging.cpu, mesh.indices[:])
 
     res: Mesh_GPU
-    res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.pos))
-    res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.normals))
-    res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(mesh.uvs))
-    res.indices = gpu.mem_alloc_typed_gpu(u32, len(mesh.indices))
+    res.pos = gpu.mem_alloc([4]f32, len(mesh.pos), gpu.Memory.GPU)
+    res.normals = gpu.mem_alloc([4]f32, len(mesh.normals), gpu.Memory.GPU)
+    res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), gpu.Memory.GPU)
+    res.indices = gpu.mem_alloc(u32, len(mesh.indices), gpu.Memory.GPU)
     res.idx_count = u32(len(mesh.indices))
-    gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(mesh.pos) * size_of(mesh.pos[0])))
-    gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(mesh.normals) * size_of(mesh.normals[0])))
-    gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(mesh.uvs) * size_of(mesh.uvs[0])))
-    gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(mesh.indices) * size_of(mesh.indices[0])))
+    gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging, len(mesh.pos))
+    gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging, len(mesh.normals))
+    gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging, len(mesh.uvs))
+    gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging, len(mesh.indices))
     return res
 }
 

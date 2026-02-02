@@ -89,8 +89,8 @@ main :: proc()
         format = .RGBA16_Float,
         usage = { .Storage, .Sampled },
     }
-    output_texture := gpu.alloc_and_create_texture(output_desc)
-    defer gpu.free_and_destroy_texture(&output_texture)
+    output_texture := gpu.texture_alloc_and_create(output_desc)
+    defer gpu.texture_free_and_destroy(&output_texture)
 
     // Create texture descriptor for RW access (compute shader)
     texture_rw_desc := gpu.texture_rw_view_descriptor(output_texture, {})
@@ -100,27 +100,29 @@ main :: proc()
 
     // Allocate texture heap for compute shader
     texture_rw_heap_size := gpu.get_texture_rw_view_descriptor_size()
-    texture_rw_heap := gpu.mem_alloc(u64(texture_rw_heap_size), alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_rw_heap)
+    texture_rw_heap := gpu.mem_alloc_raw(texture_rw_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_rw_heap)
     gpu.set_texture_rw_desc(texture_rw_heap, texture_id, texture_rw_desc)
-    texture_rw_heap_gpu := gpu.host_to_device_ptr(texture_rw_heap)
 
     // Create texture descriptor for sampled access (fragment shader)
     texture_desc := gpu.texture_view_descriptor(output_texture, {})
 
     // Allocate texture heap for fragment shader
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_heap)
+    texture_heap_size := gpu.get_texture_rw_view_descriptor_size()
+    texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_heap)
     gpu.set_texture_desc(texture_heap, texture_id, texture_desc)
 
     // Create sampler
-    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
-    defer gpu.mem_free(sampler_heap)
+    sampler_heap_size := gpu.get_sampler_descriptor_size()
+    sampler_heap := gpu.mem_alloc_raw(sampler_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(sampler_heap)
     gpu.set_sampler_desc(sampler_heap, sampler_id, gpu.sampler_descriptor({}))
 
     // BVH descriptor heap
-    bvh_heap := gpu.mem_alloc(size_of(gpu.BVH_Descriptor) * 10, alloc_type = .Descriptors)
-    defer gpu.mem_free(bvh_heap)
+    bvh_heap_size := gpu.get_bvh_descriptor_size()
+    bvh_heap := gpu.mem_alloc_raw(bvh_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(bvh_heap)
 
     Compute_Data :: struct {
         output_texture_id: u32,
@@ -136,7 +138,7 @@ main :: proc()
     defer gpu.arena_destroy(&arena)
 
     // Create fullscreen quad
-    verts := gpu.arena_alloc_array(&arena, Vertex, 4)
+    verts := gpu.arena_alloc(&arena, Vertex, 4)
     verts.cpu[0].pos = { -1.0,  1.0, 0.0 }  // Top-left
     verts.cpu[1].pos = {  1.0, -1.0, 0.0 }  // Bottom-right
     verts.cpu[2].pos = {  1.0,  1.0, 0.0 }  // Top-right
@@ -146,7 +148,7 @@ main :: proc()
     verts.cpu[2].uv  = {  1.0,  0.0 }
     verts.cpu[3].uv  = {  0.0,  1.0 }
 
-    indices := gpu.arena_alloc_array(&arena, u32, 6)
+    indices := gpu.arena_alloc(&arena, u32, 6)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
@@ -154,16 +156,16 @@ main :: proc()
     indices.cpu[4] = 1
     indices.cpu[5] = 3
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 4)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 6)
+    verts_local := gpu.mem_alloc(Vertex, 4, .GPU)
+    indices_local := gpu.mem_alloc(u32, 6, .GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, u64(len(verts.cpu)) * size_of(verts.cpu[0]))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, u64(len(indices.cpu)) * size_of(indices.cpu[0]))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(indices.cpu))
 
     scene := upload_scene(gltf_scene, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer {
@@ -212,8 +214,8 @@ main :: proc()
 
             output_desc.dimensions.x = u32(window_size_x)
             output_desc.dimensions.y = u32(window_size_y)
-            gpu.free_and_destroy_texture(&output_texture)
-            output_texture = gpu.alloc_and_create_texture(output_desc)
+            gpu.texture_free_and_destroy(&output_texture)
+            output_texture = gpu.texture_alloc_and_create(output_desc)
 
             // Update descriptor for new texture
             texture_desc = gpu.texture_view_descriptor(output_texture, {})
@@ -242,7 +244,7 @@ main :: proc()
         // Allocate compute data for this frame with current time and resolution
         compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
         compute_data.cpu.output_texture_id = texture_id
-        compute_data.cpu.scene = scene.scene_shader
+        compute_data.cpu.scene = { instances = scene.instances.gpu.ptr, meshes = scene.meshes_shader.gpu.ptr }
         compute_data.cpu.accum_counter = accum_counter
         compute_data.cpu.resolution = { f32(window_size_x), f32(window_size_y) }
         compute_data.cpu.camera_to_world = intr.matrix_flatten(camera_to_world)
@@ -250,7 +252,7 @@ main :: proc()
         cmd_buf := gpu.commands_begin(.Main)
 
         // Dispatch compute shader to write to texture
-        gpu.cmd_set_desc_heap(cmd_buf, nil, texture_rw_heap_gpu, nil, gpu.host_to_device_ptr(bvh_heap))
+        gpu.cmd_set_desc_heap(cmd_buf, {}, texture_rw_heap, {}, bvh_heap)
         gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
 
         num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
@@ -269,15 +271,13 @@ main :: proc()
             }
         })
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-        textures := gpu.host_to_device_ptr(texture_heap)
-        samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, texture_heap, {}, sampler_heap, {})
 
         Vert_Data :: struct {
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
+        verts_data.cpu.verts = verts_local.gpu.ptr
 
         Frag_Data :: struct {
             texture_id: u32,
@@ -301,7 +301,9 @@ main :: proc()
 
 Mesh_GPU :: struct
 {
-    mesh_gpu: Mesh_Shader,
+    pos: gpu.slice_t([4]f32),
+    normals: gpu.slice_t([4]f32),
+    indices: gpu.slice_t(u32),
     idx_count: u32,
     vert_count: u32,
     bvh: gpu.Owned_BVH,
@@ -314,42 +316,45 @@ Mesh_Shader :: struct
     indices: rawptr,
 }
 
-upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh: shared.Mesh) -> Mesh_Shader
+upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh: shared.Mesh) -> Mesh_GPU
 {
     assert(len(mesh.pos) == len(mesh.normals))
     assert(len(mesh.pos) == len(mesh.uvs))
 
-    positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.pos))
-    normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.normals))
-    uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(mesh.uvs))
-    indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(mesh.indices))
+    positions_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.pos))
+    normals_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.normals))
+    uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.uvs))
+    indices_staging := gpu.arena_alloc(upload_arena, u32, len(mesh.indices))
     copy(positions_staging.cpu, mesh.pos[:])
     copy(normals_staging.cpu, mesh.normals[:])
     copy(uvs_staging.cpu, mesh.uvs[:])
     copy(indices_staging.cpu, mesh.indices[:])
 
-    res: Mesh_Shader
-    res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.pos))
-    res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.normals))
-    //res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(mesh.uvs))
-    res.indices = gpu.mem_alloc_typed_gpu(u32, len(mesh.indices))
-    gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(mesh.pos) * size_of(mesh.pos[0])))
-    gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(mesh.normals) * size_of(mesh.normals[0])))
-    //gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(mesh.uvs) * size_of(mesh.uvs[0])))
-    gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(mesh.indices) * size_of(mesh.indices[0])))
+    res: Mesh_GPU
+    res.pos = gpu.mem_alloc([4]f32, len(mesh.pos), mem_type = gpu.Memory.GPU)
+    res.normals = gpu.mem_alloc([4]f32, len(mesh.normals), mem_type = gpu.Memory.GPU)
+    //res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), mem_type = gpu.Memory.GPU)
+    res.indices = gpu.mem_alloc(u32, len(mesh.indices), mem_type = gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging, len(mesh.pos))
+    gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging, len(mesh.normals))
+    //gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging, len(mesh.uvs))
+    gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging, len(mesh.indices))
+
+    res.idx_count = u32(len(mesh.indices))
+    res.vert_count = u32(len(mesh.pos))
     return res
 }
 
 mesh_destroy :: proc(mesh: ^Mesh_GPU)
 {
-    gpu.free_and_destroy_bvh(&mesh.bvh)
-    gpu.mem_free(mesh.mesh_gpu.pos)
-    gpu.mem_free(mesh.mesh_gpu.normals)
-    gpu.mem_free(mesh.mesh_gpu.indices)
+    gpu.bvh_free_and_destroy(&mesh.bvh)
+    gpu.mem_free(mesh.pos)
+    gpu.mem_free(mesh.normals)
+    gpu.mem_free(mesh.indices)
     mesh^ = {}
 }
 
-build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: rawptr, indices: rawptr, idx_count: u32, vert_count: u32) -> gpu.Owned_BVH
+build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: gpu.slice_t([4]f32), indices: gpu.slice_t(u32), idx_count: u32, vert_count: u32) -> gpu.Owned_BVH
 {
     assert(idx_count % 3 == 0)
 
@@ -363,27 +368,27 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
             }
         }
     }
-    bvh := gpu.alloc_and_create_bvh(desc)
-    scratch := gpu.alloc_bvh_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_blas(cmd_buf, bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions, indices = indices } })
+    bvh := gpu.bvh_alloc_and_create(desc)
+    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
+    gpu.cmd_build_blas(cmd_buf, bvh, bvh.mem, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
     return bvh
 }
 
-build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: rawptr, instance_count: u32) -> gpu.Owned_BVH
+build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: gpu.gpuptr, instance_count: u32) -> gpu.Owned_BVH
 {
     desc := gpu.TLAS_Desc {
         hint = .Prefer_Fast_Trace,
         instance_count = instance_count
     }
-    bvh := gpu.alloc_and_create_bvh(desc)
-    scratch := gpu.alloc_bvh_build_scratch_buffer(bvh_scratch_arena, desc)
+    bvh := gpu.bvh_alloc_and_create(desc)
+    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
     gpu.cmd_build_tlas(cmd_buf, bvh, bvh.mem, scratch, instances)
     return bvh
 }
 
-upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []shared.Instance, meshes: []Mesh_GPU) -> rawptr
+upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []shared.Instance, meshes: []Mesh_GPU) -> gpu.slice_t(gpu.BVH_Instance)
 {
-    instances_staging := gpu.arena_alloc_array(upload_arena, gpu.BVH_Instance, len(instances))
+    instances_staging := gpu.arena_alloc(upload_arena, gpu.BVH_Instance, len(instances))
     for &instance, i in instances_staging.cpu
     {
         instance = {
@@ -394,17 +399,20 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
             mask = 1,
         }
     }
-    instances_local := gpu.mem_alloc_typed_gpu(gpu.BVH_Instance, len(instances))
-    gpu.cmd_mem_copy(cmd_buf, instances_staging.gpu, instances_local, len(instances_staging.cpu) * size_of(gpu.BVH_Instance))
+    instances_local := gpu.mem_alloc(gpu.BVH_Instance, len(instances))
+    gpu.cmd_mem_copy(cmd_buf, instances_local, instances_staging, len(instances_staging.cpu))
     return instances_local
 }
 
 Scene_GPU :: struct
 {
-    scene_shader: Scene_Shader,
     bvh: gpu.Owned_BVH,
     meshes: [dynamic]Mesh_GPU,
-    instances_bvh: rawptr,  // Array of gpu.BVH_Instance
+    instances_bvh: gpu.slice_t(gpu.BVH_Instance),
+
+    // Shader view
+    instances: gpu.slice_t(Instance_Shader),
+    meshes_shader: gpu.slice_t(Mesh_Shader),
 }
 
 Scene_Shader :: struct
@@ -413,7 +421,7 @@ Scene_Shader :: struct
     meshes: rawptr,
 }
 
-Instance_GPU :: struct
+Instance_Shader :: struct
 {
     mesh_idx: u32,
 }
@@ -425,34 +433,31 @@ upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_
     // Upload meshes
     for mesh in scene.meshes
     {
-        to_add := Mesh_GPU {
-            mesh_gpu = upload_mesh(upload_arena, cmd_buf, mesh),
-            idx_count = u32(len(mesh.indices)),
-            vert_count = u32(len(mesh.pos)),
-            bvh = {},
-        }
+        to_add := upload_mesh(upload_arena, cmd_buf, mesh)
         append(&res.meshes, to_add)
     }
 
     // Construct structures used by the shader
-    instances_gpu := gpu.arena_alloc_array(upload_arena, Instance_GPU, len(scene.instances))
+    instances_gpu := gpu.arena_alloc(upload_arena, Instance_Shader, len(scene.instances))
     for &instance, i in instances_gpu.cpu {
         instance = { mesh_idx = scene.instances[i].mesh_idx }
     }
-    res.scene_shader.instances = gpu.mem_alloc_typed_gpu(Instance_GPU, len(scene.instances))
-    gpu.cmd_mem_copy(cmd_buf, instances_gpu.gpu, res.scene_shader.instances, size_of(Instance_GPU) * len(scene.instances))
+    res.instances = gpu.mem_alloc(Instance_Shader, len(scene.instances), gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, res.instances, instances_gpu, len(scene.instances))
 
-    meshes_gpu := gpu.arena_alloc_array(upload_arena, Mesh_Shader, len(scene.meshes))
+    meshes_gpu := gpu.arena_alloc(upload_arena, Mesh_Shader, len(scene.meshes))
     for &mesh, i in meshes_gpu.cpu {
-        mesh = res.meshes[i].mesh_gpu
+        mesh.pos = res.meshes[i].pos.gpu.ptr
+        mesh.normals = res.meshes[i].normals.gpu.ptr
+        mesh.indices = res.meshes[i].indices.gpu.ptr
     }
-    res.scene_shader.meshes = gpu.mem_alloc_typed_gpu(Mesh_Shader, len(scene.meshes))
-    gpu.cmd_mem_copy(cmd_buf, meshes_gpu.gpu, res.scene_shader.meshes, size_of(Mesh_Shader) * len(scene.meshes))
+    res.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(scene.meshes), gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, res.meshes_shader, meshes_gpu, len(scene.meshes))
 
     // Build BVHs
     gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
     for &mesh in res.meshes {
-        mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.mesh_gpu.pos, mesh.mesh_gpu.indices, mesh.idx_count, mesh.vert_count)
+        mesh.bvh = build_blas(bvh_scratch_arena, cmd_buf, mesh.pos, mesh.indices, mesh.idx_count, mesh.vert_count)
     }
 
     res.instances_bvh = upload_bvh_instances(upload_arena, cmd_buf, scene.instances[:], res.meshes[:])
@@ -466,9 +471,9 @@ upload_scene :: proc(scene: shared.Scene, upload_arena: ^gpu.Arena, bvh_scratch_
 
 scene_destroy :: proc(scene: ^Scene_GPU)
 {
-    gpu.free_and_destroy_bvh(&scene.bvh)
-    gpu.mem_free(scene.scene_shader.instances)
-    gpu.mem_free(scene.scene_shader.meshes)
+    gpu.bvh_free_and_destroy(&scene.bvh)
+    gpu.mem_free(scene.instances)
+    gpu.mem_free(scene.meshes_shader)
     gpu.mem_free(scene.instances_bvh)
     for &mesh in scene.meshes {
         mesh_destroy(&mesh)

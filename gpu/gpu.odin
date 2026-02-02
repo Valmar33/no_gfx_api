@@ -3,6 +3,7 @@ package gpu
 
 import "core:slice"
 import "base:runtime"
+import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -11,6 +12,7 @@ import vk "vendor:vulkan"
 // will yield predictable and reasonable behavior in general.
 
 VALIDATION :: #config(NO_GFX_API_VALIDATION, true)
+CHECK_ADDRESSES :: #config(NO_GFX_API_CHECK_ADDRESSES, true)
 
 // Handles
 Handle :: rawptr
@@ -60,6 +62,7 @@ All_Mips: u8 : max(u8)
 All_Layers: u16 : max(u16)
 
 // Structs
+
 Blit_Rect :: struct
 {
     offset_a: [3]i32,  // offset_a == 0 && offset_b == 0 -> full image
@@ -231,13 +234,16 @@ swapchain_present: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64) : _s
 features_available: proc() -> Features : _features_available
 
 // Memory
-mem_alloc: proc(bytes: u64, align: u64 = 1, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> rawptr : _mem_alloc
-mem_free: proc(ptr: rawptr, loc := #caller_location) : _mem_free
-host_to_device_ptr: proc(ptr: rawptr) -> rawptr : _host_to_device_ptr  // Only supports base allocation pointers, like mem_free!
+gpuptr :: struct { ptr: rawptr, _impl: [2]u64 }
+ptr :: struct { cpu: rawptr, using gpu: gpuptr }
+null :: gpuptr {}
+mem_alloc_raw: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> ptr : _mem_alloc_raw
+mem_suballoc: proc(p: ptr, offset, el_size, el_count: i64) -> ptr : _mem_suballoc
+mem_free_raw: proc(p: gpuptr, loc := #caller_location) : _mem_free_raw
 
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
-texture_create: proc(desc: Texture_Desc, storage: rawptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
+texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
 texture_destroy: proc(texture: ^Texture) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
 texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_rw_view_descriptor
@@ -262,11 +268,11 @@ queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semapho
 
 // Raytracing
 blas_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_size_and_align
-blas_create: proc(desc: BLAS_Desc, storage: rawptr) -> BVH : _blas_create
+blas_create: proc(desc: BLAS_Desc, storage: gpuptr) -> BVH : _blas_create
 blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
 //blas_update_scratch_buffer_size_and_align
 tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
-tlas_create: proc(desc: TLAS_Desc, storage: rawptr) -> BVH : _tlas_create
+tlas_create: proc(desc: TLAS_Desc, storage: gpuptr) -> BVH : _tlas_create
 tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
 bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
 bvh_create :: proc { blas_create, tlas_create }
@@ -280,11 +286,11 @@ bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
 commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
 
 // Commands
-cmd_mem_copy: proc(cmd_buf: Command_Buffer, src, dst: rawptr, #any_int bytes: i64) : _cmd_mem_copy
-cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: rawptr) : _cmd_copy_to_texture
+cmd_mem_copy_raw: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64) : _cmd_mem_copy_raw
+cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr) : _cmd_copy_to_texture
 cmd_blit_texture: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter) : _cmd_blit_texture
 
-cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: rawptr) : _cmd_set_desc_heap
+cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr) : _cmd_set_desc_heap
 
 cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
 //cmd_signal_after: proc() : _cmd_signal_after
@@ -296,83 +302,166 @@ cmd_set_depth_state: proc(cmd_buf: Command_Buffer, state: Depth_State) : _cmd_se
 cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State) : _cmd_set_blend_state
 
 // Run compute shader based on number of groups
-cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: rawptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1) : _cmd_dispatch
+cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1) : _cmd_dispatch
 
 // Schedule indirect compute shader based on number of groups, arguments is a pointer to a Dispatch_Indirect_Command struct
-cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data: rawptr, arguments: rawptr) : _cmd_dispatch_indirect
+cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr) : _cmd_dispatch_indirect
 
 cmd_begin_render_pass: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc) : _cmd_begin_render_pass
 cmd_end_render_pass: proc(cmd_buf: Command_Buffer) : _cmd_end_render_pass
 
 // Indices can be nil
-cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                 indices: rawptr, index_count: u32, instance_count: u32 = 1) : _cmd_draw_indexed_instanced
-cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data: rawptr, fragment_data: rawptr,
-                                          indices: rawptr, indirect_arguments: rawptr) : _cmd_draw_indexed_instanced_indirect
-cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex: rawptr, data_pixel: rawptr,
-                                                 indices: rawptr, indirect_arguments: rawptr, stride: u32, draw_count: rawptr) : _cmd_draw_indexed_instanced_indirect_multi
+cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
+                                 index_count: u32, instance_count: u32 = 1) : _cmd_draw_indexed_instanced
+cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices,
+                                          indirect_arguments: gpuptr) : _cmd_draw_indexed_instanced_indirect
+cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex, data_pixel, indices: gpuptr,
+                                                indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr) : _cmd_draw_indexed_instanced_indirect_multi
 
-cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, shapes: []BVH_Shape) : _cmd_build_blas
-cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage: rawptr, scratch_storage: rawptr, instances: rawptr) : _cmd_build_tlas
+cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape) : _cmd_build_blas
+cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, instances: gpuptr) : _cmd_build_tlas
 
 /////////////////////////
 // Userland Utilities
 
-mem_alloc_typed :: proc($T: typeid, #any_int count: i64) -> []T
-{
-    assert(count > 0)
+// Memory
 
-    ptr := mem_alloc(size_of(T) * u64(count), align_of(T))
-    return slice.from_ptr(cast(^T) ptr, int(count))
+ptr_apply_offset :: #force_inline proc(p: ^ptr, #any_int offset: i64)
+{
+    if p.cpu != nil {
+        p.cpu = auto_cast(uintptr(p.cpu) + uintptr(offset))
+    }
+    p.gpu.ptr = auto_cast(uintptr(p.gpu.ptr) + uintptr(offset))
 }
 
-mem_alloc_typed_gpu :: proc($T: typeid, #any_int count: i64) -> rawptr
+ptr_t :: struct($T: typeid)
 {
-    assert(count > 0)
-
-    ptr := mem_alloc(size_of(T) * u64(count), align_of(T), mem_type = .GPU)
-    return ptr
+    cpu: ^T,
+    using gpu: gpuptr,
 }
 
-// Avoid -vet warnings about unused "slice" package
-@(private="file")
-_fictitious :: proc() { mem_alloc_typed(u32, 0) }
-
-mem_free_typed :: proc(mem: []$T, loc := #caller_location)
+slice_t :: struct($T: typeid)
 {
-    mem_free(raw_data(mem), loc = loc)
+    cpu: []T,
+    using gpu: gpuptr,
+}
+
+mem_alloc_ptr :: #force_inline proc($T: typeid, mem_type := Memory.Default) -> ptr_t(T)
+{
+    p := mem_alloc_raw(size_of(T), 1, align_of(T), mem_type = mem_type)
+    return ptr_t(T) {
+        cpu = cast(^T) p.cpu,
+        gpu = p.gpu
+    }
+}
+
+mem_alloc_slice :: #force_inline proc($T: typeid, #any_int count: i32, mem_type := Memory.Default) -> slice_t(T)
+{
+    p := mem_alloc_raw(size_of(T), count, align_of(T), mem_type = mem_type)
+    return slice_t(T) {
+        cpu = slice.from_ptr(cast(^T)p.cpu, int(count)),
+        gpu = p.gpu
+    }
+}
+
+mem_alloc :: proc {
+    mem_alloc_ptr,
+    mem_alloc_slice,
+}
+
+mem_free_ptr :: #force_inline proc(p: ptr_t($T))
+{
+    mem_free_raw(p.gpu)
+}
+
+mem_free_slice :: #force_inline proc(p: slice_t($T))
+{
+    mem_free_raw(p.gpu)
+}
+
+mem_free :: proc {
+    mem_free_ptr,
+    mem_free_slice,
+}
+
+cmd_mem_copy_ptr :: #force_inline proc(cmd_buf: Command_Buffer, dst: ptr_t($T), src: ptr_t(T))
+{
+    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T))
+}
+
+cmd_mem_copy_slice :: proc(cmd_buf: Command_Buffer, dst: slice_t($T), src: slice_t(T), #any_int count: i32)
+{
+    assert(int(count) <= len(dst.cpu) && int(count) <= len(src.cpu))
+    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T) * count)
+}
+
+cmd_mem_copy :: proc {
+    cmd_mem_copy_ptr,
+    cmd_mem_copy_slice,
 }
 
 Arena :: struct
 {
-    cpu: rawptr,
-    gpu: rawptr,
-    offset: u64,
-    size: u64,
+    p: ptr,
+    offset: i64,
+    size: i64,
 }
 
-Allocation_Slice :: struct($T: typeid)
-{
-    cpu: []T,
-    gpu: rawptr,
-}
-
-Allocation :: struct($T: typeid)
-{
-    cpu: ^T,
-    gpu: rawptr,
-}
-
-arena_init :: proc(storage: u64, mem_type := Memory.Default) -> Arena
+arena_init :: proc(storage: i64, mem_type := Memory.Default) -> Arena
 {
     res: Arena
     res.size = storage
-    alloc := mem_alloc(storage, mem_type = mem_type)
-    res.cpu = nil if mem_type == .GPU else alloc
-    res.gpu = alloc if mem_type == .GPU else host_to_device_ptr(alloc)
+    res.p = mem_alloc_raw(storage, 1, 16)
     return res
 }
 
+arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_count: i64, #any_int align: i32 = 16) -> ptr
+{
+    bytes := el_size * el_count
+    assert(bytes > 0 && align > 0)
+
+    // If we request an alignment of > 16 and cpu/gpu are only aligned to 16,
+    // it's impossible to find the same offset for both.
+    if p.cpu != nil && uintptr(p.cpu) % uintptr(align) != uintptr(p.gpu.ptr) % uintptr(align) {
+        panic("Could not satisfy alignment requirements in GPU arena allocation.")
+    }
+
+    gpu_addr := uintptr(arena.p.gpu.ptr) + uintptr(arena.offset)
+    offset = i64(align_up(u64(gpu_addr), u64(align)) - u64(uintptr(arena.p.gpu.ptr)))
+    if offset + bytes > size do panic("GPU Arena ran out of space!")
+
+    suballoc_ptr := mem_suballoc(p, offset, el_size, el_count)
+    offset += bytes
+
+    return suballoc_ptr
+
+    align_up :: proc(x, align: u64) -> (aligned: u64)
+    {
+        assert(0 == (align & (align - 1)), "must align to a power of two")
+        return (x + (align - 1)) &~ (align - 1)
+    }
+}
+
+arena_alloc_ptr :: #force_inline proc(using arena: ^Arena, $T: typeid) -> ptr_t(T)
+{
+    return transmute(ptr_t(T)) arena_alloc_raw(arena, size_of(T), 1, align_of(T))
+}
+
+arena_alloc_slice :: #force_inline proc(using arena: ^Arena, $T: typeid, #any_int count: i32) -> slice_t(T)
+{
+    p_raw := arena_alloc_raw(arena, size_of(T), count, align_of(T))
+    return slice_t(T) {
+        cpu = slice.from_ptr(cast(^T) p_raw.cpu, int(count)),
+        gpu = p_raw.gpu
+    }
+}
+
+arena_alloc :: proc {
+    arena_alloc_ptr,
+    arena_alloc_slice,
+}
+
+/*
 arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
 {
     assert(bytes > 0 && align > 0)
@@ -385,7 +474,7 @@ arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) ->
     alloc_cpu = nil if cpu == nil else auto_cast(uintptr(cpu) + uintptr(offset))
     alloc_gpu = auto_cast(uintptr(gpu) + uintptr(offset))
     offset += bytes
-    return
+    return arena_alloc
 }
 
 arena_alloc :: proc(using arena: ^Arena, $T: typeid) -> Allocation(T)
@@ -407,6 +496,7 @@ arena_alloc_array :: proc(using arena: ^Arena, $T: typeid, #any_int count: i64) 
         gpu = alloc_gpu
     }
 }
+*/
 
 arena_free_all :: proc(using arena: ^Arena)
 {
@@ -415,119 +505,103 @@ arena_free_all :: proc(using arena: ^Arena)
 
 arena_destroy :: proc(using arena: ^Arena)
 {
-    offset = 0
-    size = 0
-    if cpu == nil {
-        mem_free(gpu)
-    } else {
-        mem_free(cpu)
-    }
-    cpu = nil
-    gpu = nil
-}
-
-@(private="file")
-align_up :: proc(x, align: u64) -> (aligned: u64)
-{
-    assert(0 == (align & (align - 1)), "must align to a power of two")
-    return (x + (align - 1)) &~ (align - 1)
+    mem_free_raw(p.gpu)
+    arena^ = {}
 }
 
 Owned_Texture :: struct
 {
     using tex: Texture,
-    mem: rawptr,
+    mem: gpuptr,
 }
 
-alloc_and_create_texture :: proc(desc: Texture_Desc, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
+texture_alloc_and_create :: proc(desc: Texture_Desc, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
 {
     size, align := texture_size_and_align(desc)
-    ptr := mem_alloc(size, align, .GPU)
+    ptr := mem_alloc_raw(size, 1, align, .GPU)
     texture := texture_create(desc, ptr, queue, signal_sem, signal_value)
-    return Owned_Texture { texture, ptr }
+    return Owned_Texture { texture, ptr.gpu }
 }
 
-free_and_destroy_texture :: proc(texture: ^Owned_Texture)
+texture_free_and_destroy :: proc(texture: ^Owned_Texture)
 {
     texture_destroy(texture)
-    mem_free(texture.mem)
+    mem_free_raw(texture.mem)
     texture^ = {}
 }
 
-set_texture_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Texture_Descriptor)
+set_texture_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Texture_Descriptor)
 {
     desc_size := #force_inline get_texture_view_descriptor_size()
     tmp := desc
-    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+    runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
-set_texture_rw_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Texture_Descriptor)
+set_texture_rw_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Texture_Descriptor)
 {
     desc_size := #force_inline get_texture_rw_view_descriptor_size()
     tmp := desc
-    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+    runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
-set_sampler_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: Sampler_Descriptor)
+set_sampler_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: Sampler_Descriptor)
 {
     desc_size := #force_inline get_sampler_descriptor_size()
     tmp := desc
-    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+    runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
-set_bvh_desc :: #force_inline proc(desc_heap: rawptr, idx: u32, desc: BVH_Descriptor)
+set_bvh_desc :: #force_inline proc(desc_heap: ptr, idx: u32, desc: BVH_Descriptor)
 {
     desc_size := #force_inline get_bvh_descriptor_size()
     tmp := desc
-    runtime.mem_copy(auto_cast(uintptr(desc_heap) + uintptr(idx * desc_size)), &tmp, int(desc_size))
+    runtime.mem_copy(auto_cast(uintptr(desc_heap.cpu) + uintptr(idx * desc_size)), &tmp, int(desc_size))
 }
 
 Owned_BVH :: struct
 {
     using handle: BVH,
-    mem: rawptr,
+    mem: gpuptr,
 }
 
-alloc_and_create_blas :: proc(desc: BLAS_Desc) -> Owned_BVH
+blas_alloc_and_create :: proc(desc: BLAS_Desc) -> Owned_BVH
 {
     size, align := bvh_size_and_align(desc)
-    ptr := mem_alloc(size, align, .GPU)
+    ptr := mem_alloc_raw(size, 1, align, .GPU)
     bvh := bvh_create(desc, ptr)
     return Owned_BVH { bvh, ptr }
 }
 
-alloc_and_create_tlas :: proc(desc: TLAS_Desc) -> Owned_BVH
+tlas_alloc_and_create :: proc(desc: TLAS_Desc) -> Owned_BVH
 {
     size, align := bvh_size_and_align(desc)
-    ptr := mem_alloc(size, align, .GPU)
+    ptr := mem_alloc_raw(size, 1, align, .GPU)
     bvh := bvh_create(desc, ptr)
     return Owned_BVH { bvh, ptr }
 }
 
-alloc_and_create_bvh :: proc { alloc_and_create_blas, alloc_and_create_tlas }
+bvh_alloc_and_create :: proc { blas_alloc_and_create, tlas_alloc_and_create }
 
-free_and_destroy_bvh :: proc(bvh: ^Owned_BVH)
+bvh_free_and_destroy :: proc(bvh: ^Owned_BVH)
 {
     bvh_destroy(bvh)
-    mem_free(bvh.mem)
+    mem_free_raw(bvh.mem)
     bvh^ = {}
 }
 
-alloc_blas_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> rawptr
+blas_alloc_build_scratch_buffer :: proc(arena: ^Arena, desc: BLAS_Desc) -> ptr
 {
     size, align := blas_build_scratch_buffer_size_and_align(desc)
-    _, gpu := arena_alloc_untyped(arena, size, align)
-    return gpu
+    return arena_alloc_raw(arena, size, 1, align)
 }
 
-alloc_tlas_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> rawptr
+tlas_alloc_build_scratch_buffer :: proc(arena: ^Arena, desc: TLAS_Desc) -> ptr
 {
     size, align := tlas_build_scratch_buffer_size_and_align(desc)
-    _, gpu := arena_alloc_untyped(arena, size, align)
-    return gpu
+    return arena_alloc_raw(arena, size, 1, align)
 }
 
-alloc_bvh_build_scratch_buffer :: proc { alloc_blas_build_scratch_buffer, alloc_tlas_build_scratch_buffer }
+bvh_alloc_build_scratch_buffer :: proc { blas_alloc_build_scratch_buffer, tlas_alloc_build_scratch_buffer }
 
 // Swapchain utils
 
@@ -544,6 +618,7 @@ swapchain_init_from_sdl :: proc(window: ^sdl.Window, frames_in_flight: u32)
 }
 
 // Texture utils
+
 cmd_generate_mipmaps :: proc(cmd_buf: Command_Buffer, texture: Texture)
 {
     for mip in 1..<texture.mip_count

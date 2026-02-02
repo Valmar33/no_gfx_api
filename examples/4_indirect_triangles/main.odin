@@ -57,18 +57,18 @@ main :: proc()
     arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&arena)
 
-    verts := gpu.arena_alloc_array(&arena, Vertex, 3)
+    verts := gpu.arena_alloc(&arena, Vertex, 3)
     verts.cpu[0].pos = { -0.5,  0.5, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0 }
 
-    indices := gpu.arena_alloc_array(&arena, u32, 3)
+    indices := gpu.arena_alloc(&arena, u32, 3)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
+    verts_local := gpu.mem_alloc(Vertex, 3, .GPU)
+    indices_local := gpu.mem_alloc(u32, 3, .GPU)
 
     // Unified indirect data struct that extends Draw_Indexed_Indirect_Command
     IndirectData :: struct {
@@ -78,13 +78,13 @@ main :: proc()
         size: f32,
     }
 
-    indirect_data_cpu_mem := gpu.mem_alloc_typed(IndirectData, Num_Triangles)
-    defer gpu.mem_free_typed(indirect_data_cpu_mem)
+    indirect_data := gpu.mem_alloc(IndirectData, Num_Triangles)
+    defer gpu.mem_free(indirect_data)
 
-    count := gpu.arena_alloc_array(&arena, u32, 1)
-    count.cpu[0] = Num_Triangles
+    count := gpu.arena_alloc(&arena, u32)
+    count.cpu^ = Num_Triangles
 
-    count_local := gpu.mem_alloc_typed_gpu(u32, 1)
+    count_local := gpu.mem_alloc(u32, mem_type = gpu.Memory.GPU)
 
     // Arrange triangles in a circle
     circle_radius: f32 = 0.6
@@ -104,7 +104,7 @@ main :: proc()
         rgb := hsl_to_rgb(hue, saturation, lightness)
 
         // Fill unified indirect data struct with both command and user data
-        indirect_data_cpu_mem[i] = IndirectData {
+        indirect_data.cpu[i] = IndirectData {
             cmd = gpu.Draw_Indexed_Indirect_Command {
                 index_count = 3,
                 instance_count = 1,
@@ -118,8 +118,7 @@ main :: proc()
         }
     }
 
-    indirect_data_local := gpu.mem_alloc_typed_gpu(IndirectData, Num_Triangles)
-    indirect_command := gpu.host_to_device_ptr(raw_data(indirect_data_cpu_mem))
+    indirect_data_local := gpu.mem_alloc(IndirectData, Num_Triangles, .GPU)
 
     defer {
         gpu.mem_free(verts_local)
@@ -129,10 +128,10 @@ main :: proc()
     }
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
-    gpu.cmd_mem_copy(upload_cmd_buf, count.gpu, count_local, 1 * size_of(u32))
-    gpu.cmd_mem_copy(upload_cmd_buf, indirect_command, indirect_data_local, Num_Triangles * size_of(IndirectData))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, count_local, count)
+    gpu.cmd_mem_copy(upload_cmd_buf, indirect_data_local, indirect_data, Num_Triangles)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(.Main, { upload_cmd_buf })
 
@@ -184,7 +183,7 @@ main :: proc()
             verts: rawptr,
         }
         shared_vert_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        shared_vert_data.cpu.verts = verts_local
+        shared_vert_data.cpu.verts = verts_local.gpu.ptr
 
         when Use_Indirect_Multi {
             // Draw multiple indexed triangles using indirect rendering
@@ -196,10 +195,10 @@ main :: proc()
             //   indirect_data_local: GPU pointer to array of IndirectData (contains both draw command and per-draw data)
             //   stride: Byte stride between elements in the indirect data array (size of IndirectData struct)
             //   count_local: GPU pointer to u32 containing the number of draws to execute
-            gpu.cmd_draw_indexed_instanced_indirect_multi(cmd_buf, shared_vert_data.gpu, nil, indices_local, indirect_data_local, u32(size_of(IndirectData)), count_local)
+            gpu.cmd_draw_indexed_instanced_indirect_multi(cmd_buf, shared_vert_data.gpu, {}, indices_local, indirect_data_local, u32(size_of(IndirectData)), count_local)
         } else {
             // Renders only the first draw from the indirect data buffer
-            gpu.cmd_draw_indexed_instanced_indirect(cmd_buf, shared_vert_data.gpu, nil, indices_local, indirect_data_local)
+            gpu.cmd_draw_indexed_instanced_indirect(cmd_buf, shared_vert_data.gpu, {}, indices_local, indirect_data_local)
         }
 
         gpu.cmd_end_render_pass(cmd_buf)

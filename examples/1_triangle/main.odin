@@ -54,7 +54,7 @@ main :: proc()
     arena := gpu.arena_init(1024 * 1024)
     defer gpu.arena_destroy(&arena)
 
-    verts := gpu.arena_alloc_array(&arena, Vertex, 3)
+    verts := gpu.arena_alloc(&arena, Vertex, 3)
     verts.cpu[0].pos = { -0.5,  0.5, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0 }
@@ -62,21 +62,21 @@ main :: proc()
     verts.cpu[1].color = { 0.0, 1.0, 0.0 }
     verts.cpu[2].color = { 0.0, 0.0, 1.0 }
 
-    indices := gpu.arena_alloc_array(&arena, u32, 3)
+    indices := gpu.arena_alloc(&arena, u32, 3)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
+    verts_local := gpu.mem_alloc(Vertex, 3, mem_type = .GPU)
+    indices_local := gpu.mem_alloc(u32, 3, mem_type = .GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts_local.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(verts_local.cpu))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(.Main, { upload_cmd_buf })
 
@@ -128,9 +128,9 @@ main :: proc()
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
+        verts_data.cpu^ = { verts = verts_local.gpu.ptr }
 
-        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, indices_local, 3, 1)
+        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data, {}, indices_local, 3, 1)
         gpu.cmd_end_render_pass(cmd_buf)
         gpu.queue_submit(.Main, { cmd_buf }, frame_sem, next_frame)
 
