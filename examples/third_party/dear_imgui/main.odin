@@ -105,7 +105,7 @@ main :: proc()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
-    defer gpu.semaphore_destroy(&frame_sem)
+    defer gpu.semaphore_destroy(frame_sem)
     for true
     {
         proceed := handle_window_events(window)

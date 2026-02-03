@@ -7,11 +7,11 @@ import "base:runtime"
 import vmem "core:mem/virtual"
 import "core:mem"
 import "core:sync"
-import rbt "core:container/rbtree"
 import "core:dynlib"
 import "core:container/priority_queue"
 import "core:strings"
 import "core:math"
+import "core:fmt"
 
 import vk "vendor:vulkan"
 import "vma"
@@ -60,6 +60,7 @@ Context :: struct
     bvhs: Resource_Pool(BVH, BVH_Info),
     shaders: Resource_Pool(Shader, Shader_Info),
     command_buffers: Resource_Pool(Command_Buffer, Command_Buffer_Info),
+    semaphores: Resource_Pool(Semaphore, vk.Semaphore),
 
     cmd_bufs_timelines: [Queue]Timeline,
 
@@ -632,6 +633,7 @@ _init :: proc()
     pool_init(&ctx.bvhs)
     pool_init(&ctx.shaders)
     pool_init(&ctx.command_buffers)
+    pool_init(&ctx.semaphores)
 
     // VMA allocator
     vma_vulkan_procs := vma.create_vulkan_functions()
@@ -750,7 +752,7 @@ get_tls :: proc() -> ^Thread_Local_Context
     return tls_ctx
 }
 
-_cleanup :: proc()
+_cleanup :: proc(loc := #caller_location)
 {
     scratch, _ := acquire_scratch()
 
@@ -802,7 +804,70 @@ _cleanup :: proc()
 
     vma.destroy_allocator(ctx.vma_allocator)
 
-    vk.DestroyDevice(ctx.device, nil)
+    // Check for leaked resources
+    can_destroy_device := true
+    when VALIDATION
+    {
+        {
+            sb := strings.builder_make_none()
+            defer strings.builder_destroy(&sb)
+
+            leaked_allocs := pool_get_alive_list(&ctx.allocs, scratch)
+            if len(leaked_allocs) > 0
+            {
+                strings.write_string(&sb, "There are leaked allocations present:\n")
+                can_destroy_device = false
+
+                for leaked, i in leaked_allocs
+                {
+                    fmt.sbprintf(&sb, "Allocated at: %v", leaked.meta.created_at)
+                    if i < len(leaked_allocs) - 1 {
+                        fmt.sbprintln(&sb, "")
+                    }
+                }
+
+                log.error(strings.to_string(sb), location = loc)
+            }
+        }
+
+        print_leaked_resources(&ctx.textures,   "Texture_Handle", &can_destroy_device, loc)
+        print_leaked_resources(&ctx.bvhs,       "BVH",            &can_destroy_device, loc)
+        print_leaked_resources(&ctx.shaders,    "Shader",         &can_destroy_device, loc)
+        print_leaked_resources(&ctx.semaphores, "Semaphore",      &can_destroy_device, loc)
+
+        print_leaked_resources :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle_name: string, can_destroy_device: ^bool, loc: runtime.Source_Code_Location)
+        {
+            sb := strings.builder_make_none()
+            defer strings.builder_destroy(&sb)
+
+            scratch, _ := acquire_scratch()
+            leaked_res := pool_get_alive_list(pool, scratch)
+            if len(leaked_res) > 0
+            {
+                fmt.sbprintfln(&sb, "There are leaked %vs present:", handle_name)
+                can_destroy_device^ = false
+
+                for leaked, i in leaked_res
+                {
+                    if leaked.meta.name == "" {
+                        fmt.sbprintf(&sb, "(no name), Created at: %v", leaked.meta.created_at)
+                    } else {
+                        fmt.sbprintf(&sb, "\"%v\", Created at: %v", leaked.meta.name, leaked.meta.created_at)
+                    }
+
+                    if i < len(leaked_res) - 1 {
+                        fmt.sbprintln(&sb, "")
+                    }
+                }
+
+                log.error(strings.to_string(sb), location = loc)
+            }
+        }
+    }
+
+    if can_destroy_device {
+        vk.DestroyDevice(ctx.device, nil)
+    }
 }
 
 _wait_idle :: proc()
@@ -926,7 +991,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
     queue_info := ctx.queues[queue]
     vk_queue := queue_info.handle
 
-    vk_sem_wait := transmute(vk.Semaphore) sem_wait
+    vk_sem_wait := pool_get(&ctx.semaphores, sem_wait)
 
     present_semaphore := ctx.swapchain.present_semaphores[ctx.swapchain_image_idx]
 
@@ -939,7 +1004,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
         {
             cmd_buf = vk_acquire_cmd_buf(queue)
             cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-            vk_cmd_buf := transmute(vk.CommandBuffer) cmd_buf_info.handle
+            vk_cmd_buf := cmd_buf_info.handle
 
             cmd_buf_bi := vk.CommandBufferBeginInfo {
                 sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -976,7 +1041,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
         }
 
         cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-        vk_cmd_buf := transmute(vk.CommandBuffer) cmd_buf_info.handle
+        vk_cmd_buf := cmd_buf_info.handle
         queue_sem := ctx.cmd_bufs_timelines[cmd_buf_info.queue_type].sem
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
@@ -1197,10 +1262,8 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
         if !ok do return {}
     }
 
-    vk_signal_sem := transmute(vk.Semaphore) signal_sem
-
+    vk_signal_sem := pool_get(&ctx.semaphores, signal_sem) if signal_sem != {} else vk.Semaphore(0)
     queue_to_use := queue
-
     alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) storage._impl[0])
 
     image: vk.Image
@@ -1223,7 +1286,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
     {
         cmd_buf := vk_acquire_cmd_buf(queue_to_use)
         cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-        vk_cmd_buf := transmute(vk.CommandBuffer) cmd_buf_info.handle
+        vk_cmd_buf := cmd_buf_info.handle
 
         cmd_buf_bi := vk.CommandBufferBeginInfo {
             sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -1266,7 +1329,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
     }
 }
 
-_texture_destroy :: proc(texture: ^Texture, loc := #caller_location)
+_texture_destroy :: proc(texture: Texture, loc := #caller_location)
 {
     tex_info := pool_get(&ctx.textures, texture.handle)
     vk_image := tex_info.handle
@@ -1279,7 +1342,6 @@ _texture_destroy :: proc(texture: ^Texture, loc := #caller_location)
 
     vk.DestroyImage(ctx.device, vk_image, nil)
     pool_remove(&ctx.textures, texture.handle)
-    texture^ = {}
 }
 
 @(private="file")
@@ -1587,12 +1649,12 @@ _semaphore_create :: proc(init_value: u64 = 0, name := "", loc := #caller_locati
     sem: vk.Semaphore
     vk_check(vk.CreateSemaphore(ctx.device, &sem_ci, nil, &sem))
 
-    return cast(Semaphore) uintptr(sem)
+    return pool_add(&ctx.semaphores, sem, { name = name, created_at = loc })
 }
 
 _semaphore_wait :: proc(sem: Semaphore, wait_value: u64, loc := #caller_location)
 {
-    sems := []vk.Semaphore { auto_cast uintptr(sem) }
+    sems := []vk.Semaphore { pool_get(&ctx.semaphores, sem) }
     values := []u64 { wait_value }
     assert(len(sems) == len(values))
     vk.WaitSemaphores(ctx.device, &{
@@ -1603,11 +1665,11 @@ _semaphore_wait :: proc(sem: Semaphore, wait_value: u64, loc := #caller_location
     }, timeout = max(u64))
 }
 
-_semaphore_destroy :: proc(sem: ^Semaphore, loc := #caller_location)
+_semaphore_destroy :: proc(sem: Semaphore, loc := #caller_location)
 {
-    vk_sem := transmute(vk.Semaphore) (sem^)
+    vk_sem := pool_get(&ctx.semaphores, sem)
     vk.DestroySemaphore(ctx.device, vk_sem, nil)
-    sem^ = {}
+    pool_remove(&ctx.semaphores, sem)
 }
 
 // Raytracing
@@ -1731,14 +1793,11 @@ _bvh_descriptor_size :: proc() -> u32
     return ctx.bvh_desc_size
 }
 
-_bvh_destroy :: proc(bvh: ^BVH, loc := #caller_location)
+_bvh_destroy :: proc(bvh: BVH, loc := #caller_location)
 {
-    bvh_info := pool_get(&ctx.bvhs, bvh^)
-
+    bvh_info := pool_get(&ctx.bvhs, bvh)
     vk.DestroyAccelerationStructureKHR(ctx.device, bvh_info.handle, nil)
-
-    pool_remove(&ctx.bvhs, bvh^)
-    bvh^ = {}
+    pool_remove(&ctx.bvhs, bvh)
 }
 
 @(private="file")
@@ -1800,8 +1859,7 @@ _commands_begin :: proc(queue: Queue, loc := #caller_location) -> Command_Buffer
 
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location)
 {
-    vk_signal_sem := transmute(vk.Semaphore) signal_sem
-
+    vk_signal_sem := pool_get(&ctx.semaphores, signal_sem) if signal_sem != {} else vk.Semaphore(0)
     provided_queue_info := ctx.queues[queue]
 
     for cmd_buf in cmd_bufs
@@ -2739,6 +2797,11 @@ destroy_swapchain :: proc(swapchain: ^Swapchain)
     }
     delete(swapchain.image_views)
     vk.DestroySwapchainKHR(ctx.device, swapchain.handle, nil)
+
+    for handle in swapchain.texture_handles {
+        pool_remove(&ctx.textures, handle)
+    }
+    delete(swapchain.texture_handles)
 
     swapchain^ = {}
 }

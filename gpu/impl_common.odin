@@ -30,6 +30,7 @@ Resource :: struct($T: typeid)
     info: T,
     gen: u32,
     lock: sync.Benaphore,
+    alive: bool,
     meta: Resource_Metadata,
 }
 
@@ -95,6 +96,19 @@ pool_check_no_message :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), ha
     return true
 }
 
+pool_get_alive_list :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), arena: runtime.Allocator) -> []Resource(Info_T)
+{
+    res := make([dynamic]Resource(Info_T), allocator = arena)
+    for i in 1..<res_count
+    {
+        block_idx, el_idx := pool_get_idx(i)
+        el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+        if el.alive do append(&res, el)
+    }
+
+    return res[:]
+}
+
 pool_get :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> Info_T
 {
     assert(init)
@@ -154,6 +168,8 @@ pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, m
     block_idx, el_idx := pool_get_idx(free_idx)
     blocks[block_idx].res[el_idx].info = info
     gen := blocks[block_idx].res[el_idx].gen
+    blocks[block_idx].res[el_idx].alive = true
+    blocks[block_idx].res[el_idx].meta = meta
 
     key := Resource_Key { idx = free_idx, gen = gen }
     return transmute(Handle_T) key
@@ -169,6 +185,7 @@ pool_remove :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Hand
 
     block_idx, el_idx := pool_get_idx(key.idx)
     el := &blocks[block_idx].res[el_idx]
+    el.alive = false
     assert(key.gen == el.gen)
 
     el.gen += 1

@@ -12,7 +12,6 @@ import vk "vendor:vulkan"
 // will yield predictable and reasonable behavior in general.
 
 VALIDATION :: #config(NO_GFX_API_VALIDATION, true)
-CHECK_ADDRESSES :: #config(NO_GFX_API_CHECK_ADDRESSES, true)
 
 // Handles
 Handle :: rawptr
@@ -225,7 +224,7 @@ TLAS_Desc :: struct
 
 // Initialization and interaction with the OS.
 init: proc() : _init
-cleanup: proc() : _cleanup
+cleanup: proc(loc := #caller_location) : _cleanup
 wait_idle: proc() : _wait_idle
 swapchain_init: proc(surface: vk.SurfaceKHR, init_size: [2]u32, frames_in_flight: u32) : _swapchain_init
 swapchain_resize: proc(size: [2]u32) : _swapchain_resize  // NOTE: Do not call this every frame! Only if the dimensions change.
@@ -244,7 +243,7 @@ mem_free_raw: proc(p: gpuptr, loc := #caller_location) : _mem_free_raw
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64) : _texture_size_and_align
 texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0, name := "", loc := #caller_location) -> Texture : _texture_create
-texture_destroy: proc(texture: ^Texture, loc := #caller_location) : _texture_destroy
+texture_destroy: proc(texture: Texture, loc := #caller_location) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_view_descriptor
 texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_rw_view_descriptor
 sampler_descriptor: proc(sampler_desc: Sampler_Desc, loc := #caller_location) -> Sampler_Descriptor : _sampler_descriptor
@@ -260,7 +259,7 @@ shader_destroy: proc(shader: Shader, loc := #caller_location) : _shader_destroy
 // Semaphores
 semaphore_create: proc(init_value: u64 = 0, name := "", loc := #caller_location) -> Semaphore : _semaphore_create
 semaphore_wait: proc(sem: Semaphore, wait_value: u64, loc := #caller_location) : _semaphore_wait
-semaphore_destroy: proc(sem: ^Semaphore, loc := #caller_location) : _semaphore_destroy
+semaphore_destroy: proc(sem: Semaphore, loc := #caller_location) : _semaphore_destroy
 
 // Queues
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
@@ -279,7 +278,7 @@ bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size
 bvh_root_ptr: proc(bvh: BVH, loc := #caller_location) -> rawptr : _bvh_root_ptr
 bvh_descriptor: proc(bvh: BVH, loc := #caller_location) -> BVH_Descriptor : _bvh_descriptor
 bvh_descriptor_size: proc() -> u32 : _bvh_descriptor_size
-bvh_destroy: proc(bvh: ^BVH, loc := #caller_location) : _bvh_destroy
+bvh_destroy: proc(bvh: BVH, loc := #caller_location) : _bvh_destroy
 
 // Command buffer
 commands_begin: proc(queue: Queue, loc := #caller_location) -> Command_Buffer : _commands_begin
