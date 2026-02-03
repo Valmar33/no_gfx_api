@@ -2145,9 +2145,7 @@ _cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State, loc :=
         if !ok do return
     }
 
-    sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
 
     vk_cmd_buf := cmd_buf.handle
 
@@ -2168,10 +2166,7 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State, loc :=
         if !ok do return
     }
 
-    sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
-
     vk_cmd_buf := cmd_buf.handle
 
     enable_b32 := b32(state.enable)
