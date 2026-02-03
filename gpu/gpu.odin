@@ -243,7 +243,7 @@ mem_free_raw: proc(p: gpuptr, loc := #caller_location) : _mem_free_raw
 
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64) : _texture_size_and_align
-texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location) -> Texture : _texture_create
+texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0, name := "", loc := #caller_location) -> Texture : _texture_create
 texture_destroy: proc(texture: ^Texture, loc := #caller_location) : _texture_destroy
 texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_view_descriptor
 texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_rw_view_descriptor
@@ -253,12 +253,12 @@ texture_rw_view_descriptor_size: proc() -> u32 : _texture_rw_view_descriptor_siz
 sampler_descriptor_size: proc() -> u32 : _sampler_descriptor_size
 
 // Shaders
-shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main", loc := #caller_location) -> Shader : _shader_create
-shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main", loc := #caller_location) -> Shader : _shader_create_compute
+shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name := "main", name := "", loc := #caller_location) -> Shader : _shader_create
+shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name := "main", name := "", loc := #caller_location) -> Shader : _shader_create_compute
 shader_destroy: proc(shader: Shader, loc := #caller_location) : _shader_destroy
 
 // Semaphores
-semaphore_create: proc(init_value: u64 = 0, loc := #caller_location) -> Semaphore : _semaphore_create
+semaphore_create: proc(init_value: u64 = 0, name := "", loc := #caller_location) -> Semaphore : _semaphore_create
 semaphore_wait: proc(sem: Semaphore, wait_value: u64, loc := #caller_location) : _semaphore_wait
 semaphore_destroy: proc(sem: ^Semaphore, loc := #caller_location) : _semaphore_destroy
 
@@ -268,10 +268,10 @@ queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semapho
 
 // Raytracing
 blas_size_and_align: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _blas_size_and_align
-blas_create: proc(desc: BLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH : _blas_create
+blas_create: proc(desc: BLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH : _blas_create
 blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
 tlas_size_and_align: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _tlas_size_and_align
-tlas_create: proc(desc: TLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH : _tlas_create
+tlas_create: proc(desc: TLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH : _tlas_create
 tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
 bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
 bvh_create :: proc { blas_create, tlas_create }
@@ -474,11 +474,11 @@ Owned_Texture :: struct
     mem: gpuptr,
 }
 
-texture_alloc_and_create :: proc(desc: Texture_Desc, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Owned_Texture
+texture_alloc_and_create :: proc(desc: Texture_Desc, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0, name := "", loc := #caller_location) -> Owned_Texture
 {
     size, align := texture_size_and_align(desc)
-    ptr := mem_alloc_raw(size, 1, align, .GPU)
-    texture := texture_create(desc, ptr, queue, signal_sem, signal_value)
+    ptr := mem_alloc_raw(size, 1, align, .GPU, loc = loc)
+    texture := texture_create(desc, ptr, queue, signal_sem, signal_value, name = name, loc = loc)
     return Owned_Texture { texture, ptr.gpu }
 }
 

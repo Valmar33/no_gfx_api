@@ -50,7 +50,7 @@ pool_init :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
     init = true
 
     // Reserve element 0
-    pool_add(pool, Info_T {})
+    pool_add(pool, Info_T {}, {})
 }
 
 pool_check :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
@@ -138,7 +138,7 @@ pool_get_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Ha
     return &blocks[block_idx].res[el_idx].lock
 }
 
-pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T) -> Handle_T
+pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, meta: Resource_Metadata) -> Handle_T
 {
     assert(init)
     sync.guard(&lock)

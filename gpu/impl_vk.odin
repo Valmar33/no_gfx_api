@@ -1129,7 +1129,7 @@ _mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64,
         buf_size = cast(vk.DeviceSize) bytes,
         alloc_type = alloc_type,
     }
-    alloc_handle := pool_add(&ctx.allocs, alloc_info)
+    alloc_handle := pool_add(&ctx.allocs, alloc_info, { created_at = loc })
     p.gpu._impl[0] = u64(uintptr(alloc_handle))
     return p
 }
@@ -1188,7 +1188,7 @@ _texture_size_and_align :: proc(desc: Texture_Desc, loc := #caller_location) -> 
     return u64(mem_requirements.size), u64(mem_requirements.alignment)
 }
 
-_texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location) -> Texture
+_texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0, name := "", loc := #caller_location) -> Texture
 {
     when VALIDATION
     {
@@ -1262,7 +1262,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
         dimensions = desc.dimensions,
         format = desc.format,
         mip_count = desc.mip_count,
-        handle = pool_add(&ctx.textures, tex_info)
+        handle = pool_add(&ctx.textures, tex_info, { name = name, created_at = loc } )
     }
 }
 
@@ -1433,7 +1433,7 @@ _sampler_descriptor_size :: proc() -> u32
 
 // Shaders
 @(private="file")
-_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, entry_point_name: string = "main", group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1) -> Shader
+_shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.ShaderStageFlags, entry_point_name := "main", group_size_x: u32 = 1, group_size_y: u32 = 1, group_size_z: u32 = 1, name: string, loc: runtime.Source_Code_Location) -> Shader
 {
     push_constant_ranges: []vk.PushConstantRange
     if is_compute {
@@ -1538,18 +1538,18 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     shader.current_workgroup_size = { group_size_x, group_size_y, group_size_z }
     shader.is_compute = is_compute
 
-    return pool_add(&ctx.shaders, shader)
+    return pool_add(&ctx.shaders, shader, { created_at = loc, name = name })
 }
 
-_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main", loc := #caller_location) -> Shader
+_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name := "main", name := "", loc := #caller_location) -> Shader
 {
     vk_stage := to_vk_shader_stage(type)
-    return _shader_create_internal(code, false, vk_stage, entry_point_name)
+    return _shader_create_internal(code, false, vk_stage, entry_point_name, name = name, loc = loc)
 }
 
-_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main", loc := #caller_location) -> Shader
+_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name := "main", name := "", loc := #caller_location) -> Shader
 {
-    return _shader_create_internal(code, true, { .COMPUTE }, entry_point_name, group_size_x, group_size_y, group_size_z)
+    return _shader_create_internal(code, true, { .COMPUTE }, entry_point_name, group_size_x, group_size_y, group_size_z, name = name, loc = loc)
 }
 
 _shader_destroy :: proc(shader: Shader, loc := #caller_location)
@@ -1571,7 +1571,7 @@ _shader_destroy :: proc(shader: Shader, loc := #caller_location)
 }
 
 // Semaphores
-_semaphore_create :: proc(init_value: u64 = 0, loc := #caller_location) -> Semaphore
+_semaphore_create :: proc(init_value: u64 = 0, name := "", loc := #caller_location) -> Semaphore
 {
     next: rawptr
     next = &vk.SemaphoreTypeCreateInfo {
@@ -1616,7 +1616,7 @@ _blas_size_and_align :: proc(desc: BLAS_Desc, loc := #caller_location) -> (size:
     return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 16
 }
 
-_blas_create :: proc(desc: BLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH
+_blas_create :: proc(desc: BLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH
 {
     when VALIDATION
     {
@@ -1648,7 +1648,7 @@ _blas_create :: proc(desc: BLAS_Desc, storage: gpuptr, loc := #caller_location) 
         shapes = cloned_shapes,
         blas_desc = desc,
     }
-    return pool_add(&ctx.bvhs, bvh_info)
+    return pool_add(&ctx.bvhs, bvh_info, { created_at = loc, name = name })
 }
 
 _blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
@@ -1661,7 +1661,7 @@ _tlas_size_and_align :: proc(desc: TLAS_Desc, loc := #caller_location) -> (size:
     return u64(get_vk_tlas_size_info(desc).accelerationStructureSize), 1
 }
 
-_tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH
+_tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH
 {
     when VALIDATION
     {
@@ -1689,7 +1689,7 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr, loc := #caller_location) 
         is_blas = false,
         tlas_desc = desc
     }
-    return pool_add(&ctx.bvhs, bvh_info)
+    return pool_add(&ctx.bvhs, bvh_info, { created_at = loc, name = name })
 }
 
 _tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
@@ -2713,7 +2713,7 @@ create_swapchain :: proc(width: u32, height: u32, frames_in_flight: u32) -> Swap
 
         tex_info := Texture_Info { handle = image }
         append(&tex_info.views, Image_View_Info { info = image_view_ci, view = res.image_views[i] })
-        res.texture_handles[i] = pool_add(&ctx.textures, tex_info)
+        res.texture_handles[i] = pool_add(&ctx.textures, tex_info, {})
     }
 
     res.present_semaphores = make([]vk.Semaphore, image_count, context.allocator)
@@ -2825,7 +2825,7 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 
     vk_check(vk.AllocateCommandBuffers(ctx.device, &cmd_buf_ai, &cmd_buf_info.handle))
 
-    cmd_buf := pool_add(&ctx.command_buffers, cmd_buf_info)
+    cmd_buf := pool_add(&ctx.command_buffers, cmd_buf_info, {})
     if cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
     {
         cmd_buf_info_mut.pool_handle = cmd_buf
