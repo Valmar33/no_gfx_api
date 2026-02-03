@@ -69,8 +69,8 @@ main :: proc()
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc(Vertex, 3, .GPU)
-    indices_local := gpu.mem_alloc(u32, 3, .GPU)
+    verts_local := gpu.mem_alloc(Vertex, 3, gpu.Memory.GPU)
+    indices_local := gpu.mem_alloc(u32, 3, gpu.Memory.GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)

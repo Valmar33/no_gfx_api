@@ -53,6 +53,48 @@ pool_init :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
     pool_add(pool, Info_T {})
 }
 
+pool_check :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    assert(init)
+
+    if handle == nil {
+        log.errorf("'%v' handle is nil.", name, location = loc)
+        return false
+    }
+
+    key := transmute(Resource_Key) handle
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    if key.gen != el.gen {
+        log.error("'%v' handle is used after it has been freed, or it's corrupted in some other way.", name, location = loc)
+        return false
+    }
+
+    return true
+}
+
+pool_check_no_message :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    assert(init)
+
+    if handle == nil {
+        return false
+    }
+
+    key := transmute(Resource_Key) handle
+
+    block_idx, el_idx := pool_get_idx(key.idx)
+
+    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    if key.gen != el.gen {
+        return false
+    }
+
+    return true
+}
+
 pool_get :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> Info_T
 {
     assert(init)

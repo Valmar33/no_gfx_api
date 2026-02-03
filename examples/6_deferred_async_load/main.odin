@@ -686,8 +686,8 @@ create_fullscreen_quad :: proc(
 	fsq_indices.cpu[4] = 1
 	fsq_indices.cpu[5] = 3
 
-	full_screen_quad_verts_local := gpu.mem_alloc(Fullscreen_Vertex, 4, .GPU)
-	full_screen_quad_indices_local := gpu.mem_alloc(u32, 6, .GPU)
+	full_screen_quad_verts_local := gpu.mem_alloc(Fullscreen_Vertex, 4, gpu.Memory.GPU)
+	full_screen_quad_indices_local := gpu.mem_alloc(u32, 6, gpu.Memory.GPU)
 
 	gpu.cmd_mem_copy(
 		cmd_buf,

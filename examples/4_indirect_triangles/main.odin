@@ -67,8 +67,8 @@ main :: proc()
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc(Vertex, 3, .GPU)
-    indices_local := gpu.mem_alloc(u32, 3, .GPU)
+    verts_local := gpu.mem_alloc(Vertex, 3, gpu.Memory.GPU)
+    indices_local := gpu.mem_alloc(u32, 3, gpu.Memory.GPU)
 
     // Unified indirect data struct that extends Draw_Indexed_Indirect_Command
     IndirectData :: struct {
@@ -118,7 +118,7 @@ main :: proc()
         }
     }
 
-    indirect_data_local := gpu.mem_alloc(IndirectData, Num_Triangles, .GPU)
+    indirect_data_local := gpu.mem_alloc(IndirectData, Num_Triangles, gpu.Memory.GPU)
 
     defer {
         gpu.mem_free(verts_local)

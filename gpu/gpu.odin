@@ -237,89 +237,86 @@ features_available: proc() -> Features : _features_available
 gpuptr :: struct { ptr: rawptr, _impl: [2]u64 }
 ptr :: struct { cpu: rawptr, using gpu: gpuptr }
 null :: gpuptr {}
-mem_alloc_raw: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> ptr : _mem_alloc_raw
-mem_suballoc: proc(p: ptr, offset, el_size, el_count: i64) -> ptr : _mem_suballoc
+mem_alloc_raw: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default, loc := #caller_location) -> ptr : _mem_alloc_raw
+mem_suballoc: proc(p: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr : _mem_suballoc
 mem_free_raw: proc(p: gpuptr, loc := #caller_location) : _mem_free_raw
 
 // Textures
-texture_size_and_align: proc(desc: Texture_Desc) -> (size: u64, align: u64) : _texture_size_and_align
-texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture : _texture_create
-texture_destroy: proc(texture: ^Texture) : _texture_destroy
-texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_view_descriptor
-texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor : _texture_rw_view_descriptor
-sampler_descriptor: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor : _sampler_descriptor
+texture_size_and_align: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64) : _texture_size_and_align
+texture_create: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = nil, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location) -> Texture : _texture_create
+texture_destroy: proc(texture: ^Texture, loc := #caller_location) : _texture_destroy
+texture_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_view_descriptor
+texture_rw_view_descriptor: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor : _texture_rw_view_descriptor
+sampler_descriptor: proc(sampler_desc: Sampler_Desc, loc := #caller_location) -> Sampler_Descriptor : _sampler_descriptor
 texture_view_descriptor_size: proc() -> u32 : _texture_view_descriptor_size
 texture_rw_view_descriptor_size: proc() -> u32 : _texture_rw_view_descriptor_size
 sampler_descriptor_size: proc() -> u32 : _sampler_descriptor_size
 
 // Shaders
-shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main") -> Shader : _shader_create
-shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main") -> Shader : _shader_create_compute
-shader_destroy: proc(shader: Shader) : _shader_destroy
+shader_create: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main", loc := #caller_location) -> Shader : _shader_create
+shader_create_compute: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main", loc := #caller_location) -> Shader : _shader_create_compute
+shader_destroy: proc(shader: Shader, loc := #caller_location) : _shader_destroy
 
 // Semaphores
-semaphore_create: proc(init_value: u64 = 0) -> Semaphore : _semaphore_create
-semaphore_wait: proc(sem: Semaphore, wait_value: u64) : _semaphore_wait
-semaphore_destroy: proc(sem: ^Semaphore) : _semaphore_destroy
+semaphore_create: proc(init_value: u64 = 0, loc := #caller_location) -> Semaphore : _semaphore_create
+semaphore_wait: proc(sem: Semaphore, wait_value: u64, loc := #caller_location) : _semaphore_wait
+semaphore_destroy: proc(sem: ^Semaphore, loc := #caller_location) : _semaphore_destroy
 
 // Queues
 queue_wait_idle: proc(queue: Queue) : _queue_wait_idle
-queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0) : _queue_submit
+queue_submit: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location) : _queue_submit
 
 // Raytracing
-blas_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_size_and_align
-blas_create: proc(desc: BLAS_Desc, storage: gpuptr) -> BVH : _blas_create
-blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
-//blas_update_scratch_buffer_size_and_align
-tlas_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_size_and_align
-tlas_create: proc(desc: TLAS_Desc, storage: gpuptr) -> BVH : _tlas_create
-tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
+blas_size_and_align: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _blas_size_and_align
+blas_create: proc(desc: BLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH : _blas_create
+blas_build_scratch_buffer_size_and_align: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _blas_build_scratch_buffer_size_and_align
+tlas_size_and_align: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _tlas_size_and_align
+tlas_create: proc(desc: TLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH : _tlas_create
+tlas_build_scratch_buffer_size_and_align: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64) : _tlas_build_scratch_buffer_size_and_align
 bvh_size_and_align :: proc { blas_size_and_align, tlas_size_and_align }
 bvh_create :: proc { blas_create, tlas_create }
 bvh_build_scratch_buffer_size_and_align :: proc { blas_build_scratch_buffer_size_and_align, tlas_build_scratch_buffer_size_and_align }
-bvh_root_ptr: proc(bvh: BVH) -> rawptr : _bvh_root_ptr
-bvh_descriptor: proc(bvh: BVH) -> BVH_Descriptor : _bvh_descriptor
+bvh_root_ptr: proc(bvh: BVH, loc := #caller_location) -> rawptr : _bvh_root_ptr
+bvh_descriptor: proc(bvh: BVH, loc := #caller_location) -> BVH_Descriptor : _bvh_descriptor
 bvh_descriptor_size: proc() -> u32 : _bvh_descriptor_size
-bvh_destroy: proc(bvh: ^BVH) : _bvh_destroy
+bvh_destroy: proc(bvh: ^BVH, loc := #caller_location) : _bvh_destroy
 
 // Command buffer
-commands_begin: proc(queue: Queue) -> Command_Buffer : _commands_begin
+commands_begin: proc(queue: Queue, loc := #caller_location) -> Command_Buffer : _commands_begin
 
 // Commands
-cmd_mem_copy_raw: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64) : _cmd_mem_copy_raw
-cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr) : _cmd_copy_to_texture
-cmd_blit_texture: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter) : _cmd_blit_texture
+cmd_mem_copy_raw: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64, loc := #caller_location) : _cmd_mem_copy_raw
+cmd_copy_to_texture: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr, loc := #caller_location) : _cmd_copy_to_texture
+cmd_blit_texture: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter, loc := #caller_location) : _cmd_blit_texture
 
-cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr) : _cmd_set_desc_heap
+cmd_set_desc_heap: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr, loc := #caller_location) : _cmd_set_desc_heap
 
-cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}) : _cmd_barrier
-//cmd_signal_after: proc() : _cmd_signal_after
-//cmd_wait_before: proc() : _cmd_wait_before
+cmd_barrier: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}, loc := #caller_location) : _cmd_barrier
 
-cmd_set_shaders: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader) : _cmd_set_shaders
-cmd_set_compute_shader: proc(cmd_buf: Command_Buffer, compute_shader: Shader) : _cmd_set_compute_shader
-cmd_set_depth_state: proc(cmd_buf: Command_Buffer, state: Depth_State) : _cmd_set_depth_state
-cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State) : _cmd_set_blend_state
+cmd_set_shaders: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader, loc := #caller_location) : _cmd_set_shaders
+cmd_set_compute_shader: proc(cmd_buf: Command_Buffer, compute_shader: Shader, loc := #caller_location) : _cmd_set_compute_shader
+cmd_set_depth_state: proc(cmd_buf: Command_Buffer, state: Depth_State, loc := #caller_location) : _cmd_set_depth_state
+cmd_set_blend_state: proc(cmd_buf: Command_Buffer, state: Blend_State, loc := #caller_location) : _cmd_set_blend_state
 
 // Run compute shader based on number of groups
-cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1) : _cmd_dispatch
+cmd_dispatch: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1, loc := #caller_location) : _cmd_dispatch
 
 // Schedule indirect compute shader based on number of groups, arguments is a pointer to a Dispatch_Indirect_Command struct
-cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr) : _cmd_dispatch_indirect
+cmd_dispatch_indirect: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr, loc := #caller_location) : _cmd_dispatch_indirect
 
-cmd_begin_render_pass: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc) : _cmd_begin_render_pass
-cmd_end_render_pass: proc(cmd_buf: Command_Buffer) : _cmd_end_render_pass
+cmd_begin_render_pass: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc, loc := #caller_location) : _cmd_begin_render_pass
+cmd_end_render_pass: proc(cmd_buf: Command_Buffer, loc := #caller_location) : _cmd_end_render_pass
 
-// Indices can be nil
+// Indices, vertex_data and fragment_data can be nil
 cmd_draw_indexed_instanced: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
-                                 index_count: u32, instance_count: u32 = 1) : _cmd_draw_indexed_instanced
+                                 index_count: u32, instance_count: u32 = 1, loc := #caller_location) : _cmd_draw_indexed_instanced
 cmd_draw_indexed_instanced_indirect: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices,
-                                          indirect_arguments: gpuptr) : _cmd_draw_indexed_instanced_indirect
-cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, data_vertex, data_pixel, indices: gpuptr,
-                                                indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr) : _cmd_draw_indexed_instanced_indirect_multi
+                                          indirect_arguments: gpuptr, loc := #caller_location) : _cmd_draw_indexed_instanced_indirect
+cmd_draw_indexed_instanced_indirect_multi: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
+                                                indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr, loc := #caller_location) : _cmd_draw_indexed_instanced_indirect_multi
 
-cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape) : _cmd_build_blas
-cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, instances: gpuptr) : _cmd_build_tlas
+cmd_build_blas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape, loc := #caller_location) : _cmd_build_blas
+cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, instances: gpuptr, loc := #caller_location) : _cmd_build_tlas
 
 /////////////////////////
 // Userland Utilities
@@ -346,18 +343,18 @@ slice_t :: struct($T: typeid)
     using gpu: gpuptr,
 }
 
-mem_alloc_ptr :: #force_inline proc($T: typeid, mem_type := Memory.Default) -> ptr_t(T)
+mem_alloc_ptr :: #force_inline proc($T: typeid, mem_type := Memory.Default, loc := #caller_location) -> ptr_t(T)
 {
-    p := mem_alloc_raw(size_of(T), 1, align_of(T), mem_type = mem_type)
+    p := mem_alloc_raw(size_of(T), 1, align_of(T), mem_type = mem_type, loc = loc)
     return ptr_t(T) {
         cpu = cast(^T) p.cpu,
         gpu = p.gpu
     }
 }
 
-mem_alloc_slice :: #force_inline proc($T: typeid, #any_int count: i32, mem_type := Memory.Default) -> slice_t(T)
+mem_alloc_slice :: #force_inline proc($T: typeid, #any_int count: i32, mem_type := Memory.Default, loc := #caller_location) -> slice_t(T)
 {
-    p := mem_alloc_raw(size_of(T), count, align_of(T), mem_type = mem_type)
+    p := mem_alloc_raw(size_of(T), count, align_of(T), mem_type = mem_type, loc = loc)
     return slice_t(T) {
         cpu = slice.from_ptr(cast(^T)p.cpu, int(count)),
         gpu = p.gpu
@@ -384,15 +381,14 @@ mem_free :: proc {
     mem_free_slice,
 }
 
-cmd_mem_copy_ptr :: #force_inline proc(cmd_buf: Command_Buffer, dst: ptr_t($T), src: ptr_t(T))
+cmd_mem_copy_ptr :: #force_inline proc(cmd_buf: Command_Buffer, dst: ptr_t($T), src: ptr_t(T), loc := #caller_location)
 {
-    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T))
+    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T), loc = loc)
 }
 
-cmd_mem_copy_slice :: proc(cmd_buf: Command_Buffer, dst: slice_t($T), src: slice_t(T), #any_int count: i32)
+cmd_mem_copy_slice :: proc(cmd_buf: Command_Buffer, dst: slice_t($T), src: slice_t(T), #any_int count: i32, loc := #caller_location)
 {
-    assert(int(count) <= len(dst.cpu) && int(count) <= len(src.cpu))
-    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T) * count)
+    cmd_mem_copy_raw(cmd_buf, dst.gpu, src.gpu, size_of(T) * count, loc = loc)
 }
 
 cmd_mem_copy :: proc {
@@ -460,43 +456,6 @@ arena_alloc :: proc {
     arena_alloc_ptr,
     arena_alloc_slice,
 }
-
-/*
-arena_alloc_untyped :: proc(using arena: ^Arena, bytes: u64, align: u64 = 16) -> (alloc_cpu: rawptr, alloc_gpu: rawptr)
-{
-    assert(bytes > 0 && align > 0)
-
-    gpu_addr := uintptr(arena.gpu) + uintptr(arena.offset)
-    offset = align_up(u64(gpu_addr), align) - u64(uintptr(arena.gpu))
-
-    if offset + bytes > size do panic("GPU Arena ran out of space!")
-
-    alloc_cpu = nil if cpu == nil else auto_cast(uintptr(cpu) + uintptr(offset))
-    alloc_gpu = auto_cast(uintptr(gpu) + uintptr(offset))
-    offset += bytes
-    return arena_alloc
-}
-
-arena_alloc :: proc(using arena: ^Arena, $T: typeid) -> Allocation(T)
-{
-    alloc_cpu, alloc_gpu := arena_alloc_untyped(arena, size_of(T), align_of(T))
-    return {
-        cpu = cast(^T) alloc_cpu,
-        gpu = alloc_gpu
-    }
-}
-
-arena_alloc_array :: proc(using arena: ^Arena, $T: typeid, #any_int count: i64) -> Allocation_Slice(T)
-{
-    assert(count > 0)
-
-    alloc_cpu, alloc_gpu := arena_alloc_untyped(arena, size_of(T) * u64(count), align_of(T))
-    return {
-        cpu = slice.from_ptr(cast(^T) alloc_cpu, int(count)),
-        gpu = alloc_gpu
-    }
-}
-*/
 
 arena_free_all :: proc(using arena: ^Arena)
 {

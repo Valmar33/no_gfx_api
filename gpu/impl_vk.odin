@@ -1040,7 +1040,7 @@ _features_available :: proc() -> Features
 
 // Memory
 
-_mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default) -> ptr
+_mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default, loc := #caller_location) -> ptr
 {
     bytes := el_size * el_count
 
@@ -1134,7 +1134,7 @@ _mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64,
     return p
 }
 
-_mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64) -> ptr
+_mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr
 {
     // TODO: Add suballocation to a suballocation list in allocs.
     // This lets us do bounds checking on arena allocated pointers for example.
@@ -1145,6 +1145,13 @@ _mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64) -> ptr
 
 _mem_free_raw :: proc(p: gpuptr, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= check_ptr(p, "p", loc)
+        if !ok do return
+    }
+
     alloc := transmute(Alloc_Handle) p._impl[0]
     alloc_info := pool_get(&ctx.allocs, alloc)
     vma.destroy_buffer(ctx.vma_allocator, alloc_info.buf_handle, alloc_info.allocation)
@@ -1152,8 +1159,44 @@ _mem_free_raw :: proc(p: gpuptr, loc := #caller_location)
 }
 
 // Textures
-_texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0) -> Texture
+_texture_size_and_align :: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
+    image_ci := vk.ImageCreateInfo {
+        sType = .IMAGE_CREATE_INFO,
+        imageType = to_vk_texture_type(desc.type),
+        format = to_vk_texture_format(desc.format),
+        extent = vk.Extent3D { desc.dimensions.x, desc.dimensions.y, desc.dimensions.z },
+        mipLevels = desc.mip_count,
+        arrayLayers = desc.layer_count,
+        samples = to_vk_sample_count(desc.sample_count),
+        usage = to_vk_texture_usage(desc.usage),
+        initialLayout = .UNDEFINED,
+    }
+
+    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc.format == .D32_Float else { .COLOR }
+
+    info := vk.DeviceImageMemoryRequirements {
+        sType = .DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+        pCreateInfo = &image_ci,
+        planeAspect = plane_aspect,
+    }
+
+    mem_requirements_2 := vk.MemoryRequirements2 { sType = .MEMORY_REQUIREMENTS_2 }
+    vk.GetDeviceImageMemoryRequirements(ctx.device, &info, &mem_requirements_2)
+
+    mem_requirements := mem_requirements_2.memoryRequirements
+    return u64(mem_requirements.size), u64(mem_requirements.alignment)
+}
+
+_texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location) -> Texture
+{
+    when VALIDATION
+    {
+        ok := true
+        ok &= check_ptr(storage, "storage", loc)
+        if !ok do return {}
+    }
+
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
     queue_to_use := queue
@@ -1223,7 +1266,7 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
     }
 }
 
-_texture_destroy :: proc(texture: ^Texture)
+_texture_destroy :: proc(texture: ^Texture, loc := #caller_location)
 {
     tex_info := pool_get(&ctx.textures, texture.handle)
     vk_image := tex_info.handle
@@ -1237,35 +1280,6 @@ _texture_destroy :: proc(texture: ^Texture)
     vk.DestroyImage(ctx.device, vk_image, nil)
     pool_remove(&ctx.textures, texture.handle)
     texture^ = {}
-}
-
-_texture_size_and_align :: proc(desc: Texture_Desc) -> (size: u64, align: u64)
-{
-    image_ci := vk.ImageCreateInfo {
-        sType = .IMAGE_CREATE_INFO,
-        imageType = to_vk_texture_type(desc.type),
-        format = to_vk_texture_format(desc.format),
-        extent = vk.Extent3D { desc.dimensions.x, desc.dimensions.y, desc.dimensions.z },
-        mipLevels = desc.mip_count,
-        arrayLayers = desc.layer_count,
-        samples = to_vk_sample_count(desc.sample_count),
-        usage = to_vk_texture_usage(desc.usage),
-        initialLayout = .UNDEFINED,
-    }
-
-    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc.format == .D32_Float else { .COLOR }
-
-    info := vk.DeviceImageMemoryRequirements {
-        sType = .DEVICE_IMAGE_MEMORY_REQUIREMENTS,
-        pCreateInfo = &image_ci,
-        planeAspect = plane_aspect,
-    }
-
-    mem_requirements_2 := vk.MemoryRequirements2 { sType = .MEMORY_REQUIREMENTS_2 }
-    vk.GetDeviceImageMemoryRequirements(ctx.device, &info, &mem_requirements_2)
-
-    mem_requirements := mem_requirements_2.memoryRequirements
-    return u64(mem_requirements.size), u64(mem_requirements.alignment)
 }
 
 @(private="file")
@@ -1306,7 +1320,7 @@ get_or_add_sampler :: proc(info: vk.SamplerCreateInfo) -> vk.Sampler
     return sampler
 }
 
-_texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
+_texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor
 {
     tex_info := pool_get(&ctx.textures, texture.handle)
     vk_image := tex_info.handle
@@ -1341,7 +1355,7 @@ _texture_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc)
     return desc
 }
 
-_texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc) -> Texture_Descriptor
+_texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_Desc, loc := #caller_location) -> Texture_Descriptor
 {
     tex_info := pool_get(&ctx.textures, texture.handle)
     vk_image := tex_info.handle
@@ -1376,7 +1390,7 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
     return desc
 }
 
-_sampler_descriptor :: proc(sampler_desc: Sampler_Desc) -> Sampler_Descriptor
+_sampler_descriptor :: proc(sampler_desc: Sampler_Desc, loc := #caller_location) -> Sampler_Descriptor
 {
     sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
@@ -1527,18 +1541,18 @@ _shader_create_internal :: proc(code: []u32, is_compute: bool, vk_stage: vk.Shad
     return pool_add(&ctx.shaders, shader)
 }
 
-_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main") -> Shader
+_shader_create :: proc(code: []u32, type: Shader_Type_Graphics, entry_point_name: string = "main", loc := #caller_location) -> Shader
 {
     vk_stage := to_vk_shader_stage(type)
     return _shader_create_internal(code, false, vk_stage, entry_point_name)
 }
 
-_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main") -> Shader
+_shader_create_compute :: proc(code: []u32, group_size_x: u32, group_size_y: u32 = 1, group_size_z: u32 = 1, entry_point_name: string = "main", loc := #caller_location) -> Shader
 {
     return _shader_create_internal(code, true, { .COMPUTE }, entry_point_name, group_size_x, group_size_y, group_size_z)
 }
 
-_shader_destroy :: proc(shader: Shader)
+_shader_destroy :: proc(shader: Shader, loc := #caller_location)
 {
     tls := get_tls()
     shader_info := pool_get(&ctx.shaders, shader)
@@ -1557,7 +1571,7 @@ _shader_destroy :: proc(shader: Shader)
 }
 
 // Semaphores
-_semaphore_create :: proc(init_value: u64 = 0) -> Semaphore
+_semaphore_create :: proc(init_value: u64 = 0, loc := #caller_location) -> Semaphore
 {
     next: rawptr
     next = &vk.SemaphoreTypeCreateInfo {
@@ -1576,7 +1590,7 @@ _semaphore_create :: proc(init_value: u64 = 0) -> Semaphore
     return cast(Semaphore) uintptr(sem)
 }
 
-_semaphore_wait :: proc(sem: Semaphore, wait_value: u64)
+_semaphore_wait :: proc(sem: Semaphore, wait_value: u64, loc := #caller_location)
 {
     sems := []vk.Semaphore { auto_cast uintptr(sem) }
     values := []u64 { wait_value }
@@ -1589,7 +1603,7 @@ _semaphore_wait :: proc(sem: Semaphore, wait_value: u64)
     }, timeout = max(u64))
 }
 
-_semaphore_destroy :: proc(sem: ^Semaphore)
+_semaphore_destroy :: proc(sem: ^Semaphore, loc := #caller_location)
 {
     vk_sem := transmute(vk.Semaphore) (sem^)
     vk.DestroySemaphore(ctx.device, vk_sem, nil)
@@ -1597,20 +1611,21 @@ _semaphore_destroy :: proc(sem: ^Semaphore)
 }
 
 // Raytracing
-_blas_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+_blas_size_and_align :: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
     return u64(get_vk_blas_size_info(desc).accelerationStructureSize), 16
 }
 
-_blas_create :: proc(desc: BLAS_Desc, storage: gpuptr) -> BVH
+_blas_create :: proc(desc: BLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH
 {
-    storage_buf, storage_offset, ok_s := get_buf_offset_from_gpu_ptr(storage)
-    if !ok_s
+    when VALIDATION
     {
-        log.error("Alloc not found.")
-        return {}
+        ok := true
+        ok &= check_ptr(storage, "storage", loc)
+        if !ok do return {}
     }
 
+    storage_buf, storage_offset, _ := get_buf_offset_from_gpu_ptr(storage)
     size_info := get_vk_blas_size_info(desc)
 
     bvh_handle: vk.AccelerationStructureKHR
@@ -1636,25 +1651,26 @@ _blas_create :: proc(desc: BLAS_Desc, storage: gpuptr) -> BVH
     return pool_add(&ctx.bvhs, bvh_info)
 }
 
-_blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc) -> (size: u64, align: u64)
+_blas_build_scratch_buffer_size_and_align :: proc(desc: BLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
     return u64(get_vk_blas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
 }
 
-_tlas_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+_tlas_size_and_align :: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
     return u64(get_vk_tlas_size_info(desc).accelerationStructureSize), 1
 }
 
-_tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr) -> BVH
+_tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr, loc := #caller_location) -> BVH
 {
-    storage_buf, storage_offset, ok_s := get_buf_offset_from_gpu_ptr(storage)
-    if !ok_s
+    when VALIDATION
     {
-        log.error("Alloc not found.")
-        return {}
+        ok := true
+        ok &= check_ptr(storage, "storage", loc)
+        if !ok do return {}
     }
 
+    storage_buf, storage_offset, _ := get_buf_offset_from_gpu_ptr(storage)
     size_info := get_vk_tlas_size_info(desc)
 
     bvh_handle: vk.AccelerationStructureKHR
@@ -1676,12 +1692,12 @@ _tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr) -> BVH
     return pool_add(&ctx.bvhs, bvh_info)
 }
 
-_tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc) -> (size: u64, align: u64)
+_tlas_build_scratch_buffer_size_and_align :: proc(desc: TLAS_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
     return u64(get_vk_tlas_size_info(desc).buildScratchSize), u64(ctx.physical_properties.bvh_props.minAccelerationStructureScratchOffsetAlignment)
 }
 
-_bvh_root_ptr :: proc(bvh: BVH) -> rawptr
+_bvh_root_ptr :: proc(bvh: BVH, loc := #caller_location) -> rawptr
 {
     bvh_info := pool_get(&ctx.bvhs, bvh)
 
@@ -1691,7 +1707,7 @@ _bvh_root_ptr :: proc(bvh: BVH) -> rawptr
     })
 }
 
-_bvh_descriptor :: proc(bvh: BVH) -> BVH_Descriptor
+_bvh_descriptor :: proc(bvh: BVH, loc := #caller_location) -> BVH_Descriptor
 {
     bvh_info := pool_get(&ctx.bvhs, bvh)
 
@@ -1715,7 +1731,7 @@ _bvh_descriptor_size :: proc() -> u32
     return ctx.bvh_desc_size
 }
 
-_bvh_destroy :: proc(bvh: ^BVH)
+_bvh_destroy :: proc(bvh: ^BVH, loc := #caller_location)
 {
     bvh_info := pool_get(&ctx.bvhs, bvh^)
 
@@ -1767,7 +1783,7 @@ _queue_wait_idle :: proc(queue: Queue)
     if sync.guard(&ctx.lock) do vk.QueueWaitIdle(ctx.queues[queue].handle)
 }
 
-_commands_begin :: proc(queue: Queue) -> Command_Buffer
+_commands_begin :: proc(queue: Queue, loc := #caller_location) -> Command_Buffer
 {
     cmd_buf := vk_acquire_cmd_buf(queue)
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
@@ -1782,7 +1798,7 @@ _commands_begin :: proc(queue: Queue) -> Command_Buffer
     return cmd_buf
 }
 
-_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0)
+_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location)
 {
     vk_signal_sem := transmute(vk.Semaphore) signal_sem
 
@@ -1809,43 +1825,65 @@ _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Sema
 
 // Commands
 
-_cmd_mem_copy_raw :: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64)
+_cmd_mem_copy_raw :: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr_range(dst, bytes, "dst", loc)
+        ok &= check_ptr_range(src, bytes, "src", loc)
+        if !ok do return
+    }
+
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
 
-    src_buf, src_offset, ok_s := get_buf_offset_from_gpu_ptr(src)
-    dst_buf, dst_offset, ok_d := get_buf_offset_from_gpu_ptr(dst)
-    if !ok_s || !ok_d
-    {
-        log.error("Alloc not found.")
-        return
+    src_alloc := transmute(Alloc_Handle) src._impl[0]
+    src_alloc_info := pool_get(&ctx.allocs, src_alloc)
+    dst_alloc := transmute(Alloc_Handle) dst._impl[0]
+    dst_alloc_info := pool_get(&ctx.allocs, dst_alloc)
+
+    src_buf, src_offset, _ := get_buf_offset_from_gpu_ptr(src)
+    dst_buf, dst_offset, _ := get_buf_offset_from_gpu_ptr(dst)
+
+    // Clamp copy regions
+    to_copy: uintptr
+    if uintptr(src_offset) > uintptr(src_alloc_info.buf_size) || uintptr(dst_offset) > uintptr(dst_alloc_info.buf_size) {
+        to_copy = 0
+    } else {
+        to_copy = min(uintptr(bytes), min(uintptr(src_alloc_info.buf_size) - uintptr(src_offset), uintptr(dst_alloc_info.buf_size) - uintptr(dst_offset)))
     }
 
-    copy_regions := []vk.BufferCopy {
-        {
-            srcOffset = vk.DeviceSize(src_offset),
-            dstOffset = vk.DeviceSize(dst_offset),
-            size = vk.DeviceSize(bytes),
+    if to_copy > 0
+    {
+        copy_regions := []vk.BufferCopy {
+            {
+                srcOffset = vk.DeviceSize(src_offset),
+                dstOffset = vk.DeviceSize(dst_offset),
+                size = vk.DeviceSize(to_copy),
+            }
         }
+        vk.CmdCopyBuffer(cmd_buf_info.handle, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
     }
-    vk.CmdCopyBuffer(cmd_buf_info.handle, src_buf, dst_buf, u32(len(copy_regions)), raw_data(copy_regions))
 }
 
 // TODO: dst is ignored atm.
-_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr)
+_cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr(src, "src", loc)
+        ok &= check_ptr(dst, "dst", loc)
+        if !ok do return
+    }
+
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
     tex_info := pool_get(&ctx.textures, texture.handle)
-    sync.unlock(&ctx.lock)
-
     vk_image := tex_info.handle
 
-    src_buf, src_offset, ok_s := get_buf_offset_from_gpu_ptr(src)
-    if !ok_s {
-        log.error("Alloc not found.")
-        return
-    }
+    src_buf, src_offset, _ := get_buf_offset_from_gpu_ptr(src)
 
     plane_aspect: vk.ImageAspectFlags = { .DEPTH } if texture.format == .D32_Float else { .COLOR }
 
@@ -1864,8 +1902,15 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
     })
 }
 
-_cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter)
+_cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     assert(len(src_rects) == len(dst_rects))
 
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
@@ -1922,73 +1967,24 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
     vk.CmdBlitImage(cmd_buf_info.handle, src_info.handle, .GENERAL, dst_info.handle, .GENERAL, u32(len(regions)), raw_data(regions), vk_filter)
 }
 
-_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr)
+_cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr_allow_nil(textures, "textures", loc)
+        ok &= check_ptr_allow_nil(textures_rw, "textures_rw", loc)
+        ok &= check_ptr_allow_nil(samplers, "samplers", loc)
+        ok &= check_ptr_allow_nil(bvhs, "bvhs", loc)
+        if !ok do return
+    }
+
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
 
     vk_cmd_buf := cmd_buf.handle
 
     if textures == {} && textures_rw == {} && samplers == {} && bvhs != {} do return
-
-    // Check pointers. Drivers are currently not very good at recovering from situations
-    // like this (e.g. on my setup, the whole desktop freezes for 10 seconds) so we try
-    // to catch these at the API level if possible.
-    when false  // TODO: Reintroduce these with proper validation code
-    {
-        if textures != {}
-        {
-            alloc, ok_s := search_alloc_from_gpu_ptr(textures)
-            if !ok_s {
-                log.error("Alloc not found.")
-                return
-            }
-            sync.guard(&ctx.lock)
-            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
-                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
-                return
-            }
-        }
-        if textures_rw != {}
-        {
-            alloc, ok_s := search_alloc_from_gpu_ptr(textures_rw)
-            if !ok_s {
-                log.error("Alloc not found.")
-                return
-            }
-            sync.guard(&ctx.lock)
-            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
-                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
-                return
-            }
-        }
-        if samplers != {}
-        {
-            alloc, ok_s := search_alloc_from_gpu_ptr(samplers)
-            if !ok_s {
-                log.error("Alloc not found.")
-                return
-            }
-            sync.guard(&ctx.lock)
-            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
-                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
-                return
-            }
-        }
-        if bvhs != {}
-        {
-            alloc, ok_s := search_alloc_from_gpu_ptr(bvhs)
-            if !ok_s {
-                log.error("Alloc not found.")
-                return
-            }
-            if ctx.gpu_allocs[alloc].alloc_type != .Descriptors {
-                log.error("Attempted to use cmd_set_texture_heap with memory that wasn't allocated with alloc_type = .Descriptors!")
-                return
-            }
-        }
-    }
 
     infos: [4]vk.DescriptorBufferBindingInfoEXT
     // Fill in infos with the subset of valid pointers
@@ -2056,8 +2052,15 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
     }
 }
 
-_cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {})
+_cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
 
     vk_cmd_buf := cmd_buf.handle
@@ -2110,11 +2113,15 @@ _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazar
     vk.CmdPipelineBarrier(vk_cmd_buf, vk_before, vk_after, {}, 1, &barrier, 0, nil, 0, nil)
 }
 
-_cmd_signal_after :: proc() {}
-_cmd_wait_before :: proc() {}
-
-_cmd_set_shaders :: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader)
+_cmd_set_shaders :: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
     vert_shader := pool_get(&ctx.shaders, vert_shader)
     frag_shader := pool_get(&ctx.shaders, frag_shader)
@@ -2129,8 +2136,15 @@ _cmd_set_shaders :: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shad
     vk.CmdBindShadersEXT(vk_cmd_buf, u32(len(shader_stages)), raw_data(shader_stages), raw_data(to_bind))
 }
 
-_cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State)
+_cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
     sync.unlock(&ctx.lock)
@@ -2145,8 +2159,15 @@ _cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State)
     vk.CmdSetStencilTestEnable(vk_cmd_buf, false)
 }
 
-_cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
+_cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     sync.lock(&ctx.lock)
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
     sync.unlock(&ctx.lock)
@@ -2169,8 +2190,15 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State)
     vk.CmdSetColorWriteMaskEXT(vk_cmd_buf, 0, 1, &color_write_mask)
 }
 
-_cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
+_cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     shader_info := pool_get(&ctx.shaders, compute_shader)
     vk_shader_info := shader_info.handle
 
@@ -2185,19 +2213,19 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader)
     cmd_buf_info.compute_shader = compute_shader
 }
 
-_cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1)
+_cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
-
-    vk_cmd_buf := cmd_buf.handle
-
-    if _, ok := cmd_buf.compute_shader.?; !ok
+    when VALIDATION
     {
-        log.error("cmd_dispatch called without a compute shader set. Call cmd_set_compute_shader first.")
-        return
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr(compute_data, "compute_data", loc)
+        ok &= check_cmd_buf_has_compute_shader_set(cmd_buf, "cmd_buf", loc)
+        if !ok do return
     }
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
 
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data.ptr,
@@ -2208,26 +2236,23 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_
     vk.CmdDispatch(vk_cmd_buf, num_groups_x, num_groups_y, num_groups_z)
 }
 
-_cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr)
+_cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
-
-    vk_cmd_buf := cmd_buf.handle
-
-    if _, ok := cmd_buf.compute_shader.?; !ok
+    when VALIDATION
     {
-        log.error("cmd_dispatch_indirect called without a compute shader set. Call cmd_set_compute_shader first.")
-        return
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr(compute_data, "compute_data", loc)
+        ok &= check_ptr(arguments, "arguments", loc)
+        ok &= check_cmd_buf_has_compute_shader_set(cmd_buf, "cmd_buf", loc)
+        if !ok do return
     }
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
 
     arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(arguments)
-    if !ok_a
-    {
-        log.error("Arguments alloc not found for indirect dispatch")
-        return
-    }
+    assert(ok_a)
 
     push_constants := Compute_Shader_Push_Constants {
         compute_data = compute_data.ptr,
@@ -2238,12 +2263,18 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments:
     vk.CmdDispatchIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset))
 }
 
-_cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
+_cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc, loc := #caller_location)
 {
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_cmd_buf_must_be_graphics(cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
 
-    ensure(cmd_buf.queue_type == .Main, "cmd_begin_render_pass called on a non-graphics command buffer")
-    vk_cmd_buf := cmd_buf.handle
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
 
     scratch, _ := acquire_scratch()
 
@@ -2345,8 +2376,15 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc)
     vk.CmdSetFrontFace(vk_cmd_buf, .COUNTER_CLOCKWISE)
 }
 
-_cmd_end_render_pass :: proc(cmd_buf: Command_Buffer)
+_cmd_end_render_pass :: proc(cmd_buf: Command_Buffer, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        if !ok do return
+    }
+
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
 
     vk_cmd_buf := cmd_buf.handle
@@ -2354,18 +2392,23 @@ _cmd_end_render_pass :: proc(cmd_buf: Command_Buffer)
 }
 
 _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
-                                    index_count: u32, instance_count: u32 = 1)
+                                    index_count: u32, instance_count: u32 = 1, loc := #caller_location)
 {
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr_allow_nil(vertex_data, "vertex_data", loc)
+        ok &= check_ptr_allow_nil(fragment_data, "fragment_data", loc)
+        ok &= check_ptr_allow_nil(indices, "indices", loc)
+        if !ok do return
+    }
 
+    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
     vk_cmd_buf := cmd_buf.handle
 
     indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
-    if !ok_i
-    {
-        log.error("Indices alloc not found")
-        return
-    }
+    assert(ok_i)
 
     push_constants := Graphics_Shader_Push_Constants {
         vert_data = vertex_data.ptr,
@@ -2378,27 +2421,24 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data, fragme
     vk.CmdDrawIndexed(vk_cmd_buf, index_count, instance_count, 0, 0, 0)
 }
 
-_cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices, indirect_arguments: gpuptr)
+_cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices, indirect_arguments: gpuptr, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
-
-    vk_cmd_buf := cmd_buf.handle
-
-    indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
-    if !ok_i
+    when VALIDATION
     {
-        log.error("Indices alloc not found")
-        return
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr_allow_nil(vertex_data, "vertex_data", loc)
+        ok &= check_ptr_allow_nil(fragment_data, "fragment_data", loc)
+        ok &= check_ptr_allow_nil(indices, "indices", loc)
+        ok &= check_ptr(indirect_arguments, "indirect_arguments", loc)
+        if !ok do return
     }
 
-    arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(indirect_arguments)
-    if !ok_a
-    {
-        log.error("Arguments alloc not found")
-        return
-    }
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
+
+    indices_buf, indices_offset, _ := get_buf_offset_from_gpu_ptr(indices)
+    arguments_buf, arguments_offset, _ := get_buf_offset_from_gpu_ptr(indirect_arguments)
 
     push_constants := Graphics_Shader_Push_Constants {
         vert_data = vertex_data.ptr,
@@ -2411,40 +2451,35 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
     vk.CmdDrawIndexedIndirect(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), 1, 0)
 }
 
-_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data_vertex, data_pixel, indices: gpuptr,
-                                                   indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr)
+_cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
+                                                   indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr, loc := #caller_location)
 {
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr_allow_nil(vertex_data, "vertex_data", loc)
+        ok &= check_ptr_allow_nil(fragment_data, "fragment_data", loc)
+        ok &= check_ptr_allow_nil(indices, "indices", loc)
+        ok &= check_ptr(indirect_arguments, "indirect_arguments", loc)
+        ok &= check_ptr(draw_count, "draw_count", loc)
+        if !ok do return
+    }
+
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
 
     vk_cmd_buf := cmd_buf.handle
 
-    indices_buf, indices_offset, ok_i := get_buf_offset_from_gpu_ptr(indices)
-    if !ok_i
-    {
-        log.error("Indices alloc not found")
-        return
-    }
+    indices_buf, indices_offset, _ := get_buf_offset_from_gpu_ptr(indices)
+    arguments_buf, arguments_offset, _ := get_buf_offset_from_gpu_ptr(indirect_arguments)
+    draw_count_buf, draw_count_offset, _ := get_buf_offset_from_gpu_ptr(draw_count)
 
-    arguments_buf, arguments_offset, ok_a := get_buf_offset_from_gpu_ptr(indirect_arguments)
-    if !ok_a
-    {
-        log.error("Arguments alloc not found")
-        return
-    }
-
-    draw_count_buf, draw_count_offset, ok_dc := get_buf_offset_from_gpu_ptr(draw_count)
-    if !ok_dc
-    {
-        log.error("Draw count alloc not found")
-        return
-    }
-
-    // data_vertex and data_pixel are shared data for vertex and fragment shaders
+    // vertex_data and fragment_data are shared data for vertex and fragment shaders
     // indirect_arguments points to the unified indirect data array containing both command and user data
     // The stride is the size of the combined struct { IndirectDrawCommand cmd; UserData data; }
     push_constants := Graphics_Shader_Push_Constants {
-        vert_data = data_vertex.ptr,
-        frag_data = data_pixel.ptr,
+        vert_data = vertex_data.ptr,
+        frag_data = fragment_data.ptr,
         indirect_data = indirect_arguments.ptr,
     }
     vk.CmdPushConstants(vk_cmd_buf, ctx.common_pipeline_layout_graphics, { .VERTEX, .FRAGMENT }, 0, size_of(Graphics_Shader_Push_Constants), &push_constants)
@@ -2462,23 +2497,20 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, data
     vk.CmdDrawIndexedIndirectCount(vk_cmd_buf, arguments_buf, vk.DeviceSize(arguments_offset), draw_count_buf, vk.DeviceSize(draw_count_offset), max_draw_count, stride)
 }
 
-_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape)
+_cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    sync.unlock(&ctx.lock)
-
-    vk_cmd_buf := cmd_buf.handle
-
-    sync.lock(&ctx.lock)
-    bvh_info := pool_get(&ctx.bvhs, bvh)
-    sync.unlock(&ctx.lock)
-
-    if !bvh_info.is_blas
+    when VALIDATION
     {
-        log.error("This BVH is not a BLAS.")
-        return
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr(scratch_storage, "scratch_storage", loc)
+        ok &= check_bvh_must_be_blas(bvh, "bvh", loc)
+        if !ok do return
     }
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    vk_cmd_buf := cmd_buf_info.handle
+    bvh_info := pool_get(&ctx.bvhs, bvh)
 
     if len(shapes) != len(bvh_info.blas_desc.shapes)
     {
@@ -2539,20 +2571,21 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_
     vk.CmdBuildAccelerationStructuresKHR(vk_cmd_buf, 1, &build_info, &range_infos_ptr)
 }
 
-_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage, instances: gpuptr)
+_cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage, instances: gpuptr, loc := #caller_location)
 {
-    sync.lock(&ctx.lock)
-    cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-    bvh_info := pool_get(&ctx.bvhs, bvh)
-    sync.unlock(&ctx.lock)
-
-    vk_cmd_buf := cmd_buf.handle
-
-    if bvh_info.is_blas
+    when VALIDATION
     {
-        log.error("This BVH is not a TLAS.")
-        return
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_ptr(scratch_storage, "scratch_storage", loc)
+        ok &= check_ptr(instances, "instances", loc)
+        ok &= check_bvh_must_be_tlas(bvh, "bvh", loc)
+        if !ok do return
     }
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    bvh_info := pool_get(&ctx.bvhs, bvh)
+    vk_cmd_buf := cmd_buf_info.handle
 
     scratch, _ := acquire_scratch()
 
@@ -2991,4 +3024,114 @@ to_vk_render_attachment :: #force_inline proc(attach: Render_Attachment) -> vk.R
         storeOp = to_vk_store_op(attach.store_op),
         clearValue = { color = { float32 = attach.clear_color } }
     }
+}
+
+//////////////////////////////////////
+// Validation
+
+@(private="file")
+check_ptr :: proc(p: gpuptr, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    if p == {} {
+        log.errorf("'%v' address is nil.", name, location = loc)
+        return false
+    }
+
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) p._impl[0])
+
+    if uintptr(p.ptr) > uintptr(alloc_info.gpu) + uintptr(alloc_info.buf_size) || uintptr(p.ptr) < uintptr(alloc_info.gpu) {
+        log.errorf("'%v' address is out of range for the designated allocation. %v bytes were allocated, but you're attempting to access offset %v.",
+                   name, alloc_info.buf_size, i64(uintptr(p.ptr)) - i64(uintptr(alloc_info.gpu)), location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_ptr_allow_nil :: proc(p: gpuptr, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    if p == {} {
+        return true
+    }
+
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) p._impl[0])
+
+    if uintptr(p.ptr) > uintptr(alloc_info.gpu) + uintptr(alloc_info.buf_size) || uintptr(p.ptr) < uintptr(alloc_info.gpu) {
+        log.errorf("'%v' address is out of range for the designated allocation. %v bytes were allocated, but you're attempting to access offset %v.",
+                   name, alloc_info.buf_size, i64(uintptr(p.ptr)) - i64(uintptr(alloc_info.gpu)), location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_ptr_range :: proc(p: gpuptr, #any_int size: i64, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    if p == {} {
+        log.errorf("'%v' address is nil.", name, location = loc)
+        return false
+    }
+
+    alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) p._impl[0])
+
+    if uintptr(p.ptr) + uintptr(size) > uintptr(alloc_info.gpu) + uintptr(alloc_info.buf_size) || uintptr(p.ptr) < uintptr(alloc_info.gpu) {
+        log.errorf("'%v' address is out of range for the designated allocation. %v bytes were allocated, but you're attempting to access [%v, %v].",
+                   name, alloc_info.buf_size, i64(uintptr(p.ptr)) - i64(uintptr(alloc_info.gpu)), size, location = loc)
+        return true  // Proceed with execution, make sure to clamp accesses.
+    }
+
+    return true
+}
+
+@(private="file")
+check_cmd_buf_has_compute_shader_set :: proc(cmd_buf: Command_Buffer, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    if !pool_check_no_message(&ctx.command_buffers, cmd_buf, name, loc) do return false
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+
+    if cmd_buf_info.compute_shader == nil {
+        log.errorf("'%v' does not have an associated compute shader. Call cmd_set_compute_shader first.", name, location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_cmd_buf_must_be_graphics :: proc(cmd_buf: Command_Buffer, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    if cmd_buf_info.queue_type != .Main {
+        log.errorf("'%v' must be of type '%v', got type '%v'.", name, Queue.Main, cmd_buf_info.queue, location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_bvh_must_be_tlas :: proc(bvh: BVH, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    bvh_info := pool_get(&ctx.bvhs, bvh)
+    if bvh_info.is_blas {
+        log.errorf("'%v' must be a TLAS.", name, location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_bvh_must_be_blas :: proc(bvh: BVH, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    bvh_info := pool_get(&ctx.bvhs, bvh)
+    if !bvh_info.is_blas {
+        log.errorf("'%v' must be a BLAS.", name, location = loc)
+        return false
+    }
+
+    return true
 }
