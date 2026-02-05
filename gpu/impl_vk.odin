@@ -171,13 +171,12 @@ Queue_Info :: struct
 @(private="file")
 Shader_Info :: struct {
     handle: vk.ShaderEXT,
-    command_buffers: map[Command_Buffer]Command_Buffer,
     current_workgroup_size: [3]u32,
     is_compute: bool,
 }
 
 @(private="file")
-Command_Buffer_Info :: struct  {
+Command_Buffer_Info :: struct {
     handle: vk.CommandBuffer,
     timeline_value: u64,
     thread_id: int,
@@ -186,6 +185,16 @@ Command_Buffer_Info :: struct  {
     compute_shader: Maybe(Shader),
     recording: bool,
     pool_handle: Command_Buffer,
+
+    wait_sems: [dynamic]Semaphore_Value,
+    signal_sems: [dynamic]Semaphore_Value,
+}
+
+@(private="file")
+Semaphore_Value :: struct
+{
+    sem: Semaphore,
+    val: u64,
 }
 
 // Initialization
@@ -973,7 +982,7 @@ _swapchain_acquire_next :: proc() -> Texture
 
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
 
-        vk_submit_cmd_buf(cmd_buf)
+        vk_submit_cmd_bufs({cmd_buf})
     }
 
     return Texture {
@@ -1105,6 +1114,9 @@ _features_available :: proc() -> Features
 
 // Memory
 
+@(private="file")
+Descriptor_Buffer_Usage :: vk.BufferUsageFlags { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST }
+
 _mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default, loc := #caller_location) -> ptr
 {
     bytes := el_size * el_count
@@ -1145,7 +1157,7 @@ _mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64,
         }
         case .Descriptors:
         {
-            buf_usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST }
+            buf_usage = Descriptor_Buffer_Usage
         }
     }
 
@@ -1316,7 +1328,8 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
         })
 
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
-        vk_submit_cmd_buf(cmd_buf, vk_signal_sem, signal_value)
+        if signal_sem != {} do cmd_add_signal_semaphore(cmd_buf, signal_sem, signal_value)
+        vk_submit_cmd_bufs({cmd_buf})
     }
 
     tex_info := Texture_Info { image, {} }
@@ -1621,14 +1634,6 @@ _shader_destroy :: proc(shader: Shader, loc := #caller_location)
     vk_shader := shader_info.handle
     vk.DestroyShaderEXT(ctx.device, vk_shader, nil)
 
-    // Remove from any command buffer tracking
-    for cmd_buf in shader_info.command_buffers
-    {
-        cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
-        cmd_buf_info.compute_shader = {}
-    }
-
-    delete(shader_info.command_buffers)
     pool_remove(&ctx.shaders, shader)
 }
 
@@ -1857,28 +1862,53 @@ _commands_begin :: proc(queue: Queue, loc := #caller_location) -> Command_Buffer
     return cmd_buf
 }
 
-_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, signal_sem: Semaphore = {}, signal_value: u64 = 0, loc := #caller_location)
+_queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, loc := #caller_location)
 {
-    vk_signal_sem := pool_get(&ctx.semaphores, signal_sem) if signal_sem != {} else vk.Semaphore(0)
-    provided_queue_info := ctx.queues[queue]
+    when VALIDATION
+    {
+        ok := true
+        for cmd_buf, i in cmd_bufs
+        {
+            cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+            if cmd_buf_info.queue != queue {
+                log.errorf("'queue' does not match the queue associated with 'cmd_bufs[%v]'.", i)
+                ok = false
+            }
+
+            if cmd_buf_info.thread_id != sync.current_thread_id() {
+                log.errorf("Attempting to submit 'cmd_bufs[%v]' on thread '%v' even though it was created on thread '%v'. This is not allowed.",
+                           i, sync.current_thread_id(), cmd_buf_info.thread_id)
+                ok = false
+            }
+        }
+
+        // TODO: Check that all wait sems and signal sems are still valid here.
+
+        if !ok do return
+    }
 
     for cmd_buf in cmd_bufs
     {
         cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-        cmd_buf_queue_info := ctx.queues[cmd_buf_info.queue]
-
-        // Validate that the provided queue matches the command buffer's associated queue
-        ensure(cmd_buf_info.queue == queue, "queue_submit: provided queue does not match the queue associated with command buffer")
-
         vk_cmd_buf := cmd_buf_info.handle
         vk_check(vk.EndCommandBuffer(vk_cmd_buf))
-
-        vk_submit_cmd_buf(cmd_buf, vk_signal_sem, signal_value)
-
-        // Clear compute shader tracking for this command buffer
-        cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
-        cmd_buf_info_mut.compute_shader = {}
     }
+
+    vk_submit_cmd_bufs(cmd_bufs)
+
+    for cmd_buf in cmd_bufs {
+        clear_cmd_buf(cmd_buf)
+    }
+}
+
+@(private="file")
+clear_cmd_buf :: proc(cmd_buf: Command_Buffer)
+{
+    cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
+    cmd_buf_info_mut.compute_shader = {}
+    cmd_buf_info_mut.recording = false
+    clear(&cmd_buf_info_mut.wait_sems)
+    clear(&cmd_buf_info_mut.signal_sems)
 }
 
 // Commands
@@ -1977,7 +2007,6 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
 
     vk_filter := to_vk_filter(filter)
 
-    // TODO: This needs to be thread-local!!!
     scratch, _ := acquire_scratch()
     regions := make([]vk.ImageBlit, len(src_rects), allocator = scratch)
     for &region, i in regions
@@ -2052,7 +2081,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures.ptr,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+            usage = Descriptor_Buffer_Usage
         }
         cursor += 1
     }
@@ -2061,7 +2090,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) textures_rw.ptr,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+            usage = Descriptor_Buffer_Usage
         }
         cursor += 1
     }
@@ -2070,7 +2099,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) samplers.ptr,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+            usage = Descriptor_Buffer_Usage
         }
         cursor += 1
     }
@@ -2079,7 +2108,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         infos[cursor] = {
             sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
             address = transmute(vk.DeviceAddress) bvhs.ptr,
-            usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SHADER_DEVICE_ADDRESS, .TRANSFER_SRC, .TRANSFER_DST },
+            usage = Descriptor_Buffer_Usage
         }
         cursor += 1
     }
@@ -2108,6 +2137,36 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
         vk.CmdSetDescriptorBufferOffsetsEXT(vk_cmd_buf, .COMPUTE, ctx.common_pipeline_layout_compute, 3, 1, &cursor, &buffer_offsets[3])
         cursor += 1
     }
+}
+
+_cmd_add_wait_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, wait_value: u64, loc := #caller_location)
+{
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_cmd_buf_must_be_recording(cmd_buf, "cmd_buf", loc)
+        ok &= pool_check(&ctx.semaphores, sem, "sem", loc)
+        if !ok do return
+    }
+
+    cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
+    append(&cmd_buf_info.wait_sems, Semaphore_Value { sem = sem, val = wait_value })
+}
+
+_cmd_add_signal_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, signal_value: u64, loc := #caller_location)
+{
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= check_cmd_buf_must_be_recording(cmd_buf, "cmd_buf", loc)
+        ok &= pool_check(&ctx.semaphores, sem, "sem", loc)
+        if !ok do return
+    }
+
+    cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock)
+    append(&cmd_buf_info.signal_sems, Semaphore_Value { sem = sem, val = signal_value })
 }
 
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}, loc := #caller_location)
@@ -2439,7 +2498,6 @@ _cmd_end_render_pass :: proc(cmd_buf: Command_Buffer, loc := #caller_location)
     }
 
     cmd_buf := pool_get(&ctx.command_buffers, cmd_buf)
-
     vk_cmd_buf := cmd_buf.handle
     vk.CmdEndRendering(vk_cmd_buf)
 }
@@ -2859,11 +2917,7 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
             cmd_buf_info.recording = true
             cmd_buf_info.queue = queue
 
-            if cmd_buf_info.compute_shader != nil {
-                shader_info := pool_get(&ctx.shaders, cmd_buf_info.compute_shader.?)
-                delete_key(&shader_info.command_buffers, cmd_buf_info.pool_handle)
-                cmd_buf_info.compute_shader = {}
-            }
+            cmd_buf_info.compute_shader = {}
 
             cmd_buf_info.thread_id = sync.current_thread_id()
             return handle.pool_handle
@@ -2899,22 +2953,88 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 }
 
 @(private="file")
-vk_submit_cmd_buf :: proc(cmd_buf: Command_Buffer, signal_sem: vk.Semaphore = {}, signal_value: u64 = 0)
+vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
 {
+    if len(cmd_bufs) <= 0 do return
+
     tls_ctx := get_tls()
-    if cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
-        cmd_buf_info_mut.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info_mut.queue].val, 1) + 1
+
+    for cmd_buf in cmd_bufs
+    {
+        if cmd_buf_info_mut, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
+            cmd_buf_info_mut.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info_mut.queue].val, 1) + 1
+        }
     }
 
-    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
-    queue := cmd_buf_info.queue
+    scratch, _ := acquire_scratch()
+    submit_infos := make([dynamic]vk.SubmitInfo, allocator = scratch)
+    queue: Queue
+    for cmd_buf in cmd_bufs
+    {
+        cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+        cmd_buf_lock := pool_get_lock(&ctx.command_buffers, cmd_buf)
+        sync.guard(cmd_buf_lock)
+
+        queue = cmd_buf_info.queue
+        queue_sem := ctx.cmd_bufs_timelines[queue].sem
+        assert(cmd_buf_info.recording)
+        assert(cmd_buf_info.thread_id == sync.current_thread_id())
+
+        wait_count := len(cmd_buf_info.wait_sems)
+        signal_count := len(cmd_buf_info.signal_sems) + 1
+        wait_sems := make([]vk.Semaphore, wait_count, allocator = scratch)
+        wait_values := make([]u64, wait_count, allocator = scratch)
+        signal_sems := make([]vk.Semaphore, signal_count, allocator = scratch)
+        signal_values := make([]u64, signal_count, allocator = scratch)
+        for wait_sem, i in cmd_buf_info.wait_sems
+        {
+            wait_sems[i] = pool_get(&ctx.semaphores, wait_sem.sem)
+            wait_values[i] = wait_sem.val
+        }
+        for signal_sem, i in cmd_buf_info.signal_sems
+        {
+            signal_sems[i] = pool_get(&ctx.semaphores, signal_sem.sem)
+            signal_values[i] = signal_sem.val
+        }
+
+        signal_sems[signal_count - 1] = queue_sem
+        signal_values[signal_count - 1] = cmd_buf_info.timeline_value
+
+        to_submit := make([]vk.CommandBuffer, 1, allocator = scratch)
+        to_submit[0] = cmd_buf_info.handle
+
+        next := new(vk.TimelineSemaphoreSubmitInfo, allocator = scratch)
+        next^ = {
+            sType = .TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            waitSemaphoreValueCount = u32(len(wait_values)),
+            pWaitSemaphoreValues = raw_data(wait_values),
+            signalSemaphoreValueCount = u32(len(signal_values)),
+            pSignalSemaphoreValues = raw_data(signal_values),
+        }
+        submit_info := vk.SubmitInfo {
+            sType = .SUBMIT_INFO,
+            pNext = next,
+            commandBufferCount = u32(len(to_submit)),
+            pCommandBuffers = raw_data(to_submit),
+            waitSemaphoreCount = u32(len(wait_sems)),
+            pWaitSemaphores = raw_data(wait_sems),
+            signalSemaphoreCount = u32(len(signal_sems)),
+            pSignalSemaphores = raw_data(signal_sems),
+        }
+        append(&submit_infos, submit_info)
+    }
+
     queue_info := ctx.queues[queue]
-
     vk_queue := queue_info.handle
+    if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, u32(len(submit_infos)), raw_data(submit_infos), {}))
 
-    ensure(cmd_buf_info.recording == true, "Command buffer is not recording. Reusing a command buffer after submit is forbidden.")
-    ensure(cmd_buf_info.thread_id == sync.current_thread_id(), "You are trying to submit a command buffer on different thread than it was recorded on.")
+    for cmd_buf in cmd_bufs {
+        recycle_cmd_buf(cmd_buf)
+    }
 
+/*
+    queue_info := ctx.queues[queue]
+    vk_queue := queue_info.handle
     queue_sem := ctx.cmd_bufs_timelines[queue].sem
 
     signal_sems: []vk.Semaphore = { queue_sem, signal_sem } if signal_sem != {} else { queue_sem }
@@ -2938,8 +3058,7 @@ vk_submit_cmd_buf :: proc(cmd_buf: Command_Buffer, signal_sem: vk.Semaphore = {}
     }
 
     if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, 1, &submit_info, {}))
-
-    recycle_cmd_buf(cmd_buf)
+*/
 }
 
 @(private="file")
@@ -2947,9 +3066,7 @@ recycle_cmd_buf :: proc(cmd_buf: Command_Buffer)
 {
     tls_ctx := get_tls()
 
-    if cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
-        cmd_buf_info.recording = false
-    }
+    clear_cmd_buf(cmd_buf)
 
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
     priority_queue.push(&tls_ctx.free_buffers[cmd_buf_info.queue_type], Free_Command_Buffer { pool_handle = cmd_buf_info.pool_handle, timeline_value = cmd_buf_info.timeline_value })
@@ -3161,9 +3278,25 @@ check_cmd_buf_has_compute_shader_set :: proc(cmd_buf: Command_Buffer, name: stri
 @(private="file")
 check_cmd_buf_must_be_graphics :: proc(cmd_buf: Command_Buffer, name: string, loc: runtime.Source_Code_Location) -> bool
 {
+    if !pool_check_no_message(&ctx.command_buffers, cmd_buf, name, loc) do return false
+
     cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
     if cmd_buf_info.queue_type != .Main {
         log.errorf("'%v' must be of type '%v', got type '%v'.", name, Queue.Main, cmd_buf_info.queue, location = loc)
+        return false
+    }
+
+    return true
+}
+
+@(private="file")
+check_cmd_buf_must_be_recording :: proc(cmd_buf: Command_Buffer, name: string, loc: runtime.Source_Code_Location) -> bool
+{
+    if !pool_check_no_message(&ctx.command_buffers, cmd_buf, name, loc) do return false
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    if !cmd_buf_info.recording {
+        log.errorf("'%v' must be in a recording state, it's illegal to reuse a command buffer after submit. Command buffers are temporary handles.", name, location = loc)
         return false
     }
 
