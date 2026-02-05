@@ -45,6 +45,12 @@ destroy_mesh :: proc(mesh: ^Mesh) {
 	mesh^ = {}
 }
 
+Block_Compressed_Mips :: struct {
+	data:      [dynamic]byte,
+	offsets:   [dynamic]u64,
+	mip_count: u32,
+}
+
 Scene :: struct {
 	meshes:    [dynamic]Mesh,
 	instances: [dynamic]Instance,
@@ -58,6 +64,281 @@ destroy_scene :: proc(scene: ^Scene) {
 	delete(scene.meshes)
 	delete(scene.instances)
 	scene^ = {}
+}
+
+bc3_compress_rgba8_mips :: proc(pixels: []byte, width, height: u32) -> Block_Compressed_Mips {
+	assert(len(pixels) == int(width*height*4))
+
+	res: Block_Compressed_Mips
+	level_w := width
+	level_h := height
+	total_bytes: u64
+
+	for {
+		append(&res.offsets, total_bytes)
+		total_bytes += bc3_mip_size(level_w, level_h)
+		res.mip_count += 1
+
+		if level_w == 1 && level_h == 1 {
+			break
+		}
+
+		level_w = max(1, level_w / 2)
+		level_h = max(1, level_h / 2)
+	}
+
+	res.data = make([dynamic]byte, int(total_bytes))
+
+	current_pixels := pixels
+	current_w := width
+	current_h := height
+	owns_pixels := false
+
+	for mip: u32 = 0; mip < res.mip_count; mip += 1 {
+		offset := int(res.offsets[mip])
+		level_size := int(bc3_mip_size(current_w, current_h))
+		dst_level := res.data[offset : offset+level_size]
+		bc3_compress_level(current_pixels, current_w, current_h, dst_level)
+
+		if current_w == 1 && current_h == 1 {
+			break
+		}
+
+		prev_pixels := current_pixels
+		prev_owned := owns_pixels
+
+		next_pixels, next_w, next_h := downsample_rgba8_2x2(current_pixels, current_w, current_h)
+
+		if prev_owned {
+			delete(prev_pixels)
+		}
+
+		current_pixels = next_pixels
+		current_w = next_w
+		current_h = next_h
+		owns_pixels = true
+	}
+
+	if owns_pixels {
+		delete(current_pixels)
+	}
+
+	return res
+}
+
+bc3_mip_size :: proc(width, height: u32) -> u64 {
+	blocks_x := max(1, (width + 3) / 4)
+	blocks_y := max(1, (height + 3) / 4)
+	return u64(blocks_x * blocks_y * 16)
+}
+
+downsample_rgba8_2x2 :: proc(pixels: []byte, width, height: u32) -> (next: []byte, next_w: u32, next_h: u32) {
+	next_w = max(1, width / 2)
+	next_h = max(1, height / 2)
+	next = make([]byte, int(next_w*next_h*4))
+
+	for y: u32 = 0; y < next_h; y += 1 {
+		for x: u32 = 0; x < next_w; x += 1 {
+			src_x0 := min(width-1, x*2)
+			src_y0 := min(height-1, y*2)
+			src_x1 := min(width-1, src_x0+1)
+			src_y1 := min(height-1, src_y0+1)
+
+			sum_r: u32
+			sum_g: u32
+			sum_b: u32
+			sum_a: u32
+
+			idx0 := int((src_y0*width + src_x0) * 4)
+			idx1 := int((src_y0*width + src_x1) * 4)
+			idx2 := int((src_y1*width + src_x0) * 4)
+			idx3 := int((src_y1*width + src_x1) * 4)
+			if idx3+3 >= len(pixels) do assert(false)
+
+			sum_r += u32(pixels[idx0 + 0]) + u32(pixels[idx1 + 0]) +
+				u32(pixels[idx2 + 0]) + u32(pixels[idx3 + 0])
+			sum_g += u32(pixels[idx0 + 1]) + u32(pixels[idx1 + 1]) +
+				u32(pixels[idx2 + 1]) + u32(pixels[idx3 + 1])
+			sum_b += u32(pixels[idx0 + 2]) + u32(pixels[idx1 + 2]) +
+				u32(pixels[idx2 + 2]) + u32(pixels[idx3 + 2])
+			sum_a += u32(pixels[idx0 + 3]) + u32(pixels[idx1 + 3]) +
+				u32(pixels[idx2 + 3]) + u32(pixels[idx3 + 3])
+
+			dst_idx := int((y*next_w + x) * 4)
+			if dst_idx+3 >= len(next) do assert(false)
+			next[dst_idx + 0] = byte(sum_r / 4)
+			next[dst_idx + 1] = byte(sum_g / 4)
+			next[dst_idx + 2] = byte(sum_b / 4)
+			next[dst_idx + 3] = byte(sum_a / 4)
+		}
+	}
+
+	return
+}
+
+bc3_compress_level :: proc(pixels: []byte, width, height: u32, dst: []byte) {
+	blocks_x := max(1, (width + 3) / 4)
+	blocks_y := max(1, (height + 3) / 4)
+	assert(len(dst) == int(blocks_x*blocks_y*16))
+
+	block_idx: u32
+	for by: u32 = 0; by < blocks_y; by += 1 {
+		for bx: u32 = 0; bx < blocks_x; bx += 1 {
+			min_a: u8 = 255
+			max_a: u8
+			min_luma: u32 = max(u32)
+			max_luma: u32 = 0
+			min_r: u8; min_g: u8; min_b: u8
+			max_r: u8; max_g: u8; max_b: u8
+
+			for y: u32 = 0; y < 4; y += 1 {
+				for x: u32 = 0; x < 4; x += 1 {
+					px := min(width-1, bx*4+x)
+					py := min(height-1, by*4+y)
+					idx := (py*width + px) * 4
+					r := pixels[idx + 0]
+					g := pixels[idx + 1]
+					b := pixels[idx + 2]
+					a := pixels[idx + 3]
+					if a < min_a do min_a = a
+					if a > max_a do max_a = a
+					luma := u32(r)*2126 + u32(g)*7152 + u32(b)*722
+					if luma < min_luma {
+						min_luma = luma
+						min_r = r
+						min_g = g
+						min_b = b
+					}
+					if luma > max_luma {
+						max_luma = luma
+						max_r = r
+						max_g = g
+						max_b = b
+					}
+				}
+			}
+
+			color0 := pack_rgb565(max_r, max_g, max_b)
+			color1 := pack_rgb565(min_r, min_g, min_b)
+			if color1 > color0 {
+				color0, color1 = color1, color0
+			}
+
+			c0r, c0g, c0b := unpack_rgb565(color0)
+			c1r, c1g, c1b := unpack_rgb565(color1)
+			palette: [4][3]u32
+			palette[0] = {c0r, c0g, c0b}
+			palette[1] = {c1r, c1g, c1b}
+			palette[2] = {(2*c0r + c1r) / 3, (2*c0g + c1g) / 3, (2*c0b + c1b) / 3}
+			palette[3] = {(c0r + 2*c1r) / 3, (c0g + 2*c1g) / 3, (c0b + 2*c1b) / 3}
+
+			alpha0 := max_a
+			alpha1 := min_a
+			if alpha1 > alpha0 {
+				alpha0, alpha1 = alpha1, alpha0
+			}
+			alpha_palette: [8]u32
+			alpha_palette[0] = u32(alpha0)
+			alpha_palette[1] = u32(alpha1)
+			if alpha0 > alpha1 {
+				alpha_palette[2] = (6*alpha_palette[0] + 1*alpha_palette[1]) / 7
+				alpha_palette[3] = (5*alpha_palette[0] + 2*alpha_palette[1]) / 7
+				alpha_palette[4] = (4*alpha_palette[0] + 3*alpha_palette[1]) / 7
+				alpha_palette[5] = (3*alpha_palette[0] + 4*alpha_palette[1]) / 7
+				alpha_palette[6] = (2*alpha_palette[0] + 5*alpha_palette[1]) / 7
+				alpha_palette[7] = (1*alpha_palette[0] + 6*alpha_palette[1]) / 7
+			} else {
+				alpha_palette[2] = (4*alpha_palette[0] + 1*alpha_palette[1]) / 5
+				alpha_palette[3] = (3*alpha_palette[0] + 2*alpha_palette[1]) / 5
+				alpha_palette[4] = (2*alpha_palette[0] + 3*alpha_palette[1]) / 5
+				alpha_palette[5] = (1*alpha_palette[0] + 4*alpha_palette[1]) / 5
+				alpha_palette[6] = 0
+				alpha_palette[7] = 255
+			}
+
+			indices: u32
+			alpha_indices: u64
+			for y: u32 = 0; y < 4; y += 1 {
+				for x: u32 = 0; x < 4; x += 1 {
+					px := min(width-1, bx*4+x)
+					py := min(height-1, by*4+y)
+					idx := (py*width + px) * 4
+					r := u32(pixels[idx + 0])
+					g := u32(pixels[idx + 1])
+					b := u32(pixels[idx + 2])
+					a := u32(pixels[idx + 3])
+
+					best_idx: u32
+					best_dist: u32 = max(u32)
+					for i := 0; i < 4; i += 1 {
+						pr := palette[i][0]
+						pg := palette[i][1]
+						pb := palette[i][2]
+						dr := i32(r) - i32(pr)
+						dg := i32(g) - i32(pg)
+						db := i32(b) - i32(pb)
+						dist := u32(dr*dr + dg*dg + db*db)
+						if dist < best_dist {
+							best_dist = dist
+							best_idx = u32(i)
+						}
+					}
+
+					indices |= (best_idx & 0x3) << (2 * (y*4 + x))
+
+					best_alpha_idx: u64
+					best_alpha_dist: u32 = max(u32)
+					for i := 0; i < 8; i += 1 {
+						pa := alpha_palette[i]
+						da := i32(a) - i32(pa)
+						dist := u32(da * da)
+						if dist < best_alpha_dist {
+							best_alpha_dist = dist
+							best_alpha_idx = u64(i)
+						}
+					}
+					alpha_indices |= (best_alpha_idx & 0x7) << (3 * (y*4 + x))
+				}
+			}
+
+			offset := int(block_idx * 16)
+			dst[offset + 0] = byte(alpha0)
+			dst[offset + 1] = byte(alpha1)
+			dst[offset + 2] = byte(alpha_indices & 0xFF)
+			dst[offset + 3] = byte((alpha_indices >> 8) & 0xFF)
+			dst[offset + 4] = byte((alpha_indices >> 16) & 0xFF)
+			dst[offset + 5] = byte((alpha_indices >> 24) & 0xFF)
+			dst[offset + 6] = byte((alpha_indices >> 32) & 0xFF)
+			dst[offset + 7] = byte((alpha_indices >> 40) & 0xFF)
+			dst[offset + 8] = byte(color0 & 0xFF)
+			dst[offset + 9] = byte((color0 >> 8) & 0xFF)
+			dst[offset + 10] = byte(color1 & 0xFF)
+			dst[offset + 11] = byte((color1 >> 8) & 0xFF)
+			dst[offset + 12] = byte(indices & 0xFF)
+			dst[offset + 13] = byte((indices >> 8) & 0xFF)
+			dst[offset + 14] = byte((indices >> 16) & 0xFF)
+			dst[offset + 15] = byte((indices >> 24) & 0xFF)
+
+			block_idx += 1
+		}
+	}
+}
+
+pack_rgb565 :: proc(r, g, b: u8) -> u16 {
+	r5 := (u16(r) * 31 + 127) / 255
+	g6 := (u16(g) * 63 + 127) / 255
+	b5 := (u16(b) * 31 + 127) / 255
+	return (r5 << 11) | (g6 << 5) | b5
+}
+
+unpack_rgb565 :: proc(c: u16) -> (r: u32, g: u32, b: u32) {
+	r = u32((c >> 11) & 0x1F)
+	g = u32((c >> 5) & 0x3F)
+	b = u32(c & 0x1F)
+	r = (r * 255 + 15) / 31
+	g = (g * 255 + 31) / 63
+	b = (b * 255 + 15) / 31
+	return
 }
 
 Instance :: struct {

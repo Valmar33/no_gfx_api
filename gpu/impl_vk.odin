@@ -498,6 +498,7 @@ _init :: proc()
             features = {
                 shaderInt64 = true,
                 vertexPipelineStoresAndAtomics = true,
+                samplerAnisotropy = true,
             }
         }
         raytracing_features := &vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
@@ -1112,6 +1113,13 @@ _features_available :: proc() -> Features
     return ctx.features
 }
 
+_device_limits :: proc() -> Device_Limits
+{
+    return {
+        max_anisotropy = max(1.0, ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy),
+    }
+}
+
 // Memory
 
 @(private="file")
@@ -1467,6 +1475,14 @@ _texture_rw_view_descriptor :: proc(texture: Texture, view_desc: Texture_View_De
 
 _sampler_descriptor :: proc(sampler_desc: Sampler_Desc, loc := #caller_location) -> Sampler_Descriptor
 {
+    if sampler_desc.max_anisotropy != 0.0 {
+        ensure(
+            sampler_desc.max_anisotropy >= 1.0 &&
+            sampler_desc.max_anisotropy <= ctx.physical_properties.props2.properties.limits.maxSamplerAnisotropy,
+            "Sampler anisotropy out of range. Call gpu.device_limits() to get the supported maximum anisotropy.",
+        )
+    }
+
     sampler_ci := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         magFilter = to_vk_filter(sampler_desc.mag_filter),
@@ -1478,6 +1494,8 @@ _sampler_descriptor :: proc(sampler_desc: Sampler_Desc, loc := #caller_location)
         mipLodBias = sampler_desc.mip_lod_bias,
         minLod = sampler_desc.min_lod,
         maxLod = sampler_desc.max_lod if sampler_desc.max_lod != 0.0 else vk.LOD_CLAMP_NONE,
+        anisotropyEnable = b32(sampler_desc.max_anisotropy > 1.0),
+        maxAnisotropy = sampler_desc.max_anisotropy,
     }
     sampler := get_or_add_sampler(sampler_ci)
 
@@ -2052,6 +2070,64 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
     }
 
     vk.CmdBlitImage(cmd_buf_info.handle, src_info.handle, .GENERAL, dst_info.handle, .GENERAL, u32(len(regions)), raw_data(regions), vk_filter)
+}
+
+_cmd_copy_mips_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src_buffer: gpuptr, regions: []Mip_Copy_Region, loc := #caller_location)
+{
+    when VALIDATION
+    {
+        ok := true
+        ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
+        ok &= pool_check(&ctx.textures, texture.handle, "texture", loc)
+        ok &= check_ptr(src_buffer, "src_buffer", loc)
+        if texture.mip_count < u32(len(regions)) {
+            log.error("'len(regions)' is greater than the available mip count.", location = loc)
+            ok = false
+        }
+        if !ok do return
+    }
+
+    cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
+    tex_info := pool_get(&ctx.textures, texture.handle)
+
+    src_buf, base_offset, ok_s := get_buf_offset_from_gpu_ptr(src_buffer)
+    assert(ok_s)
+
+    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if texture.format == .D32_Float else { .COLOR }
+    is_compressed := is_block_compressed(texture.format)
+
+    scratch, _ := acquire_scratch()
+
+    copies := make([]vk.BufferImageCopy, len(regions), allocator = scratch)
+
+    for region, i in regions {
+        mip_width := max(1, texture.dimensions.x >> region.mip_level)
+        mip_height := max(1, texture.dimensions.y >> region.mip_level)
+        mip_depth := max(1, texture.dimensions.z >> region.mip_level)
+
+        copies[i] = vk.BufferImageCopy{
+            bufferOffset = vk.DeviceSize(u64(base_offset) + region.src_offset),
+            bufferRowLength = 0 if is_compressed else mip_width,
+            bufferImageHeight = 0 if is_compressed else mip_height,
+            imageSubresource = {
+                aspectMask = plane_aspect,
+                mipLevel = region.mip_level,
+                baseArrayLayer = region.array_layer,
+                layerCount = region.layer_count,
+            },
+            imageOffset = {},
+            imageExtent = { mip_width, mip_height, mip_depth },
+        }
+    }
+
+    vk.CmdCopyBufferToImage(
+        cmd_buf_info.handle,
+        src_buf,
+        tex_info.handle,
+        .GENERAL,
+        cast(u32) len(copies),
+        raw_data(copies),
+    )
 }
 
 _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr, loc := #caller_location)
