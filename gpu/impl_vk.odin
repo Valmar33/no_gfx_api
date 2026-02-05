@@ -2957,6 +2957,9 @@ vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
 {
     if len(cmd_bufs) <= 0 do return
 
+    // NOTE: Submissions must be performed in order w.r.t the timeline value used.
+    sync.guard(&ctx.lock)
+
     tls_ctx := get_tls()
 
     for cmd_buf in cmd_bufs
@@ -3026,7 +3029,7 @@ vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
 
     queue_info := ctx.queues[queue]
     vk_queue := queue_info.handle
-    if sync.guard(&ctx.lock) do vk_check(vk.QueueSubmit(vk_queue, u32(len(submit_infos)), raw_data(submit_infos), {}))
+    vk_check(vk.QueueSubmit(vk_queue, u32(len(submit_infos)), raw_data(submit_infos), {}))
 
     for cmd_buf in cmd_bufs {
         recycle_cmd_buf(cmd_buf)
