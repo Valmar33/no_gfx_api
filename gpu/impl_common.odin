@@ -279,6 +279,23 @@ release_scratch :: #force_inline proc(allocator: mem.Allocator, temp: vmem.Arena
 
 // Utilities
 
+is_block_compressed :: #force_inline proc(format: Texture_Format) -> bool
+{
+    #partial switch format
+    {
+        case .BC1_RGBA_Unorm,
+             .BC3_RGBA_Unorm,
+             .BC7_RGBA_Unorm,
+             .ASTC_4x4_RGBA_Unorm,
+             .ETC2_RGB8_Unorm,
+             .ETC2_RGBA8_Unorm,
+             .EAC_R11_Unorm,
+             .EAC_RG11_Unorm:
+            return true
+    }
+    return false
+}
+
 get_mip_dimensions_u32 :: proc(texture_dimensions: [3]u32, mip_level: u32) -> [3]u32
 {
     return {
