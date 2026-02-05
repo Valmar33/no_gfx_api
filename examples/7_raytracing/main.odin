@@ -183,6 +183,7 @@ main :: proc()
     camera_to_world: matrix[4, 4]f32 = 1
 
     accum_counter := u32(0)
+    max_accums := u32(1000)
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
     for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
@@ -251,18 +252,21 @@ main :: proc()
 
         cmd_buf := gpu.commands_begin(.Main)
 
-        // Dispatch compute shader to write to texture
-        gpu.cmd_set_desc_heap(cmd_buf, {}, texture_rw_heap, {}, bvh_heap)
-        gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
+        if accum_counter < max_accums
+        {
+            // Dispatch compute shader to write to texture
+            gpu.cmd_set_desc_heap(cmd_buf, {}, texture_rw_heap, {}, bvh_heap)
+            gpu.cmd_set_compute_shader(cmd_buf, pathtrace_shader)
 
-        num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
-        num_groups_y := (u32(window_size_y) + group_size_y - 1) / group_size_y
-        num_groups_z := u32(1)
+            num_groups_x := (u32(window_size_x) + group_size_x - 1) / group_size_x
+            num_groups_y := (u32(window_size_y) + group_size_y - 1) / group_size_y
+            num_groups_z := u32(1)
 
-        gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
+            gpu.cmd_dispatch(cmd_buf, compute_data.gpu, num_groups_x, num_groups_y, num_groups_z)
 
-        // Barrier to ensure compute shader finishes before rendering
-        gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
+            // Barrier to ensure compute shader finishes before rendering
+            gpu.cmd_barrier(cmd_buf, .Compute, .Fragment_Shader, {})
+        }
 
         // Render the texture to the swapchain using a fullscreen quad
         gpu.cmd_begin_render_pass(cmd_buf, {
@@ -294,7 +298,7 @@ main :: proc()
 
         gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
-        accum_counter += 1
+        accum_counter = min(accum_counter + 1, max_accums)  // Max 1000 accumulations
     }
 
     gpu.wait_idle()
