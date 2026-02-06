@@ -96,8 +96,6 @@ for true
 
     gpu.swapchain_present(.Main, frame_sem, next_frame)
     next_frame += 1
-
-    gpu.arena_free_all(frame_arena)
 }
 
 gpu.wait_idle()  // Wait until the end of execution for resource destruction
