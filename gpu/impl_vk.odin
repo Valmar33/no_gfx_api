@@ -40,6 +40,7 @@ Alloc_Handle :: distinct Handle
 @(private="file")
 Context :: struct
 {
+    validation: bool,
     features: Features,
     instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
@@ -205,7 +206,7 @@ ctx: Context
 @(private="file")
 vk_logger: log.Logger
 
-_init :: proc()
+_init :: proc(validation := true, loc := #caller_location)
 {
     scratch, _ := acquire_scratch()
 
@@ -213,18 +214,13 @@ _init :: proc()
     vk.load_proc_addresses_global(cast(rawptr) get_instance_proc_address)
 
     vk_logger = context.logger
+    ctx.validation = validation
 
     // Create instance
     {
-        when VALIDATION
-        {
-            layers := []cstring {
-                "VK_LAYER_KHRONOS_validation",
-            }
-        }
-        else
-        {
-            layers := []cstring {}
+        layers := make([dynamic]cstring, allocator = scratch)
+        if ctx.validation {
+            append(&layers, "VK_LAYER_KHRONOS_validation")
         }
 
         required_extensions := make([dynamic]cstring, allocator = scratch)
@@ -249,17 +245,9 @@ _init :: proc()
             pfnUserCallback = vk_debug_callback
         }
 
-        when VALIDATION
-        {
-            validation_features := []vk.ValidationFeatureEnableEXT {
-                // .GPU_ASSISTED,
-                // .GPU_ASSISTED_RESERVE_BINDING_SLOT,
-                .SYNCHRONIZATION_VALIDATION,
-            }
-        }
-        else
-        {
-            validation_features := []vk.ValidationFeatureEnableEXT {}
+        validation_features := make([dynamic]vk.ValidationFeatureEnableEXT, allocator = scratch)
+        if ctx.validation {
+            append(&validation_features, vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION)
         }
 
         next: rawptr
@@ -816,7 +804,7 @@ _cleanup :: proc(loc := #caller_location)
 
     // Check for leaked resources
     can_destroy_device := true
-    when VALIDATION
+    if ctx.validation
     {
         {
             sb := strings.builder_make_none()
@@ -1233,7 +1221,7 @@ _mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64, loc := #caller_loc
 
 _mem_free_raw :: proc(p: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= check_ptr(p, "p", loc)
@@ -1278,7 +1266,7 @@ _texture_size_and_align :: proc(desc: Texture_Desc, loc := #caller_location) -> 
 
 _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Main, signal_sem: Semaphore = {}, signal_value: u64 = 0, name := "", loc := #caller_location) -> Texture
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= check_ptr(storage, "storage", loc)
@@ -1706,7 +1694,7 @@ _blas_size_and_align :: proc(desc: BLAS_Desc, loc := #caller_location) -> (size:
 
 _blas_create :: proc(desc: BLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= check_ptr(storage, "storage", loc)
@@ -1751,7 +1739,7 @@ _tlas_size_and_align :: proc(desc: TLAS_Desc, loc := #caller_location) -> (size:
 
 _tlas_create :: proc(desc: TLAS_Desc, storage: gpuptr, name := "", loc := #caller_location) -> BVH
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= check_ptr(storage, "storage", loc)
@@ -1885,7 +1873,7 @@ _commands_begin :: proc(queue: Queue, loc := #caller_location) -> Command_Buffer
 
 _queue_submit :: proc(queue: Queue, cmd_bufs: []Command_Buffer, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         for cmd_buf, i in cmd_bufs
@@ -1936,7 +1924,7 @@ clear_cmd_buf :: proc(cmd_buf: Command_Buffer)
 
 _cmd_mem_copy_raw :: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int bytes: i64, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -1979,7 +1967,7 @@ _cmd_mem_copy_raw :: proc(cmd_buf: Command_Buffer, dst, src: gpuptr, #any_int by
 // TODO: dst is ignored atm.
 _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2013,7 +2001,7 @@ _cmd_copy_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src, dst
 
 _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects: []Blit_Rect, dst_rects: []Blit_Rect, filter: Filter, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2078,7 +2066,7 @@ _cmd_blit_texture :: proc(cmd_buf: Command_Buffer, src, dst: Texture, src_rects:
 
 _cmd_copy_mips_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src_buffer: gpuptr, regions: []Mip_Copy_Region, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2136,7 +2124,7 @@ _cmd_copy_mips_to_texture :: proc(cmd_buf: Command_Buffer, texture: Texture, src
 
 _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, samplers, bvhs: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2221,7 +2209,7 @@ _cmd_set_desc_heap :: proc(cmd_buf: Command_Buffer, textures, textures_rw, sampl
 
 _cmd_add_wait_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, wait_value: u64, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2236,7 +2224,7 @@ _cmd_add_wait_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, wait_va
 
 _cmd_add_signal_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, signal_value: u64, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2251,7 +2239,7 @@ _cmd_add_signal_semaphore :: proc(cmd_buf: Command_Buffer, sem: Semaphore, signa
 
 _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazards: Hazard_Flags = {}, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2312,7 +2300,7 @@ _cmd_barrier :: proc(cmd_buf: Command_Buffer, before: Stage, after: Stage, hazar
 
 _cmd_set_shaders :: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shader: Shader, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2335,7 +2323,7 @@ _cmd_set_shaders :: proc(cmd_buf: Command_Buffer, vert_shader: Shader, frag_shad
 
 _cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2356,7 +2344,7 @@ _cmd_set_depth_state :: proc(cmd_buf: Command_Buffer, state: Depth_State, loc :=
 
 _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2384,7 +2372,7 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State, loc :=
 
 _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2407,7 +2395,7 @@ _cmd_set_compute_shader :: proc(cmd_buf: Command_Buffer, compute_shader: Shader,
 
 _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_x: u32, num_groups_y: u32 = 1, num_groups_z: u32 = 1, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2430,7 +2418,7 @@ _cmd_dispatch :: proc(cmd_buf: Command_Buffer, compute_data: gpuptr, num_groups_
 
 _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2457,7 +2445,7 @@ _cmd_dispatch_indirect :: proc(cmd_buf: Command_Buffer, compute_data, arguments:
 
 _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2570,7 +2558,7 @@ _cmd_begin_render_pass :: proc(cmd_buf: Command_Buffer, desc: Render_Pass_Desc, 
 
 _cmd_end_render_pass :: proc(cmd_buf: Command_Buffer, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2585,7 +2573,7 @@ _cmd_end_render_pass :: proc(cmd_buf: Command_Buffer, loc := #caller_location)
 _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
                                     index_count: u32, instance_count: u32 = 1, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2614,7 +2602,7 @@ _cmd_draw_indexed_instanced :: proc(cmd_buf: Command_Buffer, vertex_data, fragme
 
 _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices, indirect_arguments: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2645,7 +2633,7 @@ _cmd_draw_indexed_instanced_indirect :: proc(cmd_buf: Command_Buffer, vertex_dat
 _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, vertex_data, fragment_data, indices: gpuptr,
                                                    indirect_arguments: gpuptr, stride: u32, draw_count: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2690,7 +2678,7 @@ _cmd_draw_indexed_instanced_indirect_multi :: proc(cmd_buf: Command_Buffer, vert
 
 _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage: gpuptr, shapes: []BVH_Shape, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
@@ -2764,7 +2752,7 @@ _cmd_build_blas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_
 
 _cmd_build_tlas :: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_storage, instances: gpuptr, loc := #caller_location)
 {
-    when VALIDATION
+    if ctx.validation
     {
         ok := true
         ok &= pool_check(&ctx.command_buffers, cmd_buf, "cmd_buf", loc)
