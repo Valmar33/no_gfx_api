@@ -425,18 +425,35 @@ cmd_mem_copy :: proc {
     cmd_mem_copy_slice,
 }
 
+// Simple linear allocator. Not thread-safe, as it is meant for
+// temporary, thread-local allocations (e.g. staging buffers).
 Arena :: struct
 {
-    p: ptr,
+    block_size: i64,
+    mem_type: Memory,
+
     offset: i64,
+    block_idx: i64,
+    blocks: [dynamic]Arena_Block,
+}
+
+@(private="file")
+Arena_Block :: struct
+{
+    p: ptr,
     size: i64,
 }
 
-arena_init :: proc(storage: i64, mem_type := Memory.Default) -> Arena
+arena_init :: proc(#any_int block_size: i64 = 4*1024*1024, mem_type := Memory.Default) -> Arena
 {
     res: Arena
-    res.size = storage
-    res.p = mem_alloc_raw(storage, 1, 16)
+    res.block_size = block_size
+    res.mem_type = mem_type
+    first_block := Arena_Block {
+        p = mem_alloc_raw(block_size, 1, 16, mem_type = mem_type),
+        size = block_size,
+    }
+    append(&res.blocks, first_block)
     return res
 }
 
@@ -445,17 +462,22 @@ arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_
     bytes := el_size * el_count
     assert(bytes > 0 && align > 0)
 
+    block := blocks[block_idx]
+
     // If we request an alignment of > 16 and cpu/gpu are only aligned to 16,
     // it's impossible to find the same offset for both.
-    if p.cpu != nil && uintptr(p.cpu) % uintptr(align) != uintptr(p.gpu.ptr) % uintptr(align) {
+    if block.p.cpu != nil && uintptr(block.p.cpu) % uintptr(align) != uintptr(block.p.gpu.ptr) % uintptr(align) {
         panic("Could not satisfy alignment requirements in GPU arena allocation.")
     }
 
-    gpu_addr := uintptr(arena.p.gpu.ptr) + uintptr(arena.offset)
-    offset = i64(align_up(u64(gpu_addr), u64(align)) - u64(uintptr(arena.p.gpu.ptr)))
-    if offset + bytes > size do panic("GPU Arena ran out of space!")
+    gpu_addr := uintptr(block.p.gpu.ptr) + uintptr(arena.offset)
+    offset = i64(align_up(u64(gpu_addr), u64(align)) - u64(uintptr(block.p.gpu.ptr)))
+    if offset + bytes > block.size {
+        block = arena_next_block(arena, bytes)
+        offset = 0
+    }
 
-    suballoc_ptr := mem_suballoc(p, offset, el_size, el_count)
+    suballoc_ptr := mem_suballoc(block.p, offset, el_size, el_count)
     offset += bytes
 
     return suballoc_ptr
@@ -464,6 +486,36 @@ arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_
     {
         assert(0 == (align & (align - 1)), "must align to a power of two")
         return (x + (align - 1)) &~ (align - 1)
+    }
+
+    arena_next_block :: proc(using arena: ^Arena, bytes: i64) -> Arena_Block
+    {
+        block_idx += 1
+        offset = 0
+        if block_idx >= i64(len(blocks))
+        {
+            new_size := max(block_size, bytes)
+            new_p := mem_alloc_raw(new_size, 1, 16, mem_type = mem_type)
+            new_block := Arena_Block { p = new_p, size = new_size }
+            append(&blocks, new_block)
+            return new_block
+        }
+        else
+        {
+            if blocks[block_idx].size <= bytes
+            {
+                return blocks[block_idx]
+            }
+            else
+            {
+                mem_free_raw(blocks[block_idx].p.gpu)
+                new_size := max(block_size, bytes)
+                new_p := mem_alloc_raw(new_size, 1, 16, mem_type = mem_type)
+                new_block := Arena_Block { p = new_p, size = new_size }
+                blocks[block_idx] = new_block
+                return new_block
+            }
+        }
     }
 }
 
@@ -489,11 +541,15 @@ arena_alloc :: proc {
 arena_free_all :: proc(using arena: ^Arena)
 {
     offset = 0
+    block_idx = 0
 }
 
 arena_destroy :: proc(using arena: ^Arena)
 {
-    mem_free_raw(p.gpu)
+    for block in blocks {
+        mem_free_raw(block.p.gpu)
+    }
+    delete(blocks)
     arena^ = {}
 }
 

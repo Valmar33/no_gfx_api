@@ -68,7 +68,7 @@ main :: proc()
         gpu.shader_destroy(frag_shader)
     }
 
-    upload_arena := gpu.arena_init(1024 * 1024 * 1024)
+    upload_arena := gpu.arena_init()
     defer gpu.arena_destroy(&upload_arena)
 
     scene, _, gltf_data := shared.load_scene_gltf(Sponza_Scene)
@@ -93,7 +93,7 @@ main :: proc()
     now_ts := sdl.GetPerformanceCounter()
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(10 * 1024 * 1024)
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)

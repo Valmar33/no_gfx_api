@@ -61,7 +61,7 @@ main :: proc()
 
     Vertex :: struct { pos: [3]f32, uv: [2]f32 }
 
-    arena := gpu.arena_init(1024 * 1024)
+    arena := gpu.arena_init()
     defer gpu.arena_destroy(&arena)
 
     verts := gpu.arena_alloc(&arena, Vertex, 4)
@@ -91,7 +91,7 @@ main :: proc()
 
     upload_cmd_buf := gpu.commands_begin(.Main)
 
-    upload_arena := gpu.arena_init(10 * 1024 * 1024)
+    upload_arena := gpu.arena_init()
     defer gpu.arena_destroy(&upload_arena)
 
     peach_tex := load_texture(Peach_Texture, &upload_arena, upload_cmd_buf)
@@ -113,7 +113,7 @@ main :: proc()
     now_ts := sdl.GetPerformanceCounter()
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
