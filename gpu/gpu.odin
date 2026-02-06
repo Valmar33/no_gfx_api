@@ -18,9 +18,9 @@ Command_Buffer :: distinct Handle
 Semaphore :: distinct Handle
 Shader :: distinct Handle
 BVH :: struct { _: Handle }
-Texture_Descriptor :: struct { bytes: [4]u64 }
-Sampler_Descriptor :: struct { bytes: [2]u64 }
-BVH_Descriptor :: struct { bytes: [2]u64 }
+Texture_Descriptor :: struct { bytes: [8]u64 }
+Sampler_Descriptor :: struct { bytes: [4]u64 }
+BVH_Descriptor :: struct { bytes: [4]u64 }
 
 // Enums
 Feature :: enum { Raytracing = 0 }
