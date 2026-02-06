@@ -720,17 +720,26 @@ load_scene_textures_from_gltf :: proc(
 	scene: ^shared.Scene,
 	texture_heap: gpu.ptr,
 ) {
-	// TODO(Leo): This uses .Main instead of .Transfer
-	// because we generate mipmaps as well here (which is a gfx op). If I'm
-	// not mistaken there currently isn't any form of cross queue
-	// GPU-GPU synchronization so using 2 separate queues wouldn't be
-	// that easy, currently.
-	transfer_queue := gpu.Queue.Main
-
-	upload_arena := gpu.arena_init(Loader_Chunk_Size * 8 * 1024 * 1024)
+	upload_arena := gpu.arena_init(Loader_Chunk_Size * 4 * 1024 * 1024)
 	defer gpu.arena_destroy(&upload_arena)
 
-	for info in texture_infos {
+	Sem_Value :: struct {
+		sem: gpu.Semaphore,
+		value: u64,
+	}
+	upload_sems := make([]Sem_Value, len(texture_infos))
+	for &sem in upload_sems {
+		sem.sem = gpu.semaphore_create(0)
+		sem.value = 0
+	}
+	defer {
+		for sem in upload_sems {
+			gpu.semaphore_destroy(sem.sem)
+		}
+		delete(upload_sems)
+	}
+
+	for info, i in texture_infos {
 		if cancel_loading_textures {
 			return
 		}
@@ -757,20 +766,39 @@ load_scene_textures_from_gltf :: proc(
 			image_uploaded[info.image_index] = event
 			sync.mutex_unlock(&mutex)
 
-			upload_cmd_buf := gpu.commands_begin(transfer_queue)
+			img := shared.load_texture_from_gltf(
+                info.image_index,
+                data,
+            )
+            defer image.destroy(img)
 
-			texture := load_texture_from_gltf(
-				data.images[info.image_index],
-				data,
-				&upload_arena,
-				upload_cmd_buf,
-				transfer_queue,
-			)
+            if Compress_Textures {
+                compressed := shared.bc3_compress_rgba8_mips(
+                    img.pixels.buf[:],
+                    u32(img.width),
+                    u32(img.height),
+                )
+                defer delete(compressed.data)
+                defer delete(compressed.offsets)
+                texture := upload_bc3_texture(
+                    img,
+                    compressed,
+                    &upload_arena,
+                    upload_sems[i].sem,
+                    &upload_sems[i].value,
+                )
 
-			gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-			gpu.queue_submit(transfer_queue, {upload_cmd_buf})
+                if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
+            } else {
+                texture := upload_texture(
+                    img,
+                    &upload_arena,
+                    upload_sems[i].sem,
+                    &upload_sems[i].value,
+                )
 
-			if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
+                if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
+            }
 
 			sync.one_shot_event_signal(event)
 
@@ -785,11 +813,14 @@ load_scene_textures_from_gltf :: proc(
 		}
 	}
 
-	gpu.queue_wait_idle(transfer_queue)
+	for info, i in texture_infos {
+		sync.mutex_lock(&mutex)
+        texture := image_to_texture[info.image_index]
+        sync.mutex_unlock(&mutex)
 
-	for info in texture_infos {
+		gpu.semaphore_wait(upload_sems[i].sem, upload_sems[i].value)
+
 		sync.guard(&mutex)
-		texture := image_to_texture[info.image_index]
 
 		switch info.texture_type {
 		case .Base_Color:
@@ -810,72 +841,45 @@ load_scene_textures_from_gltf :: proc(
 	}
 }
 
-
-load_texture_from_gltf :: proc(
-	image_data: gltf2.Image,
-	data: ^gltf2.Data,
+upload_texture :: proc(
+	img: ^image.Image,
 	upload_arena: ^gpu.Arena,
-	cmd_buf: gpu.Command_Buffer,
-	queue: gpu.Queue = nil,
+	upload_sem: gpu.Semaphore,
+	upload_sem_value: ^u64,
 ) -> gpu.Owned_Texture {
-	image_bytes: []byte
+	staging := gpu.arena_alloc_raw(upload_arena, len(img.pixels.buf), 1, 16)
+	runtime.mem_copy(staging.cpu, raw_data(img.pixels.buf), len(img.pixels.buf))
 
-	if image_data.buffer_view != nil {
-		buffer_view_idx := image_data.buffer_view.?
-		buffer_view := data.buffer_views[buffer_view_idx]
-		buffer := data.buffers[buffer_view.buffer]
+	sync.guard(&mutex)
+	upload_sem_value_old := upload_sem_value^
+	upload_sem_value^ += 2
 
-		switch v in buffer.uri {
-		case []byte:
-			start_byte := buffer_view.byte_offset
-			end_byte := start_byte + buffer_view.byte_length
-			image_bytes = v[start_byte:end_byte]
-		case string:
-			log.error("String URIs not supported for buffer_view images")
-			assert(false, "String URIs not supported for buffer_view images")
-			return {}
-		case:
-			log.error("Unknown buffer URI type")
-			assert(false, "Unknown buffer URI type")
-			return {}
-		}
-	} else {
-		switch v in image_data.uri {
-		case []byte:
-			image_bytes = v
-		case string:
-			log.error(fmt.tprintf("String URIs not supported for texture loading: %v", v))
-			assert(false, "String URIs not supported for texture loading")
-			return {}
-		case:
-			log.error("Image has neither buffer_view nor valid URI")
-			assert(false, "Image has neither buffer_view nor valid URI")
-			return {}
-		}
+	texture := gpu.texture_alloc_and_create(
+		{
+			type = .D2,
+			dimensions = {u32(img.width), u32(img.height), 1},
+			mip_count = u32(math.log2(f32(max(img.width, img.height)))),
+			layer_count = 1,
+			sample_count = 1,
+			format = .RGBA8_Unorm,
+			usage = { .Sampled, .Transfer_Src },
+		},
+		.Transfer,
+	)
+	append(&loaded_textures, texture)
+
+	// Upload and mipmap generation happen on separate queues so they need to be synchronized using timeline semaphores
+
+	{
+		// Upload texture to GPU
+		upload_cmd_buf := gpu.commands_begin(.Transfer)
+		gpu.cmd_copy_to_texture(upload_cmd_buf, texture, staging, texture.mem)
+		gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old)
+		gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
+		gpu.queue_submit(.Transfer, {upload_cmd_buf})
 	}
 
-	if len(image_bytes) == 0 {
-		log.error("Image bytes are empty")
-		assert(false, "Image bytes are empty")
-		return {}
-	}
-
-	options := image.Options{.alpha_add_if_missing}
-	img, err := image.load_from_bytes(image_bytes, options)
-	if err != nil {
-		log.error(
-			fmt.tprintf(
-				"Failed to load image from bytes: %v, image size: %v bytes",
-				err,
-				len(image_bytes),
-			),
-		)
-		assert(false, "Could not load texture from GLTF image.")
-		return {}
-	}
-	defer image.destroy(img)
-
-	if Compress_Textures {
+    if Compress_Textures {
 		compressed := shared.bc3_compress_rgba8_mips(
 			img.pixels.buf[:],
 			u32(img.width),
@@ -889,7 +893,7 @@ load_texture_from_gltf :: proc(
 		staging := gpu.arena_alloc_raw(upload_arena, len(compressed.data), 1, 16)
 		runtime.mem_copy(staging.cpu, raw_data(compressed.data), len(compressed.data))
 
-		texture := gpu.texture_alloc_and_create(
+		texture = gpu.texture_alloc_and_create(
 			{
 				type = .D2,
 				dimensions = {u32(img.width), u32(img.height), 1},
@@ -899,9 +903,9 @@ load_texture_from_gltf :: proc(
 				format = .BC3_RGBA_Unorm,
 				usage = { .Sampled, .Transfer_Src },
 			},
-			queue,
+			.Transfer,
 		)
-		if sync.guard(&mutex) do append(&loaded_textures, texture)
+		append(&loaded_textures, texture)
 
 		regions := make([]gpu.Mip_Copy_Region, int(compressed.mip_count))
 		for mip: u32 = 0; mip < compressed.mip_count; mip += 1 {
@@ -913,30 +917,72 @@ load_texture_from_gltf :: proc(
 			}
 		}
 
-		gpu.cmd_copy_mips_to_texture(cmd_buf, texture, staging, regions)
+		upload_cmd_buf := gpu.commands_begin(.Transfer)
+        gpu.cmd_barrier(upload_cmd_buf, .Transfer, .Transfer, {})
+		gpu.cmd_copy_mips_to_texture(upload_cmd_buf, texture, staging, regions)
+		gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
+		gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 2)
+		gpu.queue_submit(.Transfer, {upload_cmd_buf})
+
 		return texture
+	} else {
+		// Generate mipmaps
+		mipmaps_cmd_buf := gpu.commands_begin(.Main)
+		gpu.cmd_barrier(mipmaps_cmd_buf, .Transfer, .Transfer, {})
+		gpu.cmd_generate_mipmaps(mipmaps_cmd_buf, texture)
+		gpu.cmd_add_wait_semaphore(mipmaps_cmd_buf, upload_sem, upload_sem_value_old + 1)
+		gpu.cmd_add_signal_semaphore(mipmaps_cmd_buf, upload_sem, upload_sem_value_old + 2)
+		gpu.queue_submit(.Main, {mipmaps_cmd_buf})
 	}
 
-	staging := gpu.arena_alloc_raw(upload_arena, len(img.pixels.buf), 1, 16)
-	runtime.mem_copy(staging.cpu, raw_data(img.pixels.buf), len(img.pixels.buf))
+	return texture
+}
 
-	texture := gpu.texture_alloc_and_create(
-		{
-			type = .D2,
-			dimensions = {u32(img.width), u32(img.height), 1},
-			mip_count = u32(math.log2(f32(max(img.width, img.height)))),
-			layer_count = 1,
-			sample_count = 1,
-			format = .RGBA8_Unorm,
-			usage = { .Sampled, .Transfer_Src },
-		},
-		queue,
-	)
-	if sync.guard(&mutex) do append(&loaded_textures, texture)
+upload_bc3_texture :: proc(
+    img: ^image.Image,
+	compressed: shared.Block_Compressed_Mips,
+	upload_arena: ^gpu.Arena,
+	upload_sem: gpu.Semaphore,
+	upload_sem_value: ^u64,
+) -> gpu.Owned_Texture {
+	sync.guard(&mutex)
 
-	gpu.cmd_copy_to_texture(cmd_buf, texture, staging, texture.mem)
-	gpu.cmd_barrier(cmd_buf, .Transfer, .Transfer)
-	gpu.cmd_generate_mipmaps(cmd_buf, texture)
+	upload_sem_value_old := upload_sem_value^
+	upload_sem_value^ += 1
+
+    upload_cmd_buf := gpu.commands_begin(.Transfer)
+    staging := gpu.arena_alloc_raw(upload_arena, len(compressed.data), 1, 16)
+    runtime.mem_copy(staging.cpu, raw_data(compressed.data), len(compressed.data))
+
+    texture := gpu.texture_alloc_and_create(
+        {
+            type = .D2,
+            dimensions = {u32(img.width), u32(img.height), 1},
+            mip_count = compressed.mip_count,
+            layer_count = 1,
+            sample_count = 1,
+            format = .BC3_RGBA_Unorm,
+            usage = { .Sampled, .Transfer_Src },
+        },
+        .Transfer,
+    )
+    append(&loaded_textures, texture)
+
+    regions := make([]gpu.Mip_Copy_Region, int(compressed.mip_count))
+    for mip: u32 = 0; mip < compressed.mip_count; mip += 1 {
+        regions[mip] = {
+            src_offset = compressed.offsets[mip],
+            mip_level = mip,
+            array_layer = 0,
+            layer_count = 1,
+        }
+    }
+
+    gpu.cmd_copy_mips_to_texture(upload_cmd_buf, texture, staging, regions)
+    gpu.cmd_barrier(upload_cmd_buf, .Transfer, .Transfer, {})
+    gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old)
+    gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
+    gpu.queue_submit(.Transfer, {upload_cmd_buf})
 	return texture
 }
 
