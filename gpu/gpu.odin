@@ -457,12 +457,12 @@ arena_init :: proc(#any_int block_size: i64 = 4*1024*1024, mem_type := Memory.De
     return res
 }
 
-arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_count: i64, #any_int align: i32 = 16) -> ptr
+arena_alloc_raw :: proc(arena: ^Arena, #any_int el_size: i64, #any_int el_count: i64, #any_int align: i32 = 16) -> ptr
 {
     bytes := el_size * el_count
     assert(bytes > 0 && align > 0)
 
-    block := blocks[block_idx]
+    block := arena.blocks[arena.block_idx]
 
     // If we request an alignment of > 16 and cpu/gpu are only aligned to 16,
     // it's impossible to find the same offset for both.
@@ -471,14 +471,14 @@ arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_
     }
 
     gpu_addr := uintptr(block.p.gpu.ptr) + uintptr(arena.offset)
-    offset = i64(align_up(u64(gpu_addr), u64(align)) - u64(uintptr(block.p.gpu.ptr)))
-    if offset + bytes > block.size {
+    arena.offset = i64(align_up(u64(gpu_addr), u64(align)) - u64(uintptr(block.p.gpu.ptr)))
+    if arena.offset + bytes > block.size {
         block = arena_next_block(arena, bytes)
-        offset = 0
+        arena.offset = 0
     }
 
-    suballoc_ptr := mem_suballoc(block.p, offset, el_size, el_count)
-    offset += bytes
+    suballoc_ptr := mem_suballoc(block.p, arena.offset, el_size, el_count)
+    arena.offset += bytes
 
     return suballoc_ptr
 
@@ -488,43 +488,43 @@ arena_alloc_raw :: proc(using arena: ^Arena, #any_int el_size: i64, #any_int el_
         return (x + (align - 1)) &~ (align - 1)
     }
 
-    arena_next_block :: proc(using arena: ^Arena, bytes: i64) -> Arena_Block
+    arena_next_block :: proc(arena: ^Arena, bytes: i64) -> Arena_Block
     {
-        block_idx += 1
-        offset = 0
-        if block_idx >= i64(len(blocks))
+        arena.block_idx += 1
+        arena.offset = 0
+        if arena.block_idx >= i64(len(arena.blocks))
         {
-            new_size := max(block_size, bytes)
-            new_p := mem_alloc_raw(new_size, 1, 16, mem_type = mem_type)
+            new_size := max(arena.block_size, bytes)
+            new_p := mem_alloc_raw(new_size, 1, 16, mem_type = arena.mem_type)
             new_block := Arena_Block { p = new_p, size = new_size }
-            append(&blocks, new_block)
+            append(&arena.blocks, new_block)
             return new_block
         }
         else
         {
-            if blocks[block_idx].size <= bytes
+            if arena.blocks[arena.block_idx].size <= bytes
             {
-                return blocks[block_idx]
+                return arena.blocks[arena.block_idx]
             }
             else
             {
-                mem_free_raw(blocks[block_idx].p.gpu)
-                new_size := max(block_size, bytes)
-                new_p := mem_alloc_raw(new_size, 1, 16, mem_type = mem_type)
+                mem_free_raw(arena.blocks[arena.block_idx].p.gpu)
+                new_size := max(arena.block_size, bytes)
+                new_p := mem_alloc_raw(new_size, 1, 16, mem_type = arena.mem_type)
                 new_block := Arena_Block { p = new_p, size = new_size }
-                blocks[block_idx] = new_block
+                arena.blocks[arena.block_idx] = new_block
                 return new_block
             }
         }
     }
 }
 
-arena_alloc_ptr :: #force_inline proc(using arena: ^Arena, $T: typeid) -> ptr_t(T)
+arena_alloc_ptr :: #force_inline proc(arena: ^Arena, $T: typeid) -> ptr_t(T)
 {
     return transmute(ptr_t(T)) arena_alloc_raw(arena, size_of(T), 1, align_of(T))
 }
 
-arena_alloc_slice :: #force_inline proc(using arena: ^Arena, $T: typeid, #any_int count: i32) -> slice_t(T)
+arena_alloc_slice :: #force_inline proc(arena: ^Arena, $T: typeid, #any_int count: i32) -> slice_t(T)
 {
     p_raw := arena_alloc_raw(arena, size_of(T), count, align_of(T))
     return slice_t(T) {
@@ -538,18 +538,18 @@ arena_alloc :: proc {
     arena_alloc_slice,
 }
 
-arena_free_all :: proc(using arena: ^Arena)
+arena_free_all :: proc(arena: ^Arena)
 {
-    offset = 0
-    block_idx = 0
+    arena.offset = 0
+    arena.block_idx = 0
 }
 
-arena_destroy :: proc(using arena: ^Arena)
+arena_destroy :: proc(arena: ^Arena)
 {
-    for block in blocks {
+    for block in arena.blocks {
         mem_free_raw(block.p.gpu)
     }
-    delete(blocks)
+    delete(arena.blocks)
     arena^ = {}
 }
 

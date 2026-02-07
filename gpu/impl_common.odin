@@ -46,17 +46,17 @@ Resource_Key :: struct
     gen: u32,
 }
 
-pool_init :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
+pool_init :: proc(pool: ^Resource_Pool($Handle_T, $Info_T))
 {
-    init = true
+    pool.init = true
 
     // Reserve element 0
     pool_add(pool, Info_T {}, {})
 }
 
-pool_check :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
+pool_check :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
 {
-    assert(init)
+    assert(pool.init)
 
     if handle == nil {
         log.errorf("'%v' handle is nil.", name, location = loc)
@@ -67,7 +67,7 @@ pool_check :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handl
 
     block_idx, el_idx := pool_get_idx(key.idx)
 
-    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
     if key.gen != el.gen {
         log.error("'%v' handle is used after it has been freed, or it's corrupted in some other way.", name, location = loc)
         return false
@@ -76,9 +76,9 @@ pool_check :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handl
     return true
 }
 
-pool_check_no_message :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
+pool_check_no_message :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, name: string, loc: runtime.Source_Code_Location) -> bool
 {
-    assert(init)
+    assert(pool.init)
 
     if handle == nil {
         return false
@@ -88,7 +88,7 @@ pool_check_no_message :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), ha
 
     block_idx, el_idx := pool_get_idx(key.idx)
 
-    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
     if key.gen != el.gen {
         return false
     }
@@ -96,103 +96,103 @@ pool_check_no_message :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), ha
     return true
 }
 
-pool_get_alive_list :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), arena: runtime.Allocator) -> []Resource(Info_T)
+pool_get_alive_list :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), arena: runtime.Allocator) -> []Resource(Info_T)
 {
     res := make([dynamic]Resource(Info_T), allocator = arena)
-    for i in 1..<res_count
+    for i in 1..<pool.res_count
     {
         block_idx, el_idx := pool_get_idx(i)
-        el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+        el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
         if el.alive do append(&res, el)
     }
 
     return res[:]
 }
 
-pool_get :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> Info_T
+pool_get :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> Info_T
 {
-    assert(init)
+    assert(pool.init)
     assert(handle != {})
     key := transmute(Resource_Key) handle
 
     block_idx, el_idx := pool_get_idx(key.idx)
 
-    el := intr.volatile_load(&blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
     assert(key.gen == el.gen)
     return el.info
 }
 
 // To be used like this:
 // if resource, lock := pool_get_mut(&pool, handle); sync.guard(lock)
-pool_get_mut :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> (^Info_T, ^sync.Benaphore)
+pool_get_mut :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> (^Info_T, ^sync.Benaphore)
 {
-    assert(init)
+    assert(pool.init)
     assert(handle != {})
     key := transmute(Resource_Key) handle
 
     block_idx, el_idx := pool_get_idx(key.idx)
 
-    el := &blocks[block_idx].res[el_idx]
+    el := &pool.blocks[block_idx].res[el_idx]
     el_gen := intr.volatile_load(&el.gen)
     assert(key.gen == el_gen)
-    return &el.info, &blocks[block_idx].res[el_idx].lock
+    return &el.info, &pool.blocks[block_idx].res[el_idx].lock
 }
 
-pool_get_lock :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^sync.Benaphore
+pool_get_lock :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^sync.Benaphore
 {
-    assert(init)
+    assert(pool.init)
     assert(handle != {})
     key := transmute(Resource_Key) handle
 
     block_idx, el_idx := pool_get_idx(key.idx)
 
-    el := &blocks[block_idx].res[el_idx]
+    el := &pool.blocks[block_idx].res[el_idx]
     el_gen := intr.volatile_load(&el.gen)
     assert(key.gen == el_gen)
-    return &blocks[block_idx].res[el_idx].lock
+    return &pool.blocks[block_idx].res[el_idx].lock
 }
 
-pool_add :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, meta: Resource_Metadata) -> Handle_T
+pool_add :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, meta: Resource_Metadata) -> Handle_T
 {
-    assert(init)
-    sync.guard(&lock)
+    assert(pool.init)
+    sync.guard(&pool.lock)
 
     free_idx: u32
-    if len(freelist) > 0 {
-        free_idx = pop(&freelist)
+    if len(pool.freelist) > 0 {
+        free_idx = pop(&pool.freelist)
     } else {
         pool_append_internal(pool, Resource(Info_T) {})
-        free_idx = res_count - 1
+        free_idx = pool.res_count - 1
     }
 
     block_idx, el_idx := pool_get_idx(free_idx)
-    blocks[block_idx].res[el_idx].info = info
-    gen := blocks[block_idx].res[el_idx].gen
-    blocks[block_idx].res[el_idx].alive = true
-    blocks[block_idx].res[el_idx].meta = meta
+    pool.blocks[block_idx].res[el_idx].info = info
+    gen := pool.blocks[block_idx].res[el_idx].gen
+    pool.blocks[block_idx].res[el_idx].alive = true
+    pool.blocks[block_idx].res[el_idx].meta = meta
 
     key := Resource_Key { idx = free_idx, gen = gen }
     return transmute(Handle_T) key
 }
 
-pool_remove :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
+pool_remove :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
 {
-    assert(init)
+    assert(pool.init)
     assert(handle != {})
-    sync.guard(&lock)
+    sync.guard(&pool.lock)
 
     key := transmute(Resource_Key) handle
 
     block_idx, el_idx := pool_get_idx(key.idx)
-    el := &blocks[block_idx].res[el_idx]
+    el := &pool.blocks[block_idx].res[el_idx]
     el.alive = false
     assert(key.gen == el.gen)
 
     el.gen += 1
-    append(&freelist, key.idx)
+    append(&pool.freelist, key.idx)
 }
 
-pool_destroy :: proc(using pool: ^Resource_Pool($Handle_T, $Info_T))
+pool_destroy :: proc(pool: ^Resource_Pool($Handle_T, $Info_T))
 {
     assert(init)
     sync.guard(&lock)
@@ -213,17 +213,17 @@ pool_get_idx :: #force_inline proc(idx: u32) -> (block_idx: u32, el_idx: u32)
 }
 
 @(private="file")
-pool_append_internal :: #force_inline proc(using pool: ^Resource_Pool($Handle_T, $Info_T), el: Resource(Info_T))
+pool_append_internal :: #force_inline proc(pool: ^Resource_Pool($Handle_T, $Info_T), el: Resource(Info_T))
 {
-    do_alloc_new_block := res_count % Resource_Block_Size == 0
-    res_count += 1
+    do_alloc_new_block := pool.res_count % Resource_Block_Size == 0
+    pool.res_count += 1
     if do_alloc_new_block {
         new_block := new(Resource_Block(Info_T))
-        append(&blocks, new_block)
+        append(&pool.blocks, new_block)
     }
 
-    block_idx, el_idx := pool_get_idx(res_count - 1)
-    blocks[block_idx].res[el_idx] = el
+    block_idx, el_idx := pool_get_idx(pool.res_count - 1)
+    pool.blocks[block_idx].res[el_idx] = el
 }
 
 // Scratch arena implementation
