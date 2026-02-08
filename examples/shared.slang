@@ -5,6 +5,7 @@ module shared;
 [[vk::binding(0, 0)]] public Texture2D textureHeap[];
 [[vk::binding(0, 1)]] public RWTexture2D<float4> textureHeapRW[];
 [[vk::binding(0, 2)]] public SamplerState samplerHeap[];
+[[vk::binding(0, 3)]] RaytracingAccelerationStructure bvhHeap[];
 
 // Push constant blocks - different structures for graphics vs compute shaders
 public struct __PushConstants_Graphics
@@ -108,4 +109,9 @@ public float4 loadTextureRW(uint textureIndex, int2 coord, int mipLevel)
 public void imageStore(uint textureIndex, int2 coord, float4 color)
 {
     textureHeapRW[NonUniformResourceIndex(textureIndex)][coord] = color;
+}
+
+public RaytracingAccelerationStructure getBVH(uint bvhIndex)
+{
+    return bvhHeap[NonUniformResourceIndex(bvhIndex)];
 }
