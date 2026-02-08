@@ -99,6 +99,11 @@ public float4 loadTexture(uint textureIndex, int2 coord, int mipLevel)
     return textureHeap[NonUniformResourceIndex(textureIndex)].Load(int3(coord, mipLevel));
 }
 
+public float4 loadTextureRW(uint textureIndex, int2 coord, int mipLevel)
+{
+    return textureHeapRW[NonUniformResourceIndex(textureIndex)][coord];
+}
+
 // Image store helper for writing to RWTexture2D
 public void imageStore(uint textureIndex, int2 coord, float4 color)
 {
