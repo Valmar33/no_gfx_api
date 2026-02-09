@@ -74,6 +74,9 @@ image_to_texture: map[int]struct {
 }
 image_uploaded: map[int]^sync.One_Shot_Event
 
+upload_sem: gpu.Semaphore
+upload_sem_val: u64
+
 main :: proc() {
 	ok_i := sdl.Init({.VIDEO})
 	assert(ok_i)
@@ -122,6 +125,9 @@ main :: proc() {
 
 	upload_arena := gpu.arena_init()
 	defer gpu.arena_destroy(&upload_arena)
+
+	upload_sem = gpu.semaphore_create()
+	defer gpu.semaphore_destroy(upload_sem)
 
 	upload_cmd_buf := gpu.commands_begin(.Main)
 
@@ -723,22 +729,6 @@ load_scene_textures_from_gltf :: proc(
 	upload_arena := gpu.arena_init()
 	defer gpu.arena_destroy(&upload_arena)
 
-	Sem_Value :: struct {
-		sem: gpu.Semaphore,
-		value: u64,
-	}
-	upload_sems := make([]Sem_Value, len(texture_infos))
-	for &sem in upload_sems {
-		sem.sem = gpu.semaphore_create(0)
-		sem.value = 0
-	}
-	defer {
-		for sem in upload_sems {
-			gpu.semaphore_destroy(sem.sem)
-		}
-		delete(upload_sems)
-	}
-
 	for info, i in texture_infos {
 		if cancel_loading_textures {
 			return
@@ -783,18 +773,14 @@ load_scene_textures_from_gltf :: proc(
                 texture := upload_bc3_texture(
                     img,
                     compressed,
-                    &upload_arena,
-                    upload_sems[i].sem,
-                    &upload_sems[i].value,
+                    &upload_arena
                 )
 
                 if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
             } else {
                 texture := upload_texture(
                     img,
-                    &upload_arena,
-                    upload_sems[i].sem,
-                    &upload_sems[i].value,
+                    &upload_arena
                 )
 
                 if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
@@ -818,7 +804,7 @@ load_scene_textures_from_gltf :: proc(
         texture := image_to_texture[info.image_index]
         sync.mutex_unlock(&mutex)
 
-		gpu.semaphore_wait(upload_sems[i].sem, upload_sems[i].value)
+		gpu.semaphore_wait(upload_sem, upload_sem_val)
 
 		sync.guard(&mutex)
 
@@ -844,15 +830,13 @@ load_scene_textures_from_gltf :: proc(
 upload_texture :: proc(
 	img: ^image.Image,
 	upload_arena: ^gpu.Arena,
-	upload_sem: gpu.Semaphore,
-	upload_sem_value: ^u64,
 ) -> gpu.Owned_Texture {
 	staging := gpu.arena_alloc_raw(upload_arena, len(img.pixels.buf), 1, 16)
 	runtime.mem_copy(staging.cpu, raw_data(img.pixels.buf), len(img.pixels.buf))
 
 	sync.guard(&mutex)
-	upload_sem_value_old := upload_sem_value^
-	upload_sem_value^ += 2
+	upload_sem_value_old := upload_sem_val
+	upload_sem_val += 2
 
 	texture := gpu.texture_alloc_and_create(
 		{
@@ -874,7 +858,6 @@ upload_texture :: proc(
 		// Upload texture to GPU
 		upload_cmd_buf := gpu.commands_begin(.Transfer)
 		gpu.cmd_copy_to_texture(upload_cmd_buf, texture, staging, texture.mem)
-		gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old)
 		gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
 		gpu.queue_submit(.Transfer, {upload_cmd_buf})
 	}
@@ -942,13 +925,11 @@ upload_bc3_texture :: proc(
     img: ^image.Image,
 	compressed: shared.Block_Compressed_Mips,
 	upload_arena: ^gpu.Arena,
-	upload_sem: gpu.Semaphore,
-	upload_sem_value: ^u64,
 ) -> gpu.Owned_Texture {
 	sync.guard(&mutex)
 
-	upload_sem_value_old := upload_sem_value^
-	upload_sem_value^ += 1
+	upload_sem_value_old := upload_sem_val
+	upload_sem_val += 1
 
     upload_cmd_buf := gpu.commands_begin(.Transfer)
     staging := gpu.arena_alloc_raw(upload_arena, len(compressed.data), 1, 16)
@@ -980,7 +961,6 @@ upload_bc3_texture :: proc(
 
     gpu.cmd_copy_mips_to_texture(upload_cmd_buf, texture, staging, regions)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .Transfer, {})
-    gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old)
     gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
     gpu.queue_submit(.Transfer, {upload_cmd_buf})
 	return texture
