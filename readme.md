@@ -109,7 +109,7 @@ Like most things in life, this is not without its tradeoffs:
 2) Shader arguments are all passed via a single pointer. This is very flexible and easy to work with, but it can also prevent some prefetching/optimizations that drivers usually implement with standard bindings and vertex buffers. This will probably make shaders in general slightly slower. How much impact this will have, I can't say for sure right now. On the other hand, working with a nicer and better API can make optimization easier and quicker.
 3) If you're trying to debug the examples using RenderDoc, and you can't, that's because debugging of descriptor buffers is simply broken on AMD Windows due to a driver bug, and this project uses them. [The bug has been reported](https://github.com/baldurk/renderdoc/issues/2880) on July 2025, so you can either switch to an NVidia card or annoy AMD if you want this fixed (half joking).
 
-## Shading Language
+## Shaders
 
 I think people should be able to use whichever shading language they want, but there are a few limitations due to the nature of this project. **no_gfx** uses pointers as the main way to pass data to shaders, so shading languages that don't support pointers at all are sadly disqualified - this includes HLSL. Other than that, any shading language can be used as long as a `.spirv` binary is produced with the following format (pseudocode, GLSL-like):
 ```glsl
@@ -132,6 +132,8 @@ layout(push_constant) uniform Push
     void* compute_data
 };
 ```
+
+All examples provide [Slang](https://github.com/shader-slang/slang/issues/8902) variants of their shaders so you can get an idea of how to use an existing shading language with **no_gfx**.
 
 With that said - much like graphics APIs, shading languages also carry a lot of historical baggage and cruft. For this reason, I think it's valuable to work on a shading language that is tailor-made to these assumptions and that doesn't require any boilerplate. Here's a small sample of `musl`:
 
@@ -169,5 +171,6 @@ Third-party binaries are already included.
 - To build all of the examples: `examples/build.bat` or `examples/build.sh`
 - Or you can run them directly: `odin run examples/1_triangle -debug -out=build/1_triangle.exe`
 - To rebuild the shader binaries: `examples/build_shaders.bat` or `examples/build_shaders.sh`
+- To rebuild the shader binaries using Slang: `examples/build_shaders_slang.bat` or `examples/build_shaders_slang.sh`
 
 Feel free to [contact me on discord](https://discord.com/users/leon2058) for any questions.
