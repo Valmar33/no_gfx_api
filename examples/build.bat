@@ -15,11 +15,9 @@ for /D %%F in (*) do (
     )
 )
 
-goto comment
 for /D %%F in (third_party/*) do (
     odin build third_party/%%F %flags% -debug -out:../build/third_party/%%F.exe
     if errorlevel 1 (
         exit /b 1
     )
 )
-:comment

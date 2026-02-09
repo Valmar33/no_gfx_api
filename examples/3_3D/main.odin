@@ -58,8 +58,8 @@ main :: proc()
         sample_count = 1,
         usage = { .Depth_Stencil_Attachment },
     }
-    depth_texture := gpu.alloc_and_create_texture(depth_desc)
-    defer gpu.free_and_destroy_texture(&depth_texture)
+    depth_texture := gpu.texture_alloc_and_create(depth_desc)
+    defer gpu.texture_free_and_destroy(&depth_texture)
 
     vert_shader := gpu.shader_create(#load("shaders/test.vert.spv", []u32), .Vertex)
     frag_shader := gpu.shader_create(#load("shaders/test.frag.spv", []u32), .Fragment)
@@ -68,7 +68,7 @@ main :: proc()
         gpu.shader_destroy(frag_shader)
     }
 
-    upload_arena := gpu.arena_init(1024 * 1024 * 1024)
+    upload_arena := gpu.arena_init()
     defer gpu.arena_destroy(&upload_arena)
 
     scene, _, gltf_data := shared.load_scene_gltf(Sponza_Scene)
@@ -83,22 +83,21 @@ main :: proc()
         delete(meshes_gpu)
     }
 
-    queue := gpu.get_queue(.Main)
-    upload_cmd_buf := gpu.commands_begin(queue)
+    upload_cmd_buf := gpu.commands_begin(.Main)
     for mesh in scene.meshes {
         append(&meshes_gpu, upload_mesh(&upload_arena, upload_cmd_buf, mesh))
     }
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     now_ts := sdl.GetPerformanceCounter()
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(10 * 1024 * 1024)
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
-    defer gpu.semaphore_destroy(&frame_sem)
+    defer gpu.semaphore_destroy(frame_sem)
     for true
     {
         proceed := shared.handle_window_events(window)
@@ -118,13 +117,18 @@ main :: proc()
         }
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
-            gpu.queue_wait_idle(queue)
+            gpu.queue_wait_idle(.Main)
             gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
             depth_desc.dimensions.x = u32(window_size_x)
             depth_desc.dimensions.y = u32(window_size_y)
-            gpu.free_and_destroy_texture(&depth_texture)
-            depth_texture = gpu.alloc_and_create_texture(depth_desc)
+            gpu.texture_free_and_destroy(&depth_texture)
+            depth_texture = gpu.texture_alloc_and_create(depth_desc)
         }
+
+        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
+
+        frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
+        gpu.arena_free_all(frame_arena)
 
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
@@ -134,11 +138,7 @@ main :: proc()
         aspect_ratio := f32(window_size_x) / f32(window_size_y)
         view_to_proj := linalg.matrix4_perspective_f32(math.RAD_PER_DEG * 59.0, aspect_ratio, 0.1, 1000.0, false)
 
-        frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
-
-        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
-
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = { 0.7, 0.7, 0.7, 1.0 } }
@@ -166,24 +166,23 @@ main :: proc()
             #assert(size_of(Vert_Data) == 8+8+64+64+64+64)
             verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
             verts_data.cpu^ = {
-                positions = mesh.pos,
-                normals = mesh.normals,
+                positions = mesh.pos.gpu.ptr,
+                normals = mesh.normals.gpu.ptr,
                 model_to_world = intr.matrix_flatten(instance.transform),
                 model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                 world_to_view = intr.matrix_flatten(world_to_view),
                 view_to_proj = intr.matrix_flatten(view_to_proj),
             }
 
-            gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, mesh.indices, mesh.idx_count, 1)
+            gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, {}, mesh.indices, mesh.idx_count, 1)
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.cmd_add_signal_semaphore(cmd_buf, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf })
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
-
-        gpu.arena_free_all(frame_arena)
     }
 
     gpu.wait_idle()
@@ -191,10 +190,10 @@ main :: proc()
 
 Mesh_GPU :: struct
 {
-    pos: rawptr,
-    normals: rawptr,
-    uvs: rawptr,
-    indices: rawptr,
+    pos: gpu.slice_t([4]f32),
+    normals: gpu.slice_t([4]f32),
+    uvs: gpu.slice_t([2]f32),
+    indices: gpu.slice_t(u32),
     idx_count: u32,
 }
 
@@ -203,25 +202,25 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     assert(len(mesh.pos) == len(mesh.normals))
     assert(len(mesh.pos) == len(mesh.uvs))
 
-    positions_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.pos))
-    normals_staging := gpu.arena_alloc_array(upload_arena, [4]f32, len(mesh.normals))
-    uvs_staging := gpu.arena_alloc_array(upload_arena, [2]f32, len(mesh.uvs))
-    indices_staging := gpu.arena_alloc_array(upload_arena, u32, len(mesh.indices))
+    positions_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.pos))
+    normals_staging := gpu.arena_alloc(upload_arena, [4]f32, len(mesh.normals))
+    uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.uvs))
+    indices_staging := gpu.arena_alloc(upload_arena, u32, len(mesh.indices))
     copy(positions_staging.cpu, mesh.pos[:])
     copy(normals_staging.cpu, mesh.normals[:])
     copy(uvs_staging.cpu, mesh.uvs[:])
     copy(indices_staging.cpu, mesh.indices[:])
 
     res: Mesh_GPU
-    res.pos = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.pos))
-    res.normals = gpu.mem_alloc_typed_gpu([4]f32, len(mesh.normals))
-    res.uvs = gpu.mem_alloc_typed_gpu([2]f32, len(mesh.uvs))
-    res.indices = gpu.mem_alloc_typed_gpu(u32, len(mesh.indices))
+    res.pos = gpu.mem_alloc([4]f32, len(mesh.pos), gpu.Memory.GPU)
+    res.normals = gpu.mem_alloc([4]f32, len(mesh.normals), gpu.Memory.GPU)
+    res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), gpu.Memory.GPU)
+    res.indices = gpu.mem_alloc(u32, len(mesh.indices), gpu.Memory.GPU)
     res.idx_count = u32(len(mesh.indices))
-    gpu.cmd_mem_copy(cmd_buf, positions_staging.gpu, res.pos, u64(len(mesh.pos) * size_of(mesh.pos[0])))
-    gpu.cmd_mem_copy(cmd_buf, normals_staging.gpu, res.normals, u64(len(mesh.normals) * size_of(mesh.normals[0])))
-    gpu.cmd_mem_copy(cmd_buf, uvs_staging.gpu, res.uvs, u64(len(mesh.uvs) * size_of(mesh.uvs[0])))
-    gpu.cmd_mem_copy(cmd_buf, indices_staging.gpu, res.indices, u64(len(mesh.indices) * size_of(mesh.indices[0])))
+    gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging, len(mesh.pos))
+    gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging, len(mesh.normals))
+    gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging, len(mesh.uvs))
+    gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging, len(mesh.indices))
     return res
 }
 

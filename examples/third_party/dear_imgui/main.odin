@@ -53,10 +53,10 @@ main :: proc()
 
     Vertex :: struct { pos: [4]f32, color: [4]f32 }
 
-    upload_arena := gpu.arena_init(1024 * 1024)
+    upload_arena := gpu.arena_init()
     defer gpu.arena_destroy(&upload_arena)
 
-    verts := gpu.arena_alloc_array(&upload_arena, Vertex, 3)
+    verts := gpu.arena_alloc(&upload_arena, Vertex, 3)
     verts.cpu[0].pos = { -0.5,  0.5, 0.0, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0, 0.0 }
@@ -64,31 +64,32 @@ main :: proc()
     verts.cpu[1].color = { 0.0, 1.0, 0.0, 0.0 }
     verts.cpu[2].color = { 0.0, 0.0, 1.0, 0.0 }
 
-    indices := gpu.arena_alloc_array(&upload_arena, u32, 3)
+    indices := gpu.arena_alloc(&upload_arena, u32, 3)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
+    verts_local := gpu.mem_alloc(Vertex, 3, gpu.Memory.GPU)
+    indices_local := gpu.mem_alloc(u32, 3, gpu.Memory.GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
-    texture_heap := gpu.mem_alloc(size_of(gpu.Texture_Descriptor) * 65536, alloc_type = .Descriptors)
-    defer gpu.mem_free(texture_heap)
-    sampler_heap := gpu.mem_alloc(size_of(gpu.Sampler_Descriptor) * 10, alloc_type = .Descriptors)
-    defer gpu.mem_free(sampler_heap)
+    texture_heap_size := gpu.texture_view_descriptor_size()
+    texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(texture_heap)
+    sampler_heap_size := gpu.sampler_descriptor_size()
+    sampler_heap := gpu.mem_alloc_raw(sampler_heap_size, 10, 64, alloc_type = .Descriptors)
+    defer gpu.mem_free_raw(sampler_heap)
 
     gpu.set_sampler_desc(sampler_heap, 0, gpu.sampler_descriptor({}))
 
-    queue := gpu.get_queue(.Main)
-    upload_cmd_buf := gpu.commands_begin(queue)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
+    upload_cmd_buf := gpu.commands_begin(.Main)
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, 3)
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, 3)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     imgui_ctx := init_imgui(window)
     defer {
@@ -100,11 +101,11 @@ main :: proc()
     now_ts := sdl.GetPerformanceCounter()
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
-    defer gpu.semaphore_destroy(&frame_sem)
+    defer gpu.semaphore_destroy(frame_sem)
     for true
     {
         proceed := handle_window_events(window)
@@ -150,7 +151,7 @@ main :: proc()
 
         swapchain := gpu.swapchain_acquire_next()
 
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = background_color }
@@ -159,15 +160,13 @@ main :: proc()
 
         // Render triangle
         gpu.cmd_set_shaders(cmd_buf, vert_shader, frag_shader)
-        textures := gpu.host_to_device_ptr(texture_heap)
-        samplers := gpu.host_to_device_ptr(sampler_heap)
-        gpu.cmd_set_desc_heap(cmd_buf, textures, nil, samplers, nil)
+        gpu.cmd_set_desc_heap(cmd_buf, texture_heap, {}, sampler_heap, {})
         Vert_Data :: struct {
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
-        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, indices_local, 3, 1)
+        verts_data.cpu.verts = verts_local.gpu.ptr
+        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, {}, indices_local, 3, 1)
 
         // Render ImGui on top
         draw_data := imgui.get_draw_data()
@@ -177,9 +176,10 @@ main :: proc()
         }
 
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.cmd_add_signal_semaphore(cmd_buf, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf })
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
 
         gpu.arena_free_all(frame_arena)
@@ -222,13 +222,11 @@ init_imgui :: proc(window: ^sdl.Window) -> ^imgui.Context
 
     imgui_impl_sdl3.init_for_vulkan(window)
 
-    queue := gpu.get_queue(.Main)
-
     vk_instance := gpu.get_vulkan_instance()
     vk_physical_device := gpu.get_vulkan_physical_device()
     vk_device := gpu.get_vulkan_device()
-    vk_queue := gpu.get_vulkan_queue(queue)
-    vk_queue_family := gpu.get_vulkan_queue_family(queue)
+    vk_queue := gpu.get_vulkan_queue(.Main)
+    vk_queue_family := gpu.get_vulkan_queue_family(.Main)
     swapchain_image_count := gpu.get_swapchain_image_count()
 
     imgui_vk_init_info: imgui_impl_vulkan.Init_Info = {}
