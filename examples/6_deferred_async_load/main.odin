@@ -836,7 +836,7 @@ upload_texture :: proc(
 
 	sync.guard(&mutex)
 	upload_sem_value_old := upload_sem_val
-	upload_sem_val += 2
+	upload_sem_val += 1
 
 	texture := gpu.texture_alloc_and_create(
 		{
@@ -904,7 +904,6 @@ upload_texture :: proc(
         gpu.cmd_barrier(upload_cmd_buf, .Transfer, .Transfer, {})
 		gpu.cmd_copy_mips_to_texture(upload_cmd_buf, texture, staging, regions)
 		gpu.cmd_add_wait_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 1)
-		gpu.cmd_add_signal_semaphore(upload_cmd_buf, upload_sem, upload_sem_value_old + 2)
 		gpu.queue_submit(.Transfer, {upload_cmd_buf})
 
 		return texture
@@ -914,7 +913,6 @@ upload_texture :: proc(
 		gpu.cmd_barrier(mipmaps_cmd_buf, .Transfer, .Transfer, {})
 		gpu.cmd_generate_mipmaps(mipmaps_cmd_buf, texture)
 		gpu.cmd_add_wait_semaphore(mipmaps_cmd_buf, upload_sem, upload_sem_value_old + 1)
-		gpu.cmd_add_signal_semaphore(mipmaps_cmd_buf, upload_sem, upload_sem_value_old + 2)
 		gpu.queue_submit(.Main, {mipmaps_cmd_buf})
 	}
 
