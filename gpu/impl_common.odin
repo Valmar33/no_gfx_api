@@ -10,16 +10,10 @@ import "base:runtime"
 import intr "base:intrinsics"
 
 // Implementation of a thread-safe resource pool to be used for no_gfx_api handles
-Resource_Block_Size :: 256
-Resource_Block :: struct($T: typeid)
-{
-    res: [Resource_Block_Size]Resource(T),
-}
-
 Resource_Pool :: struct($Handle_T: typeid, $Info_T: typeid) where size_of(Handle_T) == 8
 {
-    blocks: [dynamic]^Resource_Block(Info_T),  // Makes pointers to elements stable.
-    res_count: u32,  // Number of resources added to the "blocks" data structure.
+    arena: vmem.Arena,  // Makes pointers to elements stable.
+    resources: [dynamic]Resource(Info_T),  // Uses 'arena'. Allocation is never moved so no need to lock on read.
     freelist: [dynamic]u32,
     lock: sync.Atomic_Mutex,
     init: bool,
@@ -50,7 +44,11 @@ pool_init :: proc(pool: ^Resource_Pool($Handle_T, $Info_T))
 {
     pool.init = true
 
-    // Reserve element 0
+    err := vmem.arena_init_static(&pool.arena, mem.Gigabyte)
+    ensure(err == nil)
+    pool.resources = make([dynamic]Resource(Info_T), allocator = vmem.arena_allocator(&pool.arena))
+
+    // Reserve element 0 for the nil handle.
     pool_add(pool, Info_T {}, {})
 }
 
@@ -65,9 +63,7 @@ pool_check :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T, n
 
     key := transmute(Resource_Key) handle
 
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.resources[key.idx])
     if key.gen != el.gen {
         log.error("'%v' handle is used after it has been freed, or it's corrupted in some other way.", name, location = loc)
         return false
@@ -85,10 +81,7 @@ pool_check_no_message :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: 
     }
 
     key := transmute(Resource_Key) handle
-
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.resources[key.idx])
     if key.gen != el.gen {
         return false
     }
@@ -99,10 +92,9 @@ pool_check_no_message :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: 
 pool_get_alive_list :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), arena: runtime.Allocator) -> []Resource(Info_T)
 {
     res := make([dynamic]Resource(Info_T), allocator = arena)
-    for i in 1..<pool.res_count
+    for i in 1..<len(pool.resources)
     {
-        block_idx, el_idx := pool_get_idx(i)
-        el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
+        el := intr.volatile_load(&pool.resources[i])
         if el.alive do append(&res, el)
     }
 
@@ -115,9 +107,7 @@ pool_get :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> 
     assert(handle != {})
     key := transmute(Resource_Key) handle
 
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := intr.volatile_load(&pool.blocks[block_idx].res[el_idx])
+    el := intr.volatile_load(&pool.resources[key.idx])
     assert(key.gen == el.gen)
     return el.info
 }
@@ -128,28 +118,24 @@ pool_get_mut :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
 {
     assert(pool.init)
     assert(handle != {})
+
     key := transmute(Resource_Key) handle
-
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := &pool.blocks[block_idx].res[el_idx]
+    el := &pool.resources[key.idx]
     el_gen := intr.volatile_load(&el.gen)
     assert(key.gen == el_gen)
-    return &el.info, &pool.blocks[block_idx].res[el_idx].lock
+    return &el.info, &pool.resources[key.idx].lock
 }
 
 pool_get_lock :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T) -> ^sync.Benaphore
 {
     assert(pool.init)
     assert(handle != {})
+
     key := transmute(Resource_Key) handle
-
-    block_idx, el_idx := pool_get_idx(key.idx)
-
-    el := &pool.blocks[block_idx].res[el_idx]
+    el := &pool.resources[key.idx]
     el_gen := intr.volatile_load(&el.gen)
     assert(key.gen == el_gen)
-    return &pool.blocks[block_idx].res[el_idx].lock
+    return &pool.resources[key.idx].lock
 }
 
 pool_add :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, meta: Resource_Metadata) -> Handle_T
@@ -161,15 +147,14 @@ pool_add :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), info: Info_T, meta: R
     if len(pool.freelist) > 0 {
         free_idx = pop(&pool.freelist)
     } else {
-        pool_append_internal(pool, Resource(Info_T) {})
-        free_idx = pool.res_count - 1
+        append(&pool.resources, Resource(Info_T) {})
+        free_idx = u32(len(pool.resources)) - 1
     }
 
-    block_idx, el_idx := pool_get_idx(free_idx)
-    pool.blocks[block_idx].res[el_idx].info = info
-    gen := pool.blocks[block_idx].res[el_idx].gen
-    pool.blocks[block_idx].res[el_idx].alive = true
-    pool.blocks[block_idx].res[el_idx].meta = meta
+    pool.resources[free_idx].info = info
+    gen := pool.resources[free_idx].gen
+    pool.resources[free_idx].alive = true
+    pool.resources[free_idx].meta = meta
 
     key := Resource_Key { idx = free_idx, gen = gen }
     return transmute(Handle_T) key
@@ -183,8 +168,7 @@ pool_remove :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
 
     key := transmute(Resource_Key) handle
 
-    block_idx, el_idx := pool_get_idx(key.idx)
-    el := &pool.blocks[block_idx].res[el_idx]
+    el := &pool.resources[key.idx]
     el.alive = false
     assert(key.gen == el.gen)
 
@@ -194,36 +178,16 @@ pool_remove :: proc(pool: ^Resource_Pool($Handle_T, $Info_T), handle: Handle_T)
 
 pool_destroy :: proc(pool: ^Resource_Pool($Handle_T, $Info_T))
 {
-    assert(init)
-    sync.guard(&lock)
+    assert(pool.init)
+    sync.guard(&pool.lock)
 
-    for block in blocks {
-        free(block)
-    }
-    delete(blocks)
-    blocks = {}
-    freelist = nil
-    init = false
-}
+    delete(pool.resources)
+    delete(pool.freelist)
+    vmem.arena_destroy(&pool.arena)
 
-@(private="file")
-pool_get_idx :: #force_inline proc(idx: u32) -> (block_idx: u32, el_idx: u32)
-{
-    return idx / Resource_Block_Size, idx % Resource_Block_Size
-}
-
-@(private="file")
-pool_append_internal :: #force_inline proc(pool: ^Resource_Pool($Handle_T, $Info_T), el: Resource(Info_T))
-{
-    do_alloc_new_block := pool.res_count % Resource_Block_Size == 0
-    pool.res_count += 1
-    if do_alloc_new_block {
-        new_block := new(Resource_Block(Info_T))
-        append(&pool.blocks, new_block)
-    }
-
-    block_idx, el_idx := pool_get_idx(pool.res_count - 1)
-    pool.blocks[block_idx].res[el_idx] = el
+    pool.resources = {}
+    pool.freelist = nil
+    pool.init = false
 }
 
 // Scratch arena implementation

@@ -846,6 +846,14 @@ _cleanup :: proc(loc := #caller_location)
                 log.error(strings.to_string(sb), location = loc)
             }
         }
+
+        // Destroy pools
+        pool_destroy(&ctx.allocs)
+        pool_destroy(&ctx.textures)
+        pool_destroy(&ctx.bvhs)
+        pool_destroy(&ctx.shaders)
+        pool_destroy(&ctx.command_buffers)
+        pool_destroy(&ctx.semaphores)
     }
 
     if can_destroy_device {
