@@ -263,8 +263,8 @@ gpuptr :: struct { ptr: rawptr, _impl: [2]u64 }
 ptr :: struct { cpu: rawptr, using gpu: gpuptr }
 null :: gpuptr {}
 mem_alloc_raw: proc(#any_int el_size, #any_int el_count, #any_int align: i64, mem_type := Memory.Default, alloc_type := Allocation_Type.Default, loc := #caller_location) -> ptr : _mem_alloc_raw
-mem_suballoc: proc(p: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr : _mem_suballoc
-mem_free_raw: proc(p: gpuptr, loc := #caller_location) : _mem_free_raw
+mem_suballoc: proc(addr: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr : _mem_suballoc
+mem_free_raw: proc(addr: gpuptr, loc := #caller_location) : _mem_free_raw
 
 // Textures
 texture_size_and_align: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64) : _texture_size_and_align
@@ -352,12 +352,12 @@ cmd_build_tlas: proc(cmd_buf: Command_Buffer, bvh: BVH, bvh_storage, scratch_sto
 
 // Memory
 
-ptr_apply_offset :: #force_inline proc(p: ^ptr, #any_int offset: i64)
+ptr_apply_offset :: #force_inline proc(addr: ^ptr, #any_int offset: i64)
 {
-    if p.cpu != nil {
-        p.cpu = auto_cast(uintptr(p.cpu) + uintptr(offset))
+    if addr.cpu != nil {
+        addr.cpu = auto_cast(uintptr(addr.cpu) + uintptr(offset))
     }
-    p.gpu.ptr = auto_cast(uintptr(p.gpu.ptr) + uintptr(offset))
+    addr.gpu.ptr = auto_cast(uintptr(addr.gpu.ptr) + uintptr(offset))
 }
 
 ptr_t :: struct($T: typeid)
@@ -395,14 +395,14 @@ mem_alloc :: proc {
     mem_alloc_slice,
 }
 
-mem_free_ptr :: #force_inline proc(p: ptr_t($T))
+mem_free_ptr :: #force_inline proc(addr: ptr_t($T))
 {
-    mem_free_raw(p.gpu)
+    mem_free_raw(addr.gpu)
 }
 
-mem_free_slice :: #force_inline proc(p: slice_t($T))
+mem_free_slice :: #force_inline proc(addr: slice_t($T))
 {
-    mem_free_raw(p.gpu)
+    mem_free_raw(addr.gpu)
 }
 
 mem_free :: proc {

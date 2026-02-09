@@ -64,7 +64,7 @@ Context :: struct
     command_buffers: Resource_Pool(Command_Buffer, Command_Buffer_Info),
     semaphores: Resource_Pool(Semaphore, vk.Semaphore),
 
-    cmd_bufs_timelines: [Queue]Timeline,
+    cmd_bufs_sem_vals: [Queue]Semaphore_Value,
 
     // Swapchain
     swapchain: Swapchain,
@@ -132,13 +132,6 @@ Alloc_Info :: struct
     align: u32,
     buf_size: vk.DeviceSize,
     alloc_type: Allocation_Type,
-}
-
-@(private="file")
-Timeline :: struct
-{
-    sem: vk.Semaphore,
-    val: u64,
 }
 
 @(private="file")
@@ -645,22 +638,14 @@ _init :: proc(validation := true, loc := #caller_location)
     }, &ctx.vma_allocator)
     assert(ok_vma == .SUCCESS)
 
-    // Init cmd_bufs_timelines
+    // Init cmd_bufs_sem_vals
     {
         for type in Queue
         {
-            next_sem: rawptr
-            next_sem = &vk.SemaphoreTypeCreateInfo {
-                sType = .SEMAPHORE_TYPE_CREATE_INFO,
-                pNext = next_sem,
-                semaphoreType = .TIMELINE,
-                initialValue = 0,
+            ctx.cmd_bufs_sem_vals[type] = {
+                sem = semaphore_create(0),
+                val = 0,
             }
-            sem_ci := vk.SemaphoreCreateInfo {
-                sType = .SEMAPHORE_CREATE_INFO,
-                pNext = next_sem
-            }
-            vk_check(vk.CreateSemaphore(ctx.device, &sem_ci, nil, &ctx.cmd_bufs_timelines[type].sem))
         }
     }
 
@@ -796,8 +781,8 @@ _cleanup :: proc(loc := #caller_location)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_graphics, nil)
     vk.DestroyPipelineLayout(ctx.device, ctx.common_pipeline_layout_compute, nil)
 
-    for semaphore in ctx.cmd_bufs_timelines {
-        vk.DestroySemaphore(ctx.device, semaphore.sem, nil)
+    for semaphore in ctx.cmd_bufs_sem_vals {
+        semaphore_destroy(semaphore.sem)
     }
 
     vma.destroy_allocator(ctx.vma_allocator)
@@ -1038,12 +1023,13 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
         sync.guard(&ctx.lock)
 
         if cmd_buf_info, r_lock := pool_get_mut(&ctx.command_buffers, cmd_buf); sync.guard(r_lock) {
-            cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info.queue].val, 1) + 1
+            cmd_buf_info.timeline_value = sync.atomic_add(&ctx.cmd_bufs_sem_vals[cmd_buf_info.queue].val, 1) + 1
         }
 
         cmd_buf_info := pool_get(&ctx.command_buffers, cmd_buf)
         vk_cmd_buf := cmd_buf_info.handle
-        queue_sem := ctx.cmd_bufs_timelines[cmd_buf_info.queue].sem
+        queue_sem := ctx.cmd_bufs_sem_vals[cmd_buf_info.queue].sem
+        vk_queue_sem := pool_get(&ctx.semaphores, queue_sem)
 
         wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
         next: rawptr
@@ -1075,7 +1061,7 @@ _swapchain_present :: proc(queue: Queue, sem_wait: Semaphore, wait_value: u64)
             signalSemaphoreCount = 2,
             pSignalSemaphores = raw_data([]vk.Semaphore {
                 present_semaphore,
-                queue_sem,
+                vk_queue_sem,
             }),
         }
 
@@ -1210,25 +1196,25 @@ _mem_alloc_raw :: proc(#any_int el_size, #any_int el_count, #any_int align: i64,
     return p
 }
 
-_mem_suballoc :: proc(p: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr
+_mem_suballoc :: proc(addr: ptr, offset, el_size, el_count: i64, loc := #caller_location) -> ptr
 {
     // TODO: Add suballocation to a suballocation list in allocs.
     // This lets us do bounds checking on arena allocated pointers for example.
-    suballoc_p := p
+    suballoc_p := addr
     ptr_apply_offset(&suballoc_p, offset)
     return suballoc_p
 }
 
-_mem_free_raw :: proc(p: gpuptr, loc := #caller_location)
+_mem_free_raw :: proc(addr: gpuptr, loc := #caller_location)
 {
     if ctx.validation
     {
         ok := true
-        ok &= check_ptr(p, "p", loc)
+        ok &= check_ptr(addr, "addr", loc)
         if !ok do return
     }
 
-    alloc := transmute(Alloc_Handle) p._impl[0]
+    alloc := transmute(Alloc_Handle) addr._impl[0]
     alloc_info := pool_get(&ctx.allocs, alloc)
     vma.destroy_buffer(ctx.vma_allocator, alloc_info.buf_handle, alloc_info.allocation)
     pool_remove(&ctx.allocs, alloc)
@@ -2979,8 +2965,10 @@ vk_acquire_cmd_buf :: proc(queue: Queue) -> Command_Buffer
 
         assert(!cmd_buf_info.recording)
 
+        vk_sem := pool_get(&ctx.semaphores, ctx.cmd_bufs_sem_vals[queue].sem)
+
         current_semaphore_value: u64
-        vk_check(vk.GetSemaphoreCounterValue(ctx.device, ctx.cmd_bufs_timelines[queue].sem, &current_semaphore_value))
+        vk_check(vk.GetSemaphoreCounterValue(ctx.device, vk_sem, &current_semaphore_value))
 
         if current_semaphore_value >= cmd_buf_info.timeline_value {
             cmd_buf_info.recording = true
@@ -3033,7 +3021,7 @@ vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
     for cmd_buf in cmd_bufs
     {
         cmd_buf_info_mut, _ := pool_get_mut(&ctx.command_buffers, cmd_buf)
-        intr.volatile_store(&cmd_buf_info_mut.timeline_value, sync.atomic_add(&ctx.cmd_bufs_timelines[cmd_buf_info_mut.queue].val, 1) + 1)
+        intr.volatile_store(&cmd_buf_info_mut.timeline_value, sync.atomic_add(&ctx.cmd_bufs_sem_vals[cmd_buf_info_mut.queue].val, 1) + 1)
     }
 
     scratch, _ := acquire_scratch()
@@ -3046,7 +3034,8 @@ vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
         sync.guard(cmd_buf_lock)
 
         queue = cmd_buf_info.queue
-        queue_sem := ctx.cmd_bufs_timelines[queue].sem
+        queue_sem := ctx.cmd_bufs_sem_vals[queue].sem
+        vk_queue_sem := pool_get(&ctx.semaphores, queue_sem)
         assert(cmd_buf_info.recording)
         assert(cmd_buf_info.thread_id == sync.current_thread_id())
 
@@ -3069,7 +3058,7 @@ vk_submit_cmd_bufs :: proc(cmd_bufs: []Command_Buffer)
             signal_values[i] = signal_sem.val
         }
 
-        signal_sems[signal_count - 1] = queue_sem
+        signal_sems[signal_count - 1] = vk_queue_sem
         signal_values[signal_count - 1] = cmd_buf_info.timeline_value
 
         to_submit := make([]vk.CommandBuffer, 1, allocator = scratch)

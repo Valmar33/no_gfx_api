@@ -88,7 +88,7 @@ main :: proc()
     texture_desc := gpu.texture_view_descriptor(output_texture, { format = .RGBA8_Unorm })
 
     // Allocate texture heap for fragment shader
-    texture_heap_size := gpu.texture_rw_view_descriptor_size()
+    texture_heap_size := gpu.texture_view_descriptor_size()
     texture_heap := gpu.mem_alloc_raw(texture_heap_size, 65536, 64, alloc_type = .Descriptors)
     defer gpu.mem_free_raw(texture_heap)
     gpu.set_texture_desc(texture_heap, texture_id, texture_desc)

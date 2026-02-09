@@ -12,7 +12,7 @@ import sdl "vendor:sdl3"
 Start_Window_Size_X :: 1000
 Start_Window_Size_Y :: 1000
 Frames_In_Flight :: 3
-Example_Name :: "Indirect Multi Triangles"
+Example_Name :: "Indirect Triangles"
 Num_Triangles :: 32
 
 Use_Indirect_Multi :: true
@@ -129,7 +129,7 @@ main :: proc()
 
     upload_cmd_buf := gpu.commands_begin(.Main)
     gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(indices.cpu))
     gpu.cmd_mem_copy(upload_cmd_buf, count_local, count)
     gpu.cmd_mem_copy(upload_cmd_buf, indirect_data_local, indirect_data, Num_Triangles)
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})

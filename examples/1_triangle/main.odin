@@ -75,8 +75,8 @@ main :: proc()
     }
 
     upload_cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts_local.cpu))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(verts_local.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(indices.cpu))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
     gpu.queue_submit(.Main, { upload_cmd_buf })
 
