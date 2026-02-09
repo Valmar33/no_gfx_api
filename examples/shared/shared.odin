@@ -573,7 +573,7 @@ load_scene_gltf :: proc(
 
 	texture_infos: [dynamic]Gltf_Texture_Info
 
-	log.info(fmt.tprintf("Collecting texture info from %v textures in GLTF", len(data.textures)))
+	log.infof("Collecting texture info from %v textures in GLTF", len(data.textures))
 
 	// Build a map from texture index to image index for quick lookup
 	texture_to_image: map[int]int
@@ -582,19 +582,17 @@ load_scene_gltf :: proc(
 		if texture.source != nil {
 			image_idx := texture.source.?
 			if int(image_idx) >= len(data.images) {
-				log.error(
-					fmt.tprintf(
-						"Texture %v references invalid image index %v (only %v images available)",
-						i,
-						image_idx,
-						len(data.images),
-					),
+				log.errorf(
+					"Texture %v references invalid image index %v (only %v images available)",
+					i,
+					image_idx,
+					len(data.images),
 				)
 				continue
 			}
 			texture_to_image[i] = int(image_idx)
 		} else {
-			log.info(fmt.tprintf("Texture %v has no source, skipping", i))
+			log.infof("Texture %v has no source, skipping", i)
 		}
 	}
 
@@ -808,7 +806,7 @@ load_texture_from_gltf :: proc(
 		case []byte:
 			image_bytes = v
 		case string:
-			log.error(fmt.tprintf("String URIs not supported for texture loading: %v", v))
+			log.errorf("String URIs not supported for texture loading: %v", v)
 			panic("String URIs not supported for texture loading")
 		case:
 			log.error("Image has neither buffer_view nor valid URI")
@@ -824,12 +822,10 @@ load_texture_from_gltf :: proc(
 	options := image.Options{.alpha_add_if_missing}
 	img, err := image.load_from_bytes(image_bytes, options)
 	if err != nil {
-		log.error(
-			fmt.tprintf(
-				"Failed to load image from bytes: %v, image size: %v bytes",
-				err,
-				len(image_bytes),
-			),
+		log.errorf(
+			"Failed to load image from bytes: %v, image size: %v bytes",
+			err,
+			len(image_bytes),
 		)
 		panic("Could not load texture from GLTF image.")
 	}

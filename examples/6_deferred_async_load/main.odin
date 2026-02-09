@@ -222,9 +222,7 @@ main :: proc() {
 					break
 				}
 
-				log.debug(
-					fmt.tprintf("Creating texture loader for chunk %v of %v", current_chunk_start, len(data.texture_infos)),
-				)
+				log.debugf("Creating texture loader for chunk %v of %v", current_chunk_start, len(data.texture_infos))
 
 				load_scene_textures_from_gltf(
 					data.texture_infos[current_chunk_start:current_chunk_end],
@@ -735,12 +733,10 @@ load_scene_textures_from_gltf :: proc(
 		}
 
 		if info.mesh_id >= u32(len(scene.meshes)) {
-			log.error(
-				fmt.tprintf(
-					"Invalid mesh_id %v (only %v meshes available)",
-					info.mesh_id,
-					len(scene.meshes),
-				),
+			log.errorf(
+				"Invalid mesh_id %v (only %v meshes available)",
+				info.mesh_id,
+				len(scene.meshes),
 			)
 			continue
 		}
@@ -788,13 +784,11 @@ load_scene_textures_from_gltf :: proc(
 
 			sync.one_shot_event_signal(event)
 
-			log.info(
-				fmt.tprintf(
-					"Loaded texture for mesh %v, type %v, texture_id %v",
-					info.mesh_id,
-					info.texture_type,
-					texture_idx,
-				),
+			log.infof(
+				"Loaded texture for mesh %v, type %v, texture_id %v",
+				info.mesh_id,
+				info.texture_type,
+				texture_idx,
 			)
 		}
 	}
