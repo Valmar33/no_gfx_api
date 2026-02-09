@@ -268,7 +268,7 @@ float3 sample_hemisphere_cos(float3 normal, float2 ruv)
     float r = sqrt(1.0 - z * z);
     float phi = 2.0 * pi * ruv.x;
     float3 local_direction = float3(r * cos(phi), r * sin(phi), z);
-    return normalize(mul(basis_fromz(normal), float4(local_direction, 0.0)).xyz);
+    return normalize(mul(float4(local_direction, 0.0), basis_fromz(normal)).xyz);
 }
 
 float sample_hemisphere_cos_pdf(float3 normal, float3 direction)
