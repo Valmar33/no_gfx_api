@@ -499,7 +499,7 @@ codegen_expr :: proc(expression: ^Ast_Expr)
             if is_ident
             {
                 text := call_ident.token.text
-                if text == "sample"
+                if text == "texture_sample"
                 {
                     assert(len(expr.args) == 3)
 
@@ -513,15 +513,13 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
                     is_intrinsic = true
                 }
-                else if text == "imageStore"
+                else if text == "texture_store"
                 {
                     assert(len(expr.args) == 3)
 
-                    // For compute shaders, we can use direct indexing without nonuniformEXT
-                    // since we're accessing by index from the data struct
-                    write("imageStore(_res_textures_rw_[")
+                    write("imageStore(_res_textures_rw_[nonuniformEXT(")
                     codegen_expr(expr.args[0])
-                    write("], ivec2(")
+                    write(")], ivec2(")
                     codegen_expr(expr.args[1])
                     write("), ")
                     codegen_expr(expr.args[2])
@@ -529,7 +527,7 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
                     is_intrinsic = true
                 }
-                else if text == "imageLoad"
+                else if text == "texture_load"
                 {
                     assert(len(expr.args) == 2)
 
@@ -547,7 +545,11 @@ codegen_expr :: proc(expression: ^Ast_Expr)
 
             if is_intrinsic do break
 
-            codegen_expr(expr.target)
+            if expr.glsl_name == "" {
+                codegen_expr(expr.target)
+            } else {
+                write(expr.glsl_name)
+            }
             write("(")
             for arg, i in expr.args
             {

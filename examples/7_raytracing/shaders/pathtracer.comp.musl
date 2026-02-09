@@ -50,12 +50,12 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
         if data.accum_counter > 1
         {
             weight := 1.0 / float(data.accum_counter);
-            prev_color := imageLoad(data.output_texture_id, global_invocation_id.xy).xyz;
+            prev_color := texture_load(data.output_texture_id, global_invocation_id.xy).xyz;
             color = prev_color * (1 - weight) + color * weight;
             color = max(color, vec3(0, 0, 0));
         }
 
-        imageStore(data.output_texture_id, global_invocation_id.xy, vec4(color, 1));
+        texture_store(data.output_texture_id, global_invocation_id.xy, vec4(color, 1));
     }
 }
 
@@ -308,8 +308,8 @@ sample_matte_pdf :: (color: vec3, normal: vec3, outgoing: vec3, incoming: vec3) 
 
 is_finite :: (v: vec3) -> bool
 {
-    is_x_finite := (floatBitsToInt(v.x) & 0x7F800000) != 0x7F800000;
-    is_y_finite := (floatBitsToInt(v.y) & 0x7F800000) != 0x7F800000;
-    is_z_finite := (floatBitsToInt(v.z) & 0x7F800000) != 0x7F800000;
+    is_x_finite := (float_bits_to_int(v.x) & 0x7F800000) != 0x7F800000;
+    is_y_finite := (float_bits_to_int(v.y) & 0x7F800000) != 0x7F800000;
+    is_z_finite := (float_bits_to_int(v.z) & 0x7F800000) != 0x7F800000;
     return is_x_finite && is_y_finite && is_z_finite;
 }

@@ -6,5 +6,5 @@ Data :: struct
 
 main :: (uv: vec2 @in_loc(0), data: ^Data @data) -> vec4 @out_loc(0)
 {
-    return sample(data.texture_id, data.sampler_id, uv);
+    return texture_sample(data.texture_id, data.sampler_id, uv);
 }

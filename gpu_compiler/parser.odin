@@ -52,6 +52,7 @@ Ast_Decl :: struct
 {
     using base: Ast_Node,
     name: string,
+    glsl_name: string,
     type: ^Ast_Type,
     attr: Maybe(Ast_Attribute),
 }
@@ -174,6 +175,8 @@ Ast_Call :: struct
     using base_expr: Ast_Expr,
     target: ^Ast_Expr,
     args: []^Ast_Expr,
+
+    glsl_name: string,  // If target is just an ident.
 }
 
 Ast_Ident_Expr :: struct

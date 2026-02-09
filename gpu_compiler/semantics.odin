@@ -379,6 +379,7 @@ typecheck_expr :: proc(using c: ^Checker, expression: ^Ast_Expr)
                                     ast.used_features += { .Raytracing }
                                 }
 
+                                expr.glsl_name = intr.glsl_name
                                 break expr_switch
                             }
                         }
@@ -528,9 +529,9 @@ INTRINSICS: [dynamic]^Ast_Decl
 add_intrinsics :: proc()
 {
     // Resource access
-    add_intrinsic("sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
-    add_intrinsic("imageStore", { &TEXTUREID_TYPE, &VEC2_TYPE, &VEC4_TYPE }, { "tex_idx", "coord", "value" }, nil)
-    add_intrinsic("imageLoad", { &TEXTUREID_TYPE, &VEC2_TYPE }, { "tex_idx", "coord" }, &VEC4_TYPE)
+    add_intrinsic("texture_sample", { &TEXTUREID_TYPE, &SAMPLERID_TYPE, &VEC2_TYPE }, { "tex_idx", "sampler_idx", "uv" }, &VEC4_TYPE)
+    add_intrinsic("texture_store", { &TEXTUREID_TYPE, &VEC2_TYPE, &VEC4_TYPE }, { "tex_idx", "coord", "value" }, nil)
+    add_intrinsic("texture_load", { &TEXTUREID_TYPE, &VEC2_TYPE }, { "tex_idx", "coord" }, &VEC4_TYPE)
 
     // Raytracing
     ray_result_type := add_intrinsic_struct("Ray_Result", { &UINT_TYPE, &FLOAT_TYPE, &UINT_TYPE, &UINT_TYPE, &VEC2_TYPE, &BOOL_TYPE, &MAT4_TYPE, &MAT4_TYPE }, { "kind", "t", "instance_idx", "primitive_idx", "barycentrics", "front_face", "object_to_world", "world_to_object" })
@@ -542,7 +543,7 @@ add_intrinsics :: proc()
     add_intrinsic("rayquery_result", { &RAYQUERY_TYPE }, { "rq" }, ray_result_type)
 
     // Conversion
-    add_intrinsic("floatBitsToInt", { &FLOAT_TYPE }, { "x" }, &UINT_TYPE)
+    add_intrinsic("float_bits_to_int", { &FLOAT_TYPE }, { "x" }, &UINT_TYPE, glsl_name = "floatBitsToInt")
 
     // Constructors
     add_intrinsic("uint", { &FLOAT_TYPE }, { "x" }, &UINT_TYPE)
@@ -634,12 +635,28 @@ add_intrinsics :: proc()
     add_intrinsic("clamp", { &VEC2_TYPE, &VEC2_TYPE, &VEC2_TYPE }, { "a", "b", "t" }, &VEC2_TYPE)
     add_intrinsic("clamp", { &VEC3_TYPE, &VEC3_TYPE, &VEC3_TYPE }, { "a", "b", "t" }, &VEC3_TYPE)
     add_intrinsic("clamp", { &VEC4_TYPE, &VEC4_TYPE, &VEC4_TYPE }, { "a", "b", "t" }, &VEC4_TYPE)
+    add_intrinsic("dfdx_coarse", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE, glsl_name = "dFdxCoarse")
+    add_intrinsic("dfdx_coarse", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE, glsl_name = "dFdxCoarse")
+    add_intrinsic("dfdx_coarse", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE, glsl_name = "dFdxCoarse")
+    add_intrinsic("dfdx_coarse", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE, glsl_name = "dFdxCoarse")
+    add_intrinsic("dfdx_fine", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE, glsl_name = "dFdxFine")
+    add_intrinsic("dfdx_fine", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE, glsl_name = "dFdxFine")
+    add_intrinsic("dfdx_fine", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE, glsl_name = "dFdxFine")
+    add_intrinsic("dfdx_fine", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE, glsl_name = "dFdxFine")
+    add_intrinsic("dfdy_coarse", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE, glsl_name = "dFdyCoarse")
+    add_intrinsic("dfdy_coarse", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE, glsl_name = "dFdyCoarse")
+    add_intrinsic("dfdy_coarse", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE, glsl_name = "dFdyCoarse")
+    add_intrinsic("dfdy_coarse", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE, glsl_name = "dFdyCoarse")
+    add_intrinsic("dfdy_fine", { &FLOAT_TYPE }, { "x" }, &FLOAT_TYPE, glsl_name = "dFdyFine")
+    add_intrinsic("dfdy_fine", { &VEC2_TYPE }, { "x" }, &VEC2_TYPE, glsl_name = "dFdyFine")
+    add_intrinsic("dfdy_fine", { &VEC3_TYPE }, { "x" }, &VEC3_TYPE, glsl_name = "dFdyFine")
+    add_intrinsic("dfdy_fine", { &VEC4_TYPE }, { "x" }, &VEC4_TYPE, glsl_name = "dFdyFine")
 
     // Matrix manipulation
     add_intrinsic("transpose", { &MAT4_TYPE }, { "m" }, &MAT4_TYPE)
 }
 
-add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil)
+add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^Ast_Type = nil, glsl_name := "")
 {
     assert(len(args) == len(names))
 
@@ -657,6 +674,7 @@ add_intrinsic :: proc(name: string, args: []^Ast_Type, names: []string, ret: ^As
     decl.type.kind = .Proc
     decl.type.args = arg_decls
     decl.type.ret = ret
+    decl.glsl_name = glsl_name
     append(&INTRINSICS, decl)
 }
 
