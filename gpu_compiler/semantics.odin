@@ -1,4 +1,6 @@
 
+#+feature using-stmt
+
 package main
 
 import "base:runtime"

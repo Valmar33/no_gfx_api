@@ -51,10 +51,10 @@ main :: proc()
 
     Vertex :: struct { pos: [3]f32, color: [3]f32 }
 
-    arena := gpu.arena_init(1024 * 1024)
+    arena := gpu.arena_init()
     defer gpu.arena_destroy(&arena)
 
-    verts := gpu.arena_alloc_array(&arena, Vertex, 3)
+    verts := gpu.arena_alloc(&arena, Vertex, 3)
     verts.cpu[0].pos = { -0.5,  0.5, 0.0 }
     verts.cpu[1].pos = {  0.0, -0.5, 0.0 }
     verts.cpu[2].pos = {  0.5,  0.5, 0.0 }
@@ -62,34 +62,32 @@ main :: proc()
     verts.cpu[1].color = { 0.0, 1.0, 0.0 }
     verts.cpu[2].color = { 0.0, 0.0, 1.0 }
 
-    indices := gpu.arena_alloc_array(&arena, u32, 3)
+    indices := gpu.arena_alloc(&arena, u32, 3)
     indices.cpu[0] = 0
     indices.cpu[1] = 2
     indices.cpu[2] = 1
 
-    verts_local := gpu.mem_alloc_typed_gpu(Vertex, 3)
-    indices_local := gpu.mem_alloc_typed_gpu(u32, 3)
+    verts_local := gpu.mem_alloc(Vertex, 3, gpu.Memory.GPU)
+    indices_local := gpu.mem_alloc(u32, 3, gpu.Memory.GPU)
     defer {
         gpu.mem_free(verts_local)
         gpu.mem_free(indices_local)
     }
 
-    queue := gpu.get_queue(.Main)
-
-    upload_cmd_buf := gpu.commands_begin(queue)
-    gpu.cmd_mem_copy(upload_cmd_buf, verts.gpu, verts_local, 3 * size_of(Vertex))
-    gpu.cmd_mem_copy(upload_cmd_buf, indices.gpu, indices_local, 3 * size_of(u32))
+    upload_cmd_buf := gpu.commands_begin(.Main)
+    gpu.cmd_mem_copy(upload_cmd_buf, verts_local, verts, len(verts.cpu))
+    gpu.cmd_mem_copy(upload_cmd_buf, indices_local, indices, len(indices.cpu))
     gpu.cmd_barrier(upload_cmd_buf, .Transfer, .All, {})
-    gpu.queue_submit(queue, { upload_cmd_buf })
+    gpu.queue_submit(.Main, { upload_cmd_buf })
 
     now_ts := sdl.GetPerformanceCounter()
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init(1024 * 1024)
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
-    defer gpu.semaphore_destroy(&frame_sem)
+    defer gpu.semaphore_destroy(frame_sem)
     for true
     {
         proceed := handle_window_events(window)
@@ -110,16 +108,16 @@ main :: proc()
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y {
             gpu.swapchain_resize({ u32(max(0, window_size_x)), u32(max(0, window_size_y)) })
         }
+        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
 
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
         delta_time := min(max_delta_time, f32(f64((now_ts - last_ts)*1000) / f64(ts_freq)) / 1000.0)
 
         frame_arena := &frame_arenas[next_frame % Frames_In_Flight]
+        gpu.arena_free_all(frame_arena)
 
-        swapchain := gpu.swapchain_acquire_next()  // Blocks CPU until at least one frame is available.
-
-        cmd_buf := gpu.commands_begin(queue)
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_begin_render_pass(cmd_buf, {
             color_attachments = {
                 { texture = swapchain, clear_color = changing_color(delta_time) }
@@ -130,16 +128,15 @@ main :: proc()
             verts: rawptr,
         }
         verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
-        verts_data.cpu.verts = verts_local
+        verts_data.cpu^ = { verts = verts_local.gpu.ptr }
 
-        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data.gpu, nil, indices_local, 3, 1)
+        gpu.cmd_draw_indexed_instanced(cmd_buf, verts_data, {}, indices_local, 3, 1)
         gpu.cmd_end_render_pass(cmd_buf)
-        gpu.queue_submit(queue, { cmd_buf }, frame_sem, next_frame)
+        gpu.cmd_add_signal_semaphore(cmd_buf, frame_sem, next_frame)
+        gpu.queue_submit(.Main, { cmd_buf })
 
-        gpu.swapchain_present(queue, frame_sem, next_frame)
+        gpu.swapchain_present(.Main, frame_sem, next_frame)
         next_frame += 1
-
-        gpu.arena_free_all(frame_arena)
     }
 
     gpu.wait_idle()
