@@ -136,7 +136,7 @@ float4 raymarch(ComputeData* data, uint3 global_invocation_id)
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void computeMain(uint3 global_invocation_id : SV_DispatchThreadID, ComputePipelineData<ComputeData> pipeline_data)
+void computeMain(uint3 global_invocation_id : SV_DispatchThreadID, uniform ComputePipelineData<ComputeData> pipeline_data)
 {
     ComputeData* data = pipeline_data.data;
     // Out of bounds check: only execute if thread is within resolution
