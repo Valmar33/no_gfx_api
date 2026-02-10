@@ -100,6 +100,7 @@ to_vk_texture_format :: proc(format: Texture_Format) -> vk.Format
         case .RGBA8_SRGB: return .R8G8B8A8_SRGB
         case .D32_Float: return .D32_SFLOAT
         case .RGBA16_Float: return .R16G16B16A16_SFLOAT
+        case .RGBA32_Float: return .R32G32B32A32_SFLOAT
         case .BC1_RGBA_Unorm: return .BC1_RGBA_UNORM_BLOCK
         case .BC3_RGBA_Unorm: return .BC3_UNORM_BLOCK
         case .BC7_RGBA_Unorm: return .BC7_UNORM_BLOCK
