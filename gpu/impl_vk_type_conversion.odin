@@ -97,6 +97,7 @@ to_vk_texture_format :: proc(format: Texture_Format) -> vk.Format
         case .Default: panic("Implementation bug!")
         case .RGBA8_Unorm: return .R8G8B8A8_UNORM
         case .BGRA8_Unorm: return .B8G8R8A8_UNORM
+        case .RGBA8_SRGB: return .R8G8B8A8_SRGB
         case .D32_Float: return .D32_SFLOAT
         case .RGBA16_Float: return .R16G16B16A16_SFLOAT
         case .BC1_RGBA_Unorm: return .BC1_RGBA_UNORM_BLOCK

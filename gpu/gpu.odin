@@ -33,6 +33,7 @@ Texture_Format :: enum {
 	Default = 0,
 	RGBA8_Unorm,
 	BGRA8_Unorm,
+	RGBA8_SRGB,
 	D32_Float,
 	RGBA16_Float,
 	BC1_RGBA_Unorm,
