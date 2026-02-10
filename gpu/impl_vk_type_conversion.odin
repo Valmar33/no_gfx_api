@@ -258,3 +258,29 @@ to_vk_bvh_flags :: proc(hint: BVH_Hint, caps: BVH_Capabilities) -> vk.BuildAccel
 
     return flags
 }
+
+to_vk_blend_op :: proc(op: Blend_Op) -> vk.BlendOp
+{
+    switch op
+    {
+        case .Add:          return .ADD
+        case .Subtract:     return .SUBTRACT
+        case .Rev_Subtract: return .REVERSE_SUBTRACT
+        case .Min:          return .MIN
+        case .Max:          return .MAX
+    }
+    return {}
+}
+
+to_vk_blend_factor :: proc(blend: Blend_Factor) -> vk.BlendFactor
+{
+    switch blend
+    {
+        case .Zero:      return .ZERO
+        case .One:       return .ONE
+        case .Src_Color: return .SRC_COLOR
+        case .Dst_Color: return .DST_COLOR
+        case .Src_Alpha: return .SRC_ALPHA
+    }
+    return {}
+}

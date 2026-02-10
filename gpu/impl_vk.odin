@@ -2352,12 +2352,12 @@ _cmd_set_blend_state :: proc(cmd_buf: Command_Buffer, state: Blend_State, loc :=
     vk.CmdSetColorBlendEnableEXT(vk_cmd_buf, 0, 1, &enable_b32)
 
     vk.CmdSetColorBlendEquationEXT(vk_cmd_buf, 0, 1, &vk.ColorBlendEquationEXT {
-        srcColorBlendFactor = {},
-        dstColorBlendFactor = {},
-        colorBlendOp        = {},
-        srcAlphaBlendFactor = {},
-        dstAlphaBlendFactor = {},
-        alphaBlendOp        = {},
+        srcColorBlendFactor = to_vk_blend_factor(state.src_color_factor),
+        dstColorBlendFactor = to_vk_blend_factor(state.dst_color_factor),
+        colorBlendOp        = to_vk_blend_op(state.color_op),
+        srcAlphaBlendFactor = to_vk_blend_factor(state.src_alpha_factor),
+        dstAlphaBlendFactor = to_vk_blend_factor(state.dst_alpha_factor),
+        alphaBlendOp        = to_vk_blend_op(state.alpha_op),
     })
 
     color_write_mask := transmute(vk.ColorComponentFlags) cast(u32) state.color_write_mask

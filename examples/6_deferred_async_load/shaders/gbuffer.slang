@@ -65,6 +65,8 @@ GBufferOutput fragmentMain(
 {
     GBufferOutput gbuffer_out;
     float4 base_color = sampleTexture(data.frag.base_color_map, data.frag.base_color_map_sampler, uv);
+    if(base_color.a < 0.1) discard;
+
     float4 normal_map_sample = sampleTexture(data.frag.normal_map, data.frag.normal_map_sampler, uv);
 
     // TODO: Use normal_map_sample with tangent/bitangent when available.

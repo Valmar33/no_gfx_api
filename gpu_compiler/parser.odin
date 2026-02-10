@@ -201,6 +201,7 @@ Any_Statement :: union
     ^Ast_For,
     ^Ast_Break,
     ^Ast_Continue,
+    ^Ast_Discard,
 }
 
 Ast_Statement :: struct
@@ -265,6 +266,7 @@ Ast_For :: struct
 
 Ast_Break :: struct { using base_statement: Ast_Statement }
 Ast_Continue :: struct { using base_statement: Ast_Statement }
+Ast_Discard :: struct { using base_statement: Ast_Statement }
 
 // Types
 
@@ -608,6 +610,13 @@ parse_statement :: proc(using p: ^Parser) -> ^Ast_Statement
     else if tokens[at].type == .Break
     {
         stmt := make_statement(p, Ast_Break)
+        node = stmt
+        at += 1
+        required_token(p, .Semi)
+    }
+    else if tokens[at].type == .Discard
+    {
+        stmt := make_statement(p, Ast_Discard)
         node = stmt
         at += 1
         required_token(p, .Semi)

@@ -22,6 +22,7 @@ main :: (normal_vert: vec4 @in_loc(0), uv: vec2 @in_loc(1), world_pos: vec4 @in_
 {
     // Sample base color texture
     base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
+    if base_color.w < 0.1 { discard; }
 
     // Sample normal map and transform to world space
     // TODO: Properly transform normal map from tangent space to world space

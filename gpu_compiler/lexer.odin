@@ -66,6 +66,7 @@ Token_Type :: enum
     Break,
     Continue,
     Return,
+    Discard,
 
     // Literals
     IntLit,
@@ -84,6 +85,7 @@ Keywords := map[string]Token_Type {
     "for"    = .For,
     "break"  = .Break,
     "continue" = .Continue,
+    "discard"  = .Discard,
     "return" = .Return,
     "true"   = .True,
     "false"  = .False,
@@ -398,6 +400,7 @@ token_type_to_string :: proc(type: Token_Type) -> string
         case .For:          return "for"
         case .Break:        return "break"
         case .Continue:     return "continue"
+        case .Discard:      return "discard"
         case .Return:       return "return"
         case .IntLit:       return "integer literal"
         case .FloatLit:     return "floating point literal"

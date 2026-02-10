@@ -204,6 +204,9 @@ typecheck_statement :: proc(using c: ^Checker, statement: ^Ast_Statement)
         case ^Ast_Continue:
         {
         }
+        case ^Ast_Discard:
+        {
+        }
         case ^Ast_Return:
         {
             c.proc_ret = stmt

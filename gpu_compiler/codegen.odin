@@ -397,6 +397,11 @@ codegen_statement :: proc(statement: ^Ast_Statement, insert_semi := true)
             write("break")
             if insert_semi do write(";")
         }
+        case ^Ast_Discard:
+        {
+            write("discard")
+            if insert_semi do write(";")
+        }
         case ^Ast_Return:
         {
             if is_main
