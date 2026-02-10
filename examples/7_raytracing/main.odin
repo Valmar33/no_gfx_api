@@ -83,9 +83,6 @@ main :: proc()
     output_desc := gpu.Texture_Desc {
         type = .D2,
         dimensions = { u32(window_size_x), u32(window_size_y), 1 },
-        mip_count = 1,
-        layer_count = 1,
-        sample_count = 1,
         format = .RGBA16_Float,
         usage = { .Storage, .Sampled },
     }

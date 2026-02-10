@@ -1231,19 +1231,11 @@ _mem_free_raw :: proc(addr: gpuptr, loc := #caller_location)
 // Textures
 _texture_size_and_align :: proc(desc: Texture_Desc, loc := #caller_location) -> (size: u64, align: u64)
 {
-    image_ci := vk.ImageCreateInfo {
-        sType = .IMAGE_CREATE_INFO,
-        imageType = to_vk_texture_type(desc.type),
-        format = to_vk_texture_format(desc.format),
-        extent = vk.Extent3D { desc.dimensions.x, desc.dimensions.y, desc.dimensions.z },
-        mipLevels = desc.mip_count,
-        arrayLayers = desc.layer_count,
-        samples = to_vk_sample_count(desc.sample_count),
-        usage = to_vk_texture_usage(desc.usage),
-        initialLayout = .UNDEFINED,
-    }
+    desc_clean := texture_desc_cleanup(desc)
 
-    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc.format == .D32_Float else { .COLOR }
+    image_ci := to_vk_image_create_info(desc_clean)
+
+    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc_clean.format == .D32_Float else { .COLOR }
 
     info := vk.DeviceImageMemoryRequirements {
         sType = .DEVICE_IMAGE_MEMORY_REQUIREMENTS,
@@ -1267,25 +1259,18 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
         if !ok do return {}
     }
 
+    desc_clean := texture_desc_cleanup(desc)
+
     vk_signal_sem := pool_get(&ctx.semaphores, signal_sem) if signal_sem != {} else vk.Semaphore(0)
     queue_to_use := queue
     alloc_info := pool_get(&ctx.allocs, transmute(Alloc_Handle) storage._impl[0])
 
     image: vk.Image
     offset := uintptr(storage.ptr) - uintptr(alloc_info.gpu)
-    vk_check(vma.create_aliasing_image2(ctx.vma_allocator, alloc_info.allocation, vk.DeviceSize(offset), {
-        sType = .IMAGE_CREATE_INFO,
-        imageType = to_vk_texture_type(desc.type),
-        format = to_vk_texture_format(desc.format),
-        extent = vk.Extent3D { desc.dimensions.x, desc.dimensions.y, desc.dimensions.z },
-        mipLevels = desc.mip_count,
-        arrayLayers = desc.layer_count,
-        samples = to_vk_sample_count(desc.sample_count),
-        usage = to_vk_texture_usage(desc.usage) + { .TRANSFER_DST },
-        initialLayout = .UNDEFINED,
-    }, &image))
+    image_ci := to_vk_image_create_info(desc_clean)
+    vk_check(vma.create_aliasing_image2(ctx.vma_allocator, alloc_info.allocation, vk.DeviceSize(offset), image_ci, &image))
 
-    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc.format == .D32_Float else { .COLOR }
+    plane_aspect: vk.ImageAspectFlags = { .DEPTH } if desc_clean.format == .D32_Float else { .COLOR }
 
     // Transition layout from UNDEFINED to GENERAL
     {
@@ -1304,8 +1289,8 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
             image = image,
             subresourceRange = {
                 aspectMask = plane_aspect,
-                levelCount = desc.mip_count,
-                layerCount = desc.layer_count,
+                levelCount = desc_clean.mip_count,
+                layerCount = desc_clean.layer_count,
             },
             oldLayout = .UNDEFINED,
             newLayout = .GENERAL,
@@ -1328,9 +1313,9 @@ _texture_create :: proc(desc: Texture_Desc, storage: gpuptr, queue: Queue = .Mai
     tex_info := Texture_Info { image, {} }
     sync.guard(&ctx.lock)
     return {
-        dimensions = desc.dimensions,
-        format = desc.format,
-        mip_count = desc.mip_count,
+        dimensions = desc_clean.dimensions,
+        format = desc_clean.format,
+        mip_count = desc_clean.mip_count,
         handle = pool_add(&ctx.textures, tex_info, { name = name, created_at = loc } )
     }
 }

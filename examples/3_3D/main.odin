@@ -53,9 +53,6 @@ main :: proc()
     depth_desc := gpu.Texture_Desc {
         dimensions = { u32(window_size_x), u32(window_size_y), 1 },
         format = .D32_Float,
-        mip_count = 1,
-        layer_count = 1,
-        sample_count = 1,
         usage = { .Depth_Stencil_Attachment },
     }
     depth_texture := gpu.texture_alloc_and_create(depth_desc)

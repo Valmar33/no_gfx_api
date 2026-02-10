@@ -219,11 +219,7 @@ load_texture :: proc(bytes: []byte, upload_arena: ^gpu.Arena, cmd_buf: gpu.Comma
     runtime.mem_copy(staging.cpu, raw_data(img.pixels.buf), len(img.pixels.buf))
 
     texture := gpu.texture_alloc_and_create({
-        type = .D2,
         dimensions = { u32(img.width), u32(img.height), 1 },
-        mip_count = 1,
-        layer_count = 1,
-        sample_count = 1,
         format = .RGBA8_Unorm,
         usage = { .Sampled },
     })

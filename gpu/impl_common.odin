@@ -293,3 +293,14 @@ fatal_error :: proc(fmt: string, args: ..any, location := #caller_location)
     log.fatalf(fmt, ..args, location = location)
     runtime.panic("")
 }
+
+// Struct cleanup
+
+texture_desc_cleanup :: #force_inline proc(desc: Texture_Desc) -> Texture_Desc
+{
+    res := desc
+    res.mip_count = max(1, res.mip_count)
+    res.layer_count = max(1, res.layer_count)
+    res.sample_count = max(1, res.sample_count)
+    return res
+}

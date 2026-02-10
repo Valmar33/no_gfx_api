@@ -563,18 +563,12 @@ create_gbuffer_textures :: proc(
 	gbuffer_desc := gpu.Texture_Desc {
 		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
 		format       = .RGBA8_Unorm,
-		mip_count    = 1,
-		layer_count  = 1,
-		sample_count = 1,
 		usage        = {.Color_Attachment, .Sampled, .Storage},
 	}
 
 	depth_desc := gpu.Texture_Desc {
 		dimensions   = {u32(window_size_x), u32(window_size_y), 1},
 		format       = .D32_Float,
-		mip_count    = 1,
-		layer_count  = 1,
-		sample_count = 1,
 		usage        = {.Depth_Stencil_Attachment},
 	}
 
@@ -652,9 +646,6 @@ create_magenta_texture :: proc(
 		{
 			type = .D2,
 			dimensions = {1, 1, 1},
-			mip_count = 1,
-			layer_count = 1,
-			sample_count = 1,
 			format = .RGBA8_Unorm,
 			usage = {.Sampled},
 		},
@@ -837,8 +828,6 @@ upload_texture :: proc(
 			type = .D2,
 			dimensions = {u32(img.width), u32(img.height), 1},
 			mip_count = u32(math.log2(f32(max(img.width, img.height)))),
-			layer_count = 1,
-			sample_count = 1,
 			format = .RGBA8_Unorm,
 			usage = { .Sampled, .Transfer_Src },
 		},
@@ -932,8 +921,6 @@ upload_bc3_texture :: proc(
             type = .D2,
             dimensions = {u32(img.width), u32(img.height), 1},
             mip_count = compressed.mip_count,
-            layer_count = 1,
-            sample_count = 1,
             format = .BC3_RGBA_Unorm,
             usage = { .Sampled, .Transfer_Src },
         },
