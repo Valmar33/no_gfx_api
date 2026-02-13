@@ -133,7 +133,7 @@ layout(push_constant) uniform Push
 };
 ```
 
-All examples provide [Slang](https://github.com/shader-slang/slang/issues/8902) variants of their shaders so you can get an idea of how to use an existing shading language with **no_gfx**.
+All examples provide [Slang](https://shader-slang.org/) variants of their shaders so you can get an idea of how to use an existing shading language with **no_gfx**.
 
 With that said - much like graphics APIs, shading languages also carry a lot of historical baggage and cruft. For this reason, I think it's valuable to work on a shading language that is tailor-made to these assumptions and that doesn't require any boilerplate. Here's a small sample of `musl`:
 
