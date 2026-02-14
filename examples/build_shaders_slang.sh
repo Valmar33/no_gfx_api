@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+cd "$(dirname "$0")"
+
 folders=(
     1_triangle
     2_textures
@@ -10,7 +12,7 @@ folders=(
     7_raytracing
 )
 
-txt_white=$(tput setaf 7)
+txt_white="$(tput setaf 7)"
 txt_blue="$(tput setaf 4)"
 
 for folder in "${folders[@]}"; do
@@ -18,7 +20,7 @@ for folder in "${folders[@]}"; do
     rm -f "${folder}"/shaders/*.glsl
     
     for shader in "${folder}"/shaders/*.slang; do
-        echo "${txt_blue}Trying to build ${shader} ...${txt_white}"
+        echo "${txt_blue}Compiling ${shader} ...${txt_white}"
         
         if [ -f "${shader%.*}.vert.musl" ]; then
             slangc -target spirv -target glsl -fvk-use-scalar-layout -force-glsl-scalar-layout -entry vertexMain -stage vertex "${shader%.*}.slang" -o "${shader%.*}.vert.spv" -o "${shader%.*}.vert.glsl"
